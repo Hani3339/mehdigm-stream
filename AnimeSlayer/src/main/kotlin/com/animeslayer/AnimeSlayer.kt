@@ -1,5 +1,6 @@
 package com.animeslayer
 
+import android.util.Log
 import com.lagradost.cloudstream3.DubStatus
 import com.lagradost.cloudstream3.HomePageList
 import com.lagradost.cloudstream3.HomePageResponse
@@ -40,6 +41,7 @@ class AnimeSlayer : MainAPI() {
 
     private val apiBase = "$mainUrl/anime/public"
     private val fwUrl = "$mainUrl/la/public/api/fw"
+    private val TAG = "AnimeSlayer"
 
     private val browserUA =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
@@ -210,6 +212,7 @@ class AnimeSlayer : MainAPI() {
                 data = mapOf("n" to fwParam, "inf" to "")
             ).text
         }.getOrNull() ?: return false
+        Log.i(TAG, "fw($fwParam) -> $body")
 
         val arr = runCatching { JSONArray(body) }.getOrNull() ?: return false
         val links = (0 until arr.length())
@@ -217,8 +220,10 @@ class AnimeSlayer : MainAPI() {
             .map { it.replace("\\/", "/") }
 
         var found = false
-        for (url in links.distinct()) {
-            if (handleLink(url, subtitleCallback, callback)) found = true
+        for (link in links.distinct()) {
+            val ok = handleLink(link, subtitleCallback, callback)
+            Log.i(TAG, "  ${if (ok) "OK  " else "FAIL"} $link")
+            if (ok) found = true
         }
         return found
     }
@@ -228,19 +233,61 @@ class AnimeSlayer : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        if (looksLikeMedia(url)) {
-            emitMedia(url, mainUrl, callback)
+        val link = when {
+            url.startsWith("http://ok.ru") -> url.replaceFirst("http://", "https://")
+            else -> url
+        }
+
+        // Direct media files served straight from the fw response.
+        if (looksLikeMedia(link)) {
+            emitMedia(link, mainUrl, callback)
             return true
         }
 
         val extracted = try {
-            loadExtractor(url, mainUrl, subtitleCallback) { link -> callback(link) }
+            loadExtractor(link, mainUrl, subtitleCallback) { l -> callback(l) }
         } catch (_: Exception) {
             false
         }
         if (extracted) return true
 
-        return tryProviderExtract(url, callback)
+        // StreamTape is handled manually so we never clash with the built-in
+        // extractor (which is tried first above) and still cover `.to` mirrors.
+        if (link.contains("streamtape")) return streamtapeExtract(link, callback)
+
+        return tryProviderExtract(link, callback)
+    }
+
+    /**
+     * Port of the `streamtape()` routine in AnimeSlayer's own `ol6.js`: the
+     * direct `get_video` URL lives in the hidden `#ideoooolink` div, and the
+     * final token is assigned to `#norobotlink` via a split/`substring` trick.
+     */
+    private suspend fun streamtapeExtract(
+        url: String,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val host = runCatching { java.net.URI(url).host }.getOrNull()?.removePrefix("www.")
+            ?: return false
+        val id = url.trimEnd('/').substringAfterLast('/').substringBefore('?')
+        if (id.isBlank()) return false
+
+        val page = runCatching {
+            app.get("https://$host/v/$id", headers = mapOf("User-Agent" to browserUA)).text
+        }.getOrNull() ?: return false
+
+        val norobot = Regex("""document\.getElementById\('norobotlink'\)\.innerHTML\s*=\s*(.*?);""")
+            .find(page)?.groupValues?.get(1) ?: return false
+        val token = Regex("""token=([^&'"]+)""").find(norobot)?.groupValues?.get(1) ?: return false
+        val hidden = Regex("""<div id="ideoooolink"[^>]*>(.*?)</div>""")
+            .find(page)?.groupValues?.get(1) ?: return false
+
+        val path = "/" + hidden.replace("\\/", "/").substringAfter(host, "").trimStart('/')
+        if (path == "/") return false
+        val finalUrl = "https://$host$path" + "&token=$token&dl=1"
+
+        emitMedia(finalUrl, "https://$host/", callback)
+        return true
     }
 
     /**
