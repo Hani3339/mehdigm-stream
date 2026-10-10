@@ -41,6 +41,7 @@ class AnimeSlayer : MainAPI() {
 
     private val apiBase = "$mainUrl/anime/public"
     private val fwUrl = "$mainUrl/la/public/api/fw"
+    private val otherBase = "https://a-reslayer.com"
     private val TAG = "AnimeSlayer"
 
     private val browserUA =
@@ -205,19 +206,8 @@ class AnimeSlayer : MainAPI() {
         val fwParam = data.trim()
         if (fwParam.isBlank()) return false
 
-        val body = runCatching {
-            app.post(
-                fwUrl,
-                headers = apiHeaders,
-                data = mapOf("n" to fwParam, "inf" to "")
-            ).text
-        }.getOrNull() ?: return false
-        Log.i(TAG, "fw($fwParam) -> $body")
-
-        val arr = runCatching { JSONArray(body) }.getOrNull() ?: return false
-        val links = (0 until arr.length())
-            .mapNotNull { arr.optString(it).takeIf { it.isNotBlank() } }
-            .map { it.replace("\\/", "/") }
+        val links = fetchLinks(fwParam)
+        if (links.isEmpty()) return false
 
         var found = false
         for (link in links.distinct()) {
@@ -226,6 +216,46 @@ class AnimeSlayer : MainAPI() {
             if (ok) found = true
         }
         return found
+    }
+
+    /**
+     * Resolve the direct links for `<slug>\<episode>`. The official app uses
+     * `POST /la/public/api/fw`, but that endpoint answers with an empty array
+     * when the POST body is dropped (seen on some carriers). The equivalent
+     * `GET /la/public/api/f` always answers correctly, so it is tried first.
+     */
+    private suspend fun fetchLinks(fwParam: String): List<String> {
+        val enc = URLEncoder.encode(fwParam, "UTF-8")
+
+        for (url in listOf(
+            "$mainUrl/la/public/api/f?n=$enc",
+            "$otherBase/la/public/api/f?n=$enc"
+        )) {
+            val body = runCatching {
+                app.get(url, headers = apiHeaders, cacheTime = 0).text
+            }.getOrNull()
+            Log.i(TAG, "GET $url -> $body")
+            parseLinks(body).takeIf { it.isNotEmpty() }?.let { return it }
+        }
+
+        val body = runCatching {
+            app.post(
+                fwUrl,
+                headers = apiHeaders,
+                data = mapOf("n" to fwParam, "inf" to ""),
+                cacheTime = 0
+            ).text
+        }.getOrNull()
+        Log.i(TAG, "POST $fwUrl -> $body")
+        return parseLinks(body)
+    }
+
+    private fun parseLinks(body: String?): List<String> {
+        if (body.isNullOrBlank()) return emptyList()
+        val arr = runCatching { JSONArray(body) }.getOrNull() ?: return emptyList()
+        return (0 until arr.length())
+            .mapNotNull { arr.optString(it).takeIf { it.isNotBlank() } }
+            .map { it.replace("\\/", "/") }
     }
 
     private suspend fun handleLink(
