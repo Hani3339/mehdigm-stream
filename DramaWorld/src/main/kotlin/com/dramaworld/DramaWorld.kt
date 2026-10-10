@@ -46,21 +46,32 @@ class DramaWorld : MainAPI() {
     companion object {
         private const val TAG = "DramaWorld"
 
-        private const val BASE = "https://test.arabypros.com/api"
         private const val KEY = "4F5A9C3D9A86FA54EACEDDD635185"
         private const val UUID = "d506abfd-9fe2-4b71-b979-feff21bcad13"
         private const val UA = "okhttp/4.12.0"
+
+        // The capture's HTTP/2 `:authority` was `dwapp.arabypros.com` (the `url`
+        // field was a placeholder). Both are the same Cloudflare zone; we probe
+        // candidates and stick with the first that returns JSON.
+        private val BASE_CANDIDATES = listOf(
+            "https://dwapp.arabypros.com/api",
+            "https://test.arabypros.com/api"
+        )
 
         private const val MOVIE_DATA = "dramaworld:movie:"
         private const val EPISODE_DATA = "dramaworld:episode:"
         private const val CHANNEL_DATA = "dramaworld:channel:"
 
-        private const val DETAIL_URL = "https://test.arabypros.com/detail/"
+        private const val MAIN_HOST = "https://dwapp.arabypros.com"
+        private const val DETAIL_URL = "$MAIN_HOST/detail/"
     }
 
     override var name = "DramaWorld"
     override var lang = "ar"
-    override var mainUrl = "https://test.arabypros.com"
+    override var mainUrl = MAIN_HOST
+
+    @Volatile
+    private var resolvedBase: String? = null
 
     override val hasMainPage = true
     override val hasQuickSearch = true
@@ -72,11 +83,36 @@ class DramaWorld : MainAPI() {
 
     // ---------------------------------------------------------------- helpers
 
-    private fun api(path: String): String = "$BASE/$path/$KEY/$UUID/"
+    /** Resolves the live API host by probing the candidates once. */
+    private suspend fun base(): String {
+        resolvedBase?.let { return it }
+        for (candidate in BASE_CANDIDATES) {
+            val ok = try {
+                val text = app.get("$candidate/first/$KEY/$UUID/", headers = headers).text.trim()
+                text.startsWith("{")
+            } catch (e: Throwable) {
+                android.util.Log.i(TAG, "base probe FAILED $candidate -> $e")
+                false
+            }
+            if (ok) {
+                synchronized(this) { if (resolvedBase == null) resolvedBase = candidate }
+                return candidate
+            }
+        }
+        android.util.Log.i(TAG, "base probe: no candidate returned JSON, defaulting to ${BASE_CANDIDATES.first()}")
+        return BASE_CANDIDATES.first()
+    }
+
+    private suspend fun api(path: String): String = "${base()}/$path/$KEY/$UUID/"
 
     private suspend fun getJson(url: String): JSONObject? = try {
         val text = app.get(url, headers = headers).text.trim()
-        if (text.startsWith("{")) JSONObject(text) else null
+        if (text.startsWith("{")) {
+            JSONObject(text)
+        } else {
+            logUnexpected(url, text)
+            null
+        }
     } catch (e: Throwable) {
         android.util.Log.i(TAG, "getJson FAILED $url -> $e")
         null
@@ -84,10 +120,22 @@ class DramaWorld : MainAPI() {
 
     private suspend fun getArray(url: String): JSONArray? = try {
         val text = app.get(url, headers = headers).text.trim()
-        if (text.startsWith("[")) JSONArray(text) else null
+        if (text.startsWith("[")) {
+            JSONArray(text)
+        } else {
+            logUnexpected(url, text)
+            null
+        }
     } catch (e: Throwable) {
         android.util.Log.i(TAG, "getArray FAILED $url -> $e")
         null
+    }
+
+    private fun logUnexpected(url: String, text: String) {
+        val cf = if (text.contains("Just a moment", true) || text.contains("cf-mitigated", true) ||
+            text.contains("challenge-platform", true)
+        ) " [CLOUDFLARE CHALLENGE]" else ""
+        android.util.Log.i(TAG, "non-JSON ($cf) $url -> ${text.take(160)}")
     }
 
     private fun enc(value: String): String =

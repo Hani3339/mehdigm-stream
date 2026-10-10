@@ -1,4 +1,4 @@
-version = 1
+version = 2
 
 cloudstream {
     description = "DramaWorld (عالم الدراما) — أفلام ومسلسلات وقنوات بث مباشر."
