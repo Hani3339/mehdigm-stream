@@ -142,6 +142,45 @@ class DramaWorld : MainAPI() {
         URLEncoder.encode(value, "UTF-8").replace("+", "%20")
 
     /**
+     * The `season/by/serie` endpoint returns seasons with titles that are either
+     * numeric (`الموسم 13`) or Arabic ordinals (`الموسم الثالث`). The order of the
+     * array is not guaranteed to match the season number, so we derive the number
+     * from the title itself rather than from the array index.
+     */
+    private val arabicOrdinals = linkedMapOf(
+        "الحادي عشر" to 11,
+        "الثاني عشر" to 12,
+        "الثالث عشر" to 13,
+        "الرابع عشر" to 14,
+        "الخامس عشر" to 15,
+        "السادس عشر" to 16,
+        "السابع عشر" to 17,
+        "الثامن عشر" to 18,
+        "التاسع عشر" to 19,
+        "العشرون" to 20,
+        "العشرين" to 20,
+        "الأول" to 1,
+        "الاول" to 1,
+        "الثاني" to 2,
+        "الثالث" to 3,
+        "الرابع" to 4,
+        "الخامس" to 5,
+        "السادس" to 6,
+        "السابع" to 7,
+        "الثامن" to 8,
+        "التاسع" to 9,
+        "العاشر" to 10
+    )
+
+    private fun parseSeasonNumber(title: String): Int? {
+        Regex("\\d+").find(title)?.value?.toIntOrNull()?.let { return it }
+        for ((word, number) in arabicOrdinals) {
+            if (title.contains(word)) return number
+        }
+        return null
+    }
+
+    /**
      * Recovers the JSON array hidden in a sources response. The official client
      * looks for the base64 of `[{` ("W3s") and decodes from that offset.
      */
@@ -317,7 +356,10 @@ class DramaWorld : MainAPI() {
         val seasons = getArray(api("season/by/serie/$id")) ?: JSONArray()
         for (s in 0 until seasons.length()) {
             val season = seasons.optJSONObject(s) ?: continue
-            val seasonNumber = s + 1
+            // API array order can differ from the real season number, so trust the
+            // season's own title; fall back to counting down from the newest.
+            val seasonNumber = parseSeasonNumber(season.optString("title"))
+                ?: (seasons.length() - s)
             val eps = season.optJSONArray("episodes") ?: continue
             for (e in 0 until eps.length()) {
                 val ep = eps.optJSONObject(e) ?: continue

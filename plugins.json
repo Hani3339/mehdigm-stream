@@ -240,7 +240,7 @@
   "iconUrl": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/DramaWorld.png",
   "apiVersion": 1,
   "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-   "fileSize": 23779,
+   "fileSize": 24937,
    "status": 1,
    "language": "ar",
    "authors": [
@@ -250,7 +250,7 @@
     "Movie",
     "TvSeries"
    ],
-   "version": 2,
+   "version": 3,
    "internalName": "DramaWorld",
   "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/DramaWorld.cs3",
   "name": "DramaWorld (عالم الدراما)",
