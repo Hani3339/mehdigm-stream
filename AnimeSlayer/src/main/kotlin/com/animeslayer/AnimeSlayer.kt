@@ -182,7 +182,7 @@ class AnimeSlayer : MainAPI() {
             val link = u.optString("episode_url").replace("\\/", "/")
             if (link.isBlank()) continue
             Regex("""[?&]n=([^&]+)""").find(link)?.groupValues?.get(1)?.let {
-                return it.replace("\\/", "/")
+                return normalizeFwParam(it)
             }
             if (cdnFallback == null) {
                 val slug = Regex("""[?&]f=([^&]+)""").find(link)?.groupValues?.get(1)
@@ -191,6 +191,29 @@ class AnimeSlayer : MainAPI() {
             }
         }
         return cdnFallback
+    }
+
+    /**
+     * Accepts whatever the app hands over and reduces it to the `<slug>\<ep>`
+     * token the resolver expects. Handles a plain token, a full resolver URL
+     * (`...?n=slug\ep` / `...?f=slug&e=ep`), and a site-prefixed token such as
+     * `https://anslayer.com/slug\ep` (seen when a stale episode list is reused).
+     */
+    private fun normalizeFwParam(raw: String): String {
+        var s = runCatching { java.net.URLDecoder.decode(raw.trim(), "UTF-8") }
+            .getOrDefault(raw.trim())
+            .replace("\\/", "/")
+
+        Regex("""[?&]n=([^&]+)""").find(s)?.let {
+            return it.groupValues[1].replace("\\/", "/")
+        }
+        val slug = Regex("""[?&]f=([^&]+)""").find(s)?.groupValues?.get(1)
+        val ep = Regex("""[?&]e=([^&]+)""").find(s)?.groupValues?.get(1)?.substringBefore("|")
+        if (slug != null && ep != null) return "$slug\\$ep"
+
+        s = s.replace(Regex("""^[a-zA-Z]+://[^/]+/"""), "")
+        s = s.removePrefix("anime/public/").removePrefix("anime/").removePrefix("la/public/api/f/")
+        return s
     }
 
     // =========================================================================
@@ -203,7 +226,9 @@ class AnimeSlayer : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val fwParam = data.trim()
+        val raw = data.trim()
+        val fwParam = normalizeFwParam(raw)
+        Log.i(TAG, "loadLinks data=$raw -> n=$fwParam")
         if (fwParam.isBlank()) return false
 
         val links = fetchLinks(fwParam)

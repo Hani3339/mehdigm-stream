@@ -260,7 +260,7 @@
   "iconUrl": "https://anslayer.com/favicon.ico",
   "apiVersion": 1,
   "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-  "fileSize": 26418,
+  "fileSize": 26920,
   "status": 1,
   "language": "ar",
   "authors": [
@@ -274,7 +274,7 @@
    "Movie",
    "TvSeries"
   ],
-  "version": 3,
+  "version": 4,
   "internalName": "AnimeSlayer",
   "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/AnimeSlayer.cs3",
   "name": "AnimeSlayer (أنمي سلاير)",
