@@ -235,5 +235,25 @@
   "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/StarDima.cs3",
   "name": "StarDima (ستارديما)",
   "description": "ستارديما — أفلام ومسلسلات وكرتون مدبلج ومترجم."
+ },
+ {
+  "iconUrl": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/DramaWorld.png",
+  "apiVersion": 1,
+  "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
+  "fileSize": 21477,
+  "status": 1,
+  "language": "ar",
+  "authors": [
+   "mehdigm4life"
+  ],
+  "tvTypes": [
+   "Movie",
+   "TvSeries"
+  ],
+  "version": 1,
+  "internalName": "DramaWorld",
+  "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/DramaWorld.cs3",
+  "name": "DramaWorld (عالم الدراما)",
+  "description": "عالم الدراما — أفلام ومسلسلات وقنوات بث مباشر."
  }
 ]

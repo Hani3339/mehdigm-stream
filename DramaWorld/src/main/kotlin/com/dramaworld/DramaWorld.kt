@@ -1,0 +1,413 @@
+package com.dramaworld
+
+import android.util.Base64
+import com.lagradost.cloudstream3.Episode
+import com.lagradost.cloudstream3.HomePageList
+import com.lagradost.cloudstream3.HomePageResponse
+import com.lagradost.cloudstream3.LoadResponse
+import com.lagradost.cloudstream3.MainAPI
+import com.lagradost.cloudstream3.MainPageRequest
+import com.lagradost.cloudstream3.SearchResponse
+import com.lagradost.cloudstream3.SubtitleFile
+import com.lagradost.cloudstream3.TvType
+import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.newEpisode
+import com.lagradost.cloudstream3.newHomePageResponse
+import com.lagradost.cloudstream3.newMovieLoadResponse
+import com.lagradost.cloudstream3.newMovieSearchResponse
+import com.lagradost.cloudstream3.newSubtitleFile
+import com.lagradost.cloudstream3.newTvSeriesLoadResponse
+import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.utils.loadExtractor
+import com.lagradost.cloudstream3.utils.newExtractorLink
+import org.json.JSONArray
+import org.json.JSONObject
+import java.net.URLEncoder
+
+/**
+ * DramaWorld (عالم الدراما) provider.
+ *
+ * Backend: a Laravel-style JSON API behind a dynamic host (resolved at runtime by
+ * the official app through Firebase Remote Config + a `/validate.php` AES-GCM
+ * handshake). The captured host is `test.arabypros.com`; every request goes to
+ * `/api/{endpoint}/4F5A9C3D9A86FA54EACEDDD635185/d506abfd-9fe2-4b71-b979-feff21bcad13/`.
+ *
+ * The sources endpoints (`movie/source/by/{id}` and `episode/source/by/{id}`)
+ * return `<junk-prefix><base64(JSON array)>`; the payload is recovered by
+ * locating the base64 of `[{` ("W3s") and decoding from there, exactly like the
+ * official client. Each source holds a host label (`title`) and an embed page
+ * (`url`); embedded pages are handed to CloudStream's global [loadExtractor],
+ * while direct `.m3u8`/`.mp4`/`.webm`/`.mkv` URLs are emitted as-is.
+ *
+ * Live TV channels carry their (direct) stream URLs inline.
+ */
+class DramaWorld : MainAPI() {
+    companion object {
+        private const val TAG = "DramaWorld"
+
+        private const val BASE = "https://test.arabypros.com/api"
+        private const val KEY = "4F5A9C3D9A86FA54EACEDDD635185"
+        private const val UUID = "d506abfd-9fe2-4b71-b979-feff21bcad13"
+        private const val UA = "okhttp/4.12.0"
+
+        private const val MOVIE_DATA = "dramaworld:movie:"
+        private const val EPISODE_DATA = "dramaworld:episode:"
+        private const val CHANNEL_DATA = "dramaworld:channel:"
+
+        private const val DETAIL_URL = "https://test.arabypros.com/detail/"
+    }
+
+    override var name = "DramaWorld"
+    override var lang = "ar"
+    override var mainUrl = "https://test.arabypros.com"
+
+    override val hasMainPage = true
+    override val hasQuickSearch = true
+    override val hasDownloadSupport = true
+    override val usesWebView = false
+    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Live)
+
+    private val headers = mapOf("User-Agent" to UA)
+
+    // ---------------------------------------------------------------- helpers
+
+    private fun api(path: String): String = "$BASE/$path/$KEY/$UUID/"
+
+    private suspend fun getJson(url: String): JSONObject? = try {
+        val text = app.get(url, headers = headers).text.trim()
+        if (text.startsWith("{")) JSONObject(text) else null
+    } catch (e: Throwable) {
+        android.util.Log.i(TAG, "getJson FAILED $url -> $e")
+        null
+    }
+
+    private suspend fun getArray(url: String): JSONArray? = try {
+        val text = app.get(url, headers = headers).text.trim()
+        if (text.startsWith("[")) JSONArray(text) else null
+    } catch (e: Throwable) {
+        android.util.Log.i(TAG, "getArray FAILED $url -> $e")
+        null
+    }
+
+    private fun enc(value: String): String =
+        URLEncoder.encode(value, "UTF-8").replace("+", "%20")
+
+    /**
+     * Recovers the JSON array hidden in a sources response. The official client
+     * looks for the base64 of `[{` ("W3s") and decodes from that offset.
+     */
+    private fun decodeSources(text: String): String? {
+        val t = text.trim()
+        if (t.startsWith("[")) return t
+        val idx = t.indexOf("W3s")
+        if (idx == -1) return null
+        return try {
+            String(Base64.decode(t.substring(idx), Base64.DEFAULT), Charsets.UTF_8)
+        } catch (e: Throwable) {
+            android.util.Log.i(TAG, "decodeSources failed -> $e")
+            null
+        }
+    }
+
+    private fun normalizeType(raw: String?): String =
+        if (raw.equals("serie", true) || raw.equals("series", true) || raw.equals("tv", true)) {
+            "serie"
+        } else {
+            "movie"
+        }
+
+    private fun posterSearch(item: JSONObject): SearchResponse? {
+        val id = item.optInt("id", 0)
+        if (id <= 0) return null
+        val isSerie = normalizeType(item.optString("type")) == "serie"
+        return newMovieSearchResponse(
+            item.optString("title").ifBlank { "بدون عنوان" },
+            "$DETAIL_URL${if (isSerie) "serie" else "movie"}/$id",
+            if (isSerie) TvType.TvSeries else TvType.Movie
+        ) {
+            this.posterUrl = item.optString("image").ifBlank { item.optString("cover") }.ifBlank { null }
+            this.year = item.optString("year").take(4).toIntOrNull()
+        }
+    }
+
+    private fun channelSearch(item: JSONObject): SearchResponse? {
+        val id = item.optInt("id", 0)
+        if (id <= 0) return null
+        return newMovieSearchResponse(
+            item.optString("title").ifBlank { "قناة" },
+            "$DETAIL_URL" + "channel/$id",
+            TvType.Live
+        ) {
+            this.posterUrl = item.optString("image").ifBlank { null }
+        }
+    }
+
+    private fun parsePosters(array: JSONArray?): List<SearchResponse> {
+        if (array == null) return emptyList()
+        val out = mutableListOf<SearchResponse>()
+        for (i in 0 until array.length()) {
+            array.optJSONObject(i)?.let { posterSearch(it)?.let { r -> out.add(r) } }
+        }
+        return out
+    }
+
+    // ---------------------------------------------------------------- home
+
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        val root = getJson(api("first")) ?: return newHomePageResponse(emptyList())
+        val lists = mutableListOf<HomePageList>()
+
+        val channels = root.optJSONArray("channels")
+        if (channels != null) {
+            val items = mutableListOf<SearchResponse>()
+            for (i in 0 until channels.length()) {
+                channels.optJSONObject(i)?.let { channelSearch(it)?.let { r -> items.add(r) } }
+            }
+            if (items.isNotEmpty()) {
+                lists.add(HomePageList("قنوات البث المباشر", items, isHorizontalImages = true))
+            }
+        }
+
+        val slides = root.optJSONArray("slides")
+        if (slides != null) {
+            val items = mutableListOf<SearchResponse>()
+            for (i in 0 until slides.length()) {
+                val poster = slides.optJSONObject(i)?.optJSONObject("poster") ?: continue
+                posterSearch(poster)?.let { items.add(it) }
+            }
+            if (items.isNotEmpty()) {
+                lists.add(HomePageList("مميز", items, isHorizontalImages = true))
+            }
+        }
+
+        val genres = root.optJSONArray("genres")
+        if (genres != null) {
+            for (i in 0 until genres.length()) {
+                val genre = genres.optJSONObject(i) ?: continue
+                val items = parsePosters(genre.optJSONArray("posters"))
+                if (items.isNotEmpty()) {
+                    lists.add(
+                        HomePageList(
+                            genre.optString("title").ifBlank { "قائمة" },
+                            items,
+                            isHorizontalImages = true
+                        )
+                    )
+                }
+            }
+        }
+
+        return newHomePageResponse(lists)
+    }
+
+    // ---------------------------------------------------------------- search
+
+    override suspend fun search(query: String): List<SearchResponse> {
+        val out = mutableListOf<SearchResponse>()
+        try {
+            val text = app.get(api("search/${enc(query)}/0"), headers = headers).text.trim()
+            if (!text.startsWith("{")) {
+                android.util.Log.i(TAG, "search non-JSON -> ${text.take(120)}")
+                return out
+            }
+            val root = JSONObject(text)
+            out.addAll(parsePosters(root.optJSONArray("posters")))
+            val channels = root.optJSONArray("channels")
+            if (channels != null) {
+                for (i in 0 until channels.length()) {
+                    channels.optJSONObject(i)?.let { channelSearch(it)?.let { r -> out.add(r) } }
+                }
+            }
+        } catch (e: Throwable) {
+            android.util.Log.i(TAG, "search FAILED -> $e")
+        }
+        return out
+    }
+
+    // ---------------------------------------------------------------- load
+
+    override suspend fun load(url: String): LoadResponse {
+        val id = url.trimEnd('/').substringAfterLast('/').takeWhile { it.isDigit() }
+        val isSerie = url.contains("/serie/")
+        val isChannel = url.contains("/channel/")
+        if (id.isEmpty()) return errorResponse("معرّف غير صالح.")
+
+        if (isChannel) {
+            val channel = getJson(api("channel/by/$id"))
+                ?: return errorResponse("تعذّر تحميل القناة.")
+            return newMovieLoadResponse(
+                channel.optString("title").ifBlank { "قناة" },
+                url,
+                TvType.Live,
+                "$CHANNEL_DATA$id"
+            ) {
+                this.posterUrl = channel.optString("image").ifBlank { null }
+                this.plot = channel.optString("description").ifBlank { null }
+            }
+        }
+
+        val poster = getJson(api("movie/by/$id")) ?: return errorResponse("تعذّر تحميل التفاصيل.")
+        val title = poster.optString("title").ifBlank { "بدون عنوان" }
+        val image = poster.optString("image").ifBlank { poster.optString("cover") }.ifBlank { null }
+        val plot = poster.optString("description").ifBlank { null }
+        val year = poster.optString("year").take(4).toIntOrNull()
+        val tags = poster.optString("classification")
+            .split(",").map { it.trim() }.filter { it.isNotEmpty() }
+        val serie = isSerie || normalizeType(poster.optString("type")) == "serie"
+
+        if (!serie) {
+            return newMovieLoadResponse(title, url, TvType.Movie, "$MOVIE_DATA$id") {
+                this.posterUrl = image
+                this.plot = plot
+                this.year = year
+                this.tags = tags
+            }
+        }
+
+        val episodes = mutableListOf<Episode>()
+        val seasons = getArray(api("season/by/serie/$id")) ?: JSONArray()
+        for (s in 0 until seasons.length()) {
+            val season = seasons.optJSONObject(s) ?: continue
+            val seasonNumber = s + 1
+            val eps = season.optJSONArray("episodes") ?: continue
+            for (e in 0 until eps.length()) {
+                val ep = eps.optJSONObject(e) ?: continue
+                val epId = ep.optInt("id", 0)
+                if (epId <= 0) continue
+                episodes.add(
+                    newEpisode("$DETAIL_URL$EPISODE_DATA$epId") {
+                        this.name = ep.optString("title").ifBlank { "الحلقة ${e + 1}" }
+                        this.season = seasonNumber
+                        this.episode = e + 1
+                        this.posterUrl = image
+                        this.description = ep.optString("description").ifBlank { null }
+                    }
+                )
+            }
+        }
+        episodes.sortWith(compareBy({ it.season ?: 0 }, { it.episode ?: 0 }))
+
+        return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
+            this.posterUrl = image
+            this.plot = plot
+            this.year = year
+            this.tags = tags
+        }
+    }
+
+    private suspend fun errorResponse(message: String): LoadResponse =
+        newMovieLoadResponse(message, mainUrl, TvType.Movie, "") { this.plot = message }
+
+    // ---------------------------------------------------------------- links
+
+    override suspend fun loadLinks(
+        data: String,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val id = data.substringAfterLast(':').takeWhile { it.isDigit() }
+        if (id.isEmpty()) {
+            android.util.Log.i(TAG, "loadLinks unrecognized data=$data")
+            return false
+        }
+
+        val seen = mutableSetOf<String>()
+        val emit: (ExtractorLink) -> Unit = { link -> if (seen.add(link.url)) callback(link) }
+
+        val handled = when {
+            data.contains(CHANNEL_DATA) -> {
+                val channel = getJson(api("channel/by/$id"))
+                val sources = channel?.optJSONArray("sources") ?: JSONArray()
+                for (i in 0 until sources.length()) {
+                    sources.optJSONObject(i)?.let { emitSource(it, subtitleCallback, emit) }
+                }
+                true
+            }
+            data.contains(MOVIE_DATA) -> {
+                loadSources(api("movie/source/by/$id"), subtitleCallback, emit)
+                loadSubtitles(api("subtitles/by/movie/$id"), subtitleCallback)
+                true
+            }
+            data.contains(EPISODE_DATA) -> {
+                loadSources(api("episode/source/by/$id"), subtitleCallback, emit)
+                loadSubtitles(api("subtitles/by/episode/$id"), subtitleCallback)
+                true
+            }
+            else -> {
+                android.util.Log.i(TAG, "loadLinks unknown data=$data")
+                false
+            }
+        }
+        if (!handled) return false
+        return seen.isNotEmpty()
+    }
+
+    private suspend fun loadSources(
+        url: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val body = try {
+            app.get(url, headers = headers).text
+        } catch (e: Throwable) {
+            android.util.Log.i(TAG, "loadSources FAILED $url -> $e")
+            return
+        }
+        val json = decodeSources(body) ?: run {
+            android.util.Log.i(TAG, "loadSources undecodable -> ${body.take(120)}")
+            return
+        }
+        val array = try {
+            JSONArray(json)
+        } catch (e: Throwable) {
+            JSONArray()
+        }
+        for (i in 0 until array.length()) {
+            array.optJSONObject(i)?.let { emitSource(it, subtitleCallback, callback) }
+        }
+    }
+
+    private suspend fun emitSource(
+        src: JSONObject,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val link = src.optString("url").trim()
+        if (link.isEmpty()) return
+        val label = src.optString("title").ifBlank { "سيرفر" }
+        if (isDirect(link)) {
+            val type = if (link.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+            callback(
+                newExtractorLink("DramaWorld - $label", "DramaWorld", link, type) {
+                    this.referer = "$mainUrl/"
+                }
+            )
+        } else {
+            try {
+                loadExtractor(link, "$mainUrl/", subtitleCallback, callback)
+            } catch (e: Throwable) {
+                android.util.Log.i(TAG, "loadExtractor FAILED $link -> $e")
+            }
+        }
+    }
+
+    private fun isDirect(url: String): Boolean =
+        Regex("\\.(m3u8|mp4|webm|mkv|mpd)(\\?|#|$)", RegexOption.IGNORE_CASE).containsMatchIn(url)
+
+    private suspend fun loadSubtitles(url: String, callback: (SubtitleFile) -> Unit) {
+        val array = getArray(url) ?: return
+        for (i in 0 until array.length()) {
+            val lang = array.optJSONObject(i) ?: continue
+            val language = lang.optString("language")
+            val subs = lang.optJSONArray("subtitles") ?: continue
+            for (j in 0 until subs.length()) {
+                val sub = subs.optJSONObject(j) ?: continue
+                val subUrl = sub.optString("url").trim()
+                if (subUrl.isEmpty()) continue
+                callback(newSubtitleFile(sub.optString("language").ifBlank { language }, subUrl) { })
+            }
+        }
+    }
+}
