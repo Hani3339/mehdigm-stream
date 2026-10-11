@@ -59,6 +59,9 @@ object EgywatchHostExtractor {
         "okhd" to "scrapefinal/turki.php"
     )
 
+    /** Hosts that always answer Forbidden / carry no playable stream — never worth a request. */
+    private val DEAD_HOSTS = listOf("ostvapp.cam")
+
     suspend fun extract(
         link: String,
         server: String,
@@ -67,6 +70,7 @@ object EgywatchHostExtractor {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val host = hostOf(link)
+        if (DEAD_HOSTS.any { host.contains(it) }) return false
         val fetchHeaders = mapOf("User-Agent" to (userAgent ?: BROWSER_UA))
 
         // GET-style scrapers take the embed URL directly.
@@ -81,14 +85,19 @@ object EgywatchHostExtractor {
         // POST-style scrapers expect the fetched embed page HTML.
         val endpoint = POST_ENDPOINTS.entries.firstOrNull { host.contains(it.key) }?.value
             ?: "scrapefinal/earnvids.php"
-        val html = runCatching {
-            app.get(link, headers = fetchHeaders, referer = referer, allowRedirects = true).text
+        val response = runCatching {
+            app.get(link, headers = fetchHeaders, referer = referer, allowRedirects = true)
         }.getOrNull() ?: return false
+        // A 4xx/5xx embed page yields nothing but garbage links from the scraper.
+        if (response.code !in 200..299) {
+            Log.i(TAG, "embed $link -> HTTP ${response.code}, skipped")
+            return false
+        }
 
         val body = runCatching {
             app.post(
                 SCRAPER + endpoint,
-                data = mapOf("content" to html, "url" to link),
+                data = mapOf("content" to response.text, "url" to link),
                 referer = SCRAPER
             ).text
         }.getOrNull()
@@ -102,15 +111,17 @@ object EgywatchHostExtractor {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         if (body.isNullOrBlank()) return false
-        val json = runCatching { JSONObject(body) }.getOrNull() ?: return false
-        if (json.optString("status") != "success") return false
-        val content = json.optJSONArray("filtered_content") ?: return false
-        val quality = json.optJSONArray("Quality")
+        val links = parseLinks(body)
+        if (links.isEmpty()) {
+            Log.i(TAG, "scraper returned no links for $server")
+            return false
+        }
+        val seen = HashSet<String>()
         var found = false
-        for (i in 0 until content.length()) {
-            val url = content.optString(i).takeIf { it.startsWith("http") } ?: continue
-            val height = quality?.optString(i)
-                ?.replace(Regex("[^0-9]"), "")?.toIntOrNull()
+        for ((url, height) in links) {
+            // The scraper often repeats one master playlist once per quality label; keep it once.
+            val key = if (url.contains(".m3u8")) url.substringBefore('?') else url
+            if (!seen.add(key)) continue
             callback(
                 newExtractorLink(
                     server,
@@ -124,8 +135,31 @@ object EgywatchHostExtractor {
             )
             found = true
         }
-        if (!found) Log.i(TAG, "scraper returned no links for $server")
         return found
+    }
+
+    /** `[{url} to {height}]` extracted from a scraper response (JSON or raw `file:"..."`). */
+    private fun parseLinks(body: String): List<Pair<String, Int?>> {
+        val trimmed = body.trim()
+        val result = mutableListOf<Pair<String, Int?>>()
+        if (trimmed.startsWith("{")) {
+            val json = runCatching { JSONObject(trimmed) }.getOrNull() ?: return emptyList()
+            if (json.optString("status") != "success") return emptyList()
+            val content = json.optJSONArray("filtered_content") ?: return emptyList()
+            val quality = json.optJSONArray("Quality")
+            for (i in 0 until content.length()) {
+                val url = content.optString(i).takeIf { it.startsWith("http") } ?: continue
+                val height = quality?.optString(i)
+                    ?.replace(Regex("[^0-9]"), "")?.toIntOrNull()
+                result += url to height
+            }
+        } else {
+            // Some routes (e.g. uqload) answer with a raw `file:"https://..."`.
+            Regex("""file\s*:\s*"(https?://[^"]+)""").findAll(trimmed).forEach { m ->
+                result += m.groupValues[1] to null
+            }
+        }
+        return result
     }
 
     private fun hostOf(url: String): String =

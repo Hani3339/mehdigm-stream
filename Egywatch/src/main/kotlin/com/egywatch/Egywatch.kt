@@ -257,9 +257,16 @@ class Egywatch : MainAPI() {
             Log.i(TAG, "no videos for $data")
             return false
         }
+        // The API frequently lists the same file several times (different "quality" labels
+        // pointing at one master playlist). Collapse those into a single source.
+        val emitted = HashSet<String>()
+        val guarded: (ExtractorLink) -> Unit = { link ->
+            val key = if (link.url.contains(".m3u8")) link.url.substringBefore('?') else link.url
+            if (emitted.add(key)) callback(link)
+        }
         var found = false
         for (video in videos) {
-            found = resolveVideo(video, subtitleCallback, callback) || found
+            found = resolveVideo(video, subtitleCallback, guarded) || found
         }
         return found
     }
