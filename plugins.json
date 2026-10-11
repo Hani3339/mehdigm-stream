@@ -302,5 +302,28 @@
   "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/EgyDead.cs3",
   "name": "EgyDead (إيجي ديد)",
   "description": "إيجي ديد — أفلام ومسلسلات وكرتون وأنمي مترجم مع دعم سيرفرات المشاهدة والتحميل (MegaMax, Uqload, Vidmoly, StreamWish, MixDrop, Doodstream, Vidara, Byse, VidHide, Voe, StreamRuby...)."
+ },
+ {
+  "iconUrl": "https://egywatch.live/page/images/og-banner-home.jpg",
+  "apiVersion": 1,
+  "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
+  "fileSize": 26352,
+  "status": 1,
+  "language": "ar",
+  "authors": [
+   "mehdigm4life"
+  ],
+  "tvTypes": [
+   "Movie",
+   "TvSeries",
+   "Anime",
+   "AnimeMovie",
+   "Live"
+  ],
+  "version": 1,
+  "internalName": "Egywatch",
+  "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/Egywatch.cs3",
+  "name": "Egywatch (إيجي واتش)",
+  "description": "إيجي واتش — أفلام ومسلسلات وأنمي مترجمة وبث مباشر."
  }
 ]
