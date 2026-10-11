@@ -14,7 +14,14 @@ name: 🧬 OpenCode AI Cloud — 4Life Full Persistence
 #      so tools such as Jadx/Apktool that live outside $HOME
 #      survive across runs,
 #    • a re-install manifest for apt / pip / npm / gem so
-#      system-level packages are restored automatically.
+#      system-level packages are restored automatically,
+#    • a system-dir DELTA (default: /usr/local /usr/bin /usr/sbin
+#      /usr/share /root /etc/profile.d /etc/environment): every
+#      file the agent adds or modifies in those paths compared to
+#      the fresh runner image is captured and restored — so raw
+#      installs (jadx/apktool/... copied into /usr/local/bin or
+#      /usr/bin by ANY command) survive too, without re-archiving
+#      the huge base image. Override via `extra_system_dirs`.
 #
 #  It writes to its OWN release, completely separate from the
 #  original workflow:
@@ -78,6 +85,12 @@ on:
         default: "/opt/hostedtoolcache /opt/runner-cache /opt/actionarchivecache /opt/az /opt/microsoft /opt/google /opt/pipx /opt/pipx_bin /opt/containerd /opt/primer /opt/hca /opt/post-generation"
         type: string
 
+      extra_system_dirs:
+        description: "مسارات نظام تُلتقط بنظام الدلتا (ملفات الوكيل فقط) (مفصولة بمسافة؛ اتركها فارغة للافتراضي)"
+        required: false
+        default: ""
+        type: string
+
       include_credentials:
         description: "تضمين ملفات الأسرار/التوكنات داخل النسخة الاحتياطية (غير آمن)"
         required: true
@@ -110,6 +123,8 @@ env:
   PERSIST_EXTRA_PATHS: ${{ github.event.inputs.extra_backup_paths }}
 
   PERSIST_EXTRA_EXCLUDES: ${{ github.event.inputs.extra_exclude_paths }}
+
+  PERSIST_SYSTEM_DIRS: ${{ github.event.inputs.extra_system_dirs }}
 
   # ============================================================
   # Full permissions ("Allow Always") — no manual approvals
@@ -296,6 +311,37 @@ jobs:
           echo "OPENCODE_CONFIG_DIR=$CONFIG_DIR" >> "$GITHUB_ENV"
           echo "OPENCODE_DATA_DIR=$DATA_DIR"     >> "$GITHUB_ENV"
           echo "OPENCODE_DB_PATH=$DB_PATH"       >> "$GITHUB_ENV"
+
+          # --------------------------------------------------------
+          # System-dir delta baseline (captured on the FRESH runner,
+          # BEFORE any restore). At backup time we archive only the
+          # files that are NEW compared to this baseline, so tools
+          # installed by the agent into system paths (raw binaries in
+          # /usr/local/bin, /usr/bin, /usr/share, ...) are preserved
+          # WITHOUT re-archiving the huge, already-present base image.
+          # --------------------------------------------------------
+
+          SYS_CAPTURE_DIRS="${PERSIST_SYSTEM_DIRS:-/usr/local /usr/bin /usr/sbin /usr/share /root /etc/profile.d /etc/environment}"
+          SYS_BASELINE_DIR="$RUNNER_TEMP/oc4life-sys-baseline"
+          SYS_DELTA_LIST="$RUNNER_TEMP/oc4life-system-delta.list"
+
+          rm -rf "$SYS_BASELINE_DIR"
+          mkdir -p "$SYS_BASELINE_DIR"
+          : > "$SYS_DELTA_LIST"
+
+          for d in $SYS_CAPTURE_DIRS; do
+            [ -e "$d" ] || continue
+            key="$(printf '%s' "$d" | sed 's#^/##; s#/#_#g')"
+            rel="${d#/}"
+            ( cd / && find "$rel" -printf '%p\t%s\t%T@\n' 2>/dev/null | LC_ALL=C sort ) \
+              > "$SYS_BASELINE_DIR/$key.list" 2>/dev/null || true
+          done
+
+          echo "SYS_CAPTURE_DIRS=$SYS_CAPTURE_DIRS" >> "$GITHUB_ENV"
+          echo "SYS_BASELINE_DIR=$SYS_BASELINE_DIR" >> "$GITHUB_ENV"
+          echo "SYS_DELTA_LIST=$SYS_DELTA_LIST"     >> "$GITHUB_ENV"
+
+          echo "🧭 System delta capture dirs: $SYS_CAPTURE_DIRS"
 
       # ============================================================
       # 7. Restore full persistent state
@@ -984,6 +1030,10 @@ jobs:
           EXTRA_PATHS="${PERSIST_EXTRA_PATHS:-/opt /tmp}"
           EXTRA_EXCLUDES="${PERSIST_EXTRA_EXCLUDES:-}"
 
+          SYS_CAPTURE_DIRS="${SYS_CAPTURE_DIRS:-${PERSIST_SYSTEM_DIRS:-/usr/local /usr/bin /usr/sbin /usr/share /root /etc/profile.d /etc/environment}}"
+          SYS_BASELINE_DIR="${SYS_BASELINE_DIR:-}"
+          SYS_DELTA_LIST="${SYS_DELTA_LIST:-$RUNNER_TEMP/oc4life-system-delta.list}"
+
           ARCHIVE="$RUNNER_TEMP/oc4life-state.tar.zst"
           ENC="$RUNNER_TEMP/oc4life-state.enc"
           TAR_LOG="$RUNNER_TEMP/oc4life-tar.log"
@@ -1182,6 +1232,45 @@ jobs:
           }
 
           # --------------------------------------------------------
+          # Build a file list of everything the agent added to the
+          # system dirs (present now, absent from the fresh baseline).
+          # This is what makes manual installs into /usr/local/bin,
+          # /usr/bin, /usr/share, ... survive across runs cheaply.
+          # --------------------------------------------------------
+
+          build_system_delta() {
+
+            : > "$SYS_DELTA_LIST"
+
+            if [ -z "${SYS_BASELINE_DIR:-}" ] || [ ! -d "$SYS_BASELINE_DIR" ]; then
+              log "ℹ️ No system baseline — skipping system delta."
+              return 0
+            fi
+
+            for d in $SYS_CAPTURE_DIRS; do
+
+              [ -e "$d" ] || continue
+
+              key="$(printf '%s' "$d" | sed 's#^/##; s#/#_#g')"
+              base="$SYS_BASELINE_DIR/$key.list"
+
+              # Without a baseline for this dir we cannot compute a safe
+              # delta (we would archive the entire base image), so skip.
+              [ -f "$base" ] || continue
+
+              rel="${d#/}"
+
+              ( cd / && find "$rel" -printf '%p\t%s\t%T@\n' 2>/dev/null | LC_ALL=C sort ) |
+                LC_ALL=C comm -23 - "$base" |
+                cut -f1 >> "$SYS_DELTA_LIST" || true
+
+            done
+
+            log "🧭 System delta entries: $(wc -l < "$SYS_DELTA_LIST" | tr -d ' ')"
+
+          }
+
+          # --------------------------------------------------------
           # Full backup
           # --------------------------------------------------------
 
@@ -1268,6 +1357,8 @@ jobs:
             rm -f "$ARCHIVE" "$ENC"
             : > "$TAR_LOG"
 
+            build_system_delta
+
             log "📁 roots: ${ROOTS[*]}"
 
             SUDO=""
@@ -1278,6 +1369,7 @@ jobs:
               --ignore-failed-read \
               "${EXCLUDES[@]}" \
               -C / \
+              --files-from="$SYS_DELTA_LIST" \
               "${ROOTS[@]}" \
               2>> "$TAR_LOG" | zstd -q -T0 > "$ARCHIVE"
 
