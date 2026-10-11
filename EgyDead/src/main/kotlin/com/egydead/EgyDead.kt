@@ -395,10 +395,26 @@ class EgyDead : MainAPI() {
         return Regex("(\\d+)").find(text)?.groupValues?.get(1)?.toIntOrNull()
     }
 
+    /**
+     * The site is inconsistent with Arabic orthography: the same word appears with a
+     * final `ي` or `ى`, and with `أ`/`إ`/`آ` or bare `ا` (e.g. "الثاني" vs "الثانى",
+     * "الأول" vs "الاول"). Normalising removes diacritics and unifies those letters so
+     * every spelling matches the canonical SEASON_WORDS entries.
+     */
+    private fun normalizeAr(text: String): String = text
+        .replace('ى', 'ي')
+        .replace('أ', 'ا').replace('إ', 'ا').replace('آ', 'ا')
+        .replace(Regex("[\\u064B-\\u065F\\u0670]"), "")
+
     private fun arabicSeason(text: String): Int? {
-        Regex("الموسم\\s*(\\d+)").find(text)?.groupValues?.get(1)?.toIntOrNull()?.let { return it }
-        SEASON_WORDS.forEach { (word, number) -> if (text.contains(word)) return number }
-        Regex("(?i)S(\\d{1,2})").find(text)?.groupValues?.get(1)?.toIntOrNull()?.let { return it }
+        val t = normalizeAr(text)
+        Regex("(?:الموسم|موسم)[\\s\\-_]*(\\d+)").find(t)?.groupValues?.get(1)?.toIntOrNull()
+            ?.let { return it }
+        SEASON_WORDS.forEach { (word, number) -> if (t.contains(normalizeAr(word))) return number }
+        Regex("(?i)season[\\s\\-_]?(\\d{1,2})").find(t)?.groupValues?.get(1)?.toIntOrNull()
+            ?.let { return it }
+        Regex("(?i)(?:^|[\\-_ ])s(\\d{1,2})(?:[\\-_ /]|$)").find(t)?.groupValues?.get(1)?.toIntOrNull()
+            ?.let { return it }
         return null
     }
 

@@ -284,7 +284,7 @@
   "iconUrl": "https://c4u1r.sbs/wp-content/uploads/2026/03/EgyDead-Logo.png",
   "apiVersion": 1,
   "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-   "fileSize": 32625,
+   "fileSize": 32880,
    "status": 1,
    "language": "ar",
    "authors": [
@@ -297,7 +297,7 @@
     "AnimeMovie",
     "Cartoon"
    ],
-   "version": 3,
+   "version": 4,
    "internalName": "EgyDead",
   "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/EgyDead.cs3",
   "name": "EgyDead (إيجي ديد)",
