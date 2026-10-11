@@ -9,58 +9,97 @@ import org.json.JSONObject
 import java.net.URI
 import java.net.URLEncoder
 
-/**
- * Resolves the third-party embeds the Egywatch app can play.
- *
- * The app does not ship per-host extractors for these hosts; instead it fetches the embed page
- * and forwards the HTML to its own scraper at `https://mawdhou3.com`, which returns the finished
- * playable links. The mapping below was derived from captured traffic (host -> scraper route):
- *
- *   minochinos / hanerix / morencius / vidspeed / stmruby / streamwish -> scrapefinal/earnvids.php
- *   forafile                                                          -> recuperepost.php
- *   upzur                                                             -> scrapefinal/upzur.php
- *   vidaraa                                                           -> scrapefinal/vidaara.php
- *   luluvdo                                                           -> scrapefinal/extractm3u8.php
- *   vidtube.one                                                       -> scrapefinal/vidtubepost.php
- *   seriesmp4                                                         -> scrapefinal/dramaramadanPost.php
- *   uqload                                                            -> scrapefinal/uqload.php?api=<url>   (GET)
- *   fasel-hd                                                          -> scripttestfasel.php?api=<url>      (GET)
- *   vidoba / film77 / okhd                                            -> scrapefinal/turki.php?api=<url>    (GET)
- */
 object EgywatchHostExtractor {
     private const val TAG = "EgywatchHost"
-    private const val SCRAPER = "https://mawdhou3.com/"
+    private const val SCRAPER_DEFAULT = "https://mawdhou3.com/"
     private const val BROWSER_UA =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
 
-    /** POST form (`content` = embed page HTML, `url` = embed link). */
-    private val POST_ENDPOINTS = mapOf(
-        "minochinos" to "scrapefinal/earnvids.php",
-        "callistanise" to "scrapefinal/earnvids.php",
-        "hanerix" to "scrapefinal/earnvids.php",
-        "morencius" to "scrapefinal/earnvids.php",
-        "vidspeed" to "scrapefinal/earnvids.php",
-        "stmruby" to "scrapefinal/earnvids.php",
-        "streamwish" to "scrapefinal/earnvids.php",
-        "forafile" to "recuperepost.php",
-        "upzur" to "scrapefinal/upzur.php",
-        "vidaraa" to "scrapefinal/vidaara.php",
-        "luluvdo" to "scrapefinal/extractm3u8.php",
-        "vidtube" to "scrapefinal/vidtubepost.php",
-        "seriesmp4" to "scrapefinal/dramaramadanPost.php"
-    )
-
-    /** GET scraper (`?api` = embed link). */
-    private val GET_ENDPOINTS = mapOf(
-        "uqload" to "scrapefinal/uqload.php",
-        "fasel-hd" to "scripttestfasel.php",
-        "vidoba" to "scrapefinal/turki.php",
-        "film77" to "scrapefinal/turki.php",
-        "okhd" to "scrapefinal/turki.php"
-    )
-
-    /** Hosts that always answer Forbidden / carry no playable stream — never worth a request. */
     private val DEAD_HOSTS = listOf("ostvapp.cam")
+
+    private data class HostRule(
+        val hostIds: List<String>,
+        val domains: List<String>,
+        val urlsite: String,
+        val isPost: Boolean,
+        val isGetApi: Boolean
+    )
+
+    private fun buildRules(): List<HostRule> {
+        val rules = mutableListOf<HostRule>()
+        fun add(
+            hostIds: List<String>,
+            domains: List<String>,
+            urlsite: String
+        ) {
+            if (urlsite.isBlank()) return
+            val us = urlsite.trim()
+            val isGetApi = us.contains("?api=") || us.endsWith("?api") || us.contains("?api") && us.contains("api=")
+            val looksPost = us.endsWith(".php") && !us.contains("?") ||
+                us.contains("/scrapefinal/") ||
+                us.contains("recuperepost") ||
+                us.contains("upzur") ||
+                us.contains("vidaara") ||
+                us.contains("extractm3u8") ||
+                us.contains("vidtubepost") ||
+                us.contains("dramaramadanPost") ||
+                us.contains("okprimePost") ||
+                us.contains("earnvids")
+            val isPost = !isGetApi && looksPost
+            rules += HostRule(hostIds, domains, us, isPost = isPost, isGetApi = isGetApi)
+        }
+        // Generated from hosts_config.json (string urlsite)
+        add(listOf("uqload"), listOf("uqload.com"), "https://mawdhou3.com/scrapefinal/uqload.php?api=")
+        add(listOf("71stream"), listOf("71stream.com"), "https://mawdhou3.com/scrapefinal/71stream.php?api=")
+        add(listOf("Upzur"), listOf("Upzur.com"), "https://mawdhou3.com/scrapefinal/upzur.php")
+        add(listOf("Seriemp4"), listOf("Seriemp4.com"), "https://mawdhou3.com/scrapefinal/dramaramadanPost.php")
+        add(listOf("ukrcdn"), listOf("ukrcdn.com"), "https://mawdhou3.com/scrapefinal/ukrcdn.php?api=")
+        add(listOf("okprime"), listOf("okprime.com"), "https://mawdhou3.com/scrapefinal/okprimePost.php")
+        add(listOf("vidsp"), listOf("vidsp.com"), "https://www.hrrejhp.com/scrapefinal/vidsp/post.php?api=")
+        add(listOf("vidtubeJdid"), listOf("vidtubejdid.com"), "https://mawdhou3.com/scrapefinal/vidtubepost.php")
+        add(listOf("faselpost"), listOf("faselpost.com"), "https://mawdhou3.com/scrapefinal/faselpost.php")
+        add(listOf("ult4vid"), listOf("ult4vid.com"), "https://mawdhou3.com/scrapefinal/ult4vid.php?api=")
+        add(listOf("hrrejhp"), listOf("hrrejhp.com"), "")
+        add(listOf("stream.developer"), listOf("stream.developer.com"), "https://mawdhou3.com/scrapefinal/stream.developer.php?api=")
+        add(listOf("google"), listOf("google.com"), "https://mawdhou3.com/aminegoogle/extract_qualite.php?url=")
+        add(listOf("videasjdid"), listOf("videasjdid.com"), "https://mawdhou3.com/scrapefinal/vedasjdid.php?api=")
+        add(listOf("fdewsdcPro"), listOf("fdewsdc.com"), "https://mawdhou3.com/test.php?api=")
+        add(listOf("seriesmp4"), listOf("seriesmp4.com"), "https://mawdhou3.com/scrapefinal/dramaramadan.php?api=")
+        add(listOf("fastream"), listOf("fastream.com"), "https://mawdhou3.com/scrapefinal/fastream.php?api=")
+        add(listOf("vidaraa"), listOf("vidaraa.com"), "https://mawdhou3.com/scrapefinal/vidaara.php")
+        add(listOf("stmruby"), listOf("stmruby.com"), "https://mawdhou3.com/scrapefinal/earnvids.php?api=")
+        add(listOf("luluvdo"), listOf("luluvdo.com"), "https://mawdhou3.com/scrapefinal/extractm3u8.php")
+        add(listOf("vidspeed"), listOf("vidspeeds.com"), "https://mawdhou3.com/scrapefinal/earnvids.php?api=")
+        add(listOf("vidoba"), listOf("vidoba.com"), "https://mawdhou3.com/scrapefinal/turki.php")
+        add(listOf("vidsrc"), listOf("vidsrc.com"), "")
+        add(listOf("channel"), listOf("channel"), "https://mawdhou3.com/scrapefinal/channel.php?url=")
+        add(listOf("anafast"), listOf("anafast.com"), "https://mawdhou3.com/test.php?api=")
+        add(listOf("videoland"), listOf("videoland.com"), "")
+        add(listOf("lulustream"), listOf("lulustream.com"), "https://mawdhou3.com/scrapefinal/extractm3u8.php")
+        add(listOf("asiatvplayer"), listOf("asiatvplayer.com"), "https://mawdhou3.com/test.php?api=")
+        add(listOf("liiivideo"), listOf("liiivideo.com"), "https://mawdhou3.com/scrapefinal/scriptalvid.php?api=")
+        add(listOf("egybestvid"), listOf("egybestvid.com"), "https://mawdhou3.com/test.php?api=")
+        add(listOf("faselapikey"), listOf("faselapikey.com"), "https://mawdhou3.com/scripttestfasel.php?api=")
+        add(listOf("vidhidepre"), listOf("vidhidepre.com"), "https://mawdhou3.com/test.php?api=")
+        add(listOf("vudeo"), listOf("vudeo.com"), "https://mawdhou3.com/test.php?api=")
+        add(listOf("aparat"), listOf("aparat.com"), "https://mawdhou3.com/scriptapart.php?url=")
+        add(listOf("Dnscheckr"), listOf("Dnschecktxt.com"), "https://mawdhou3.com/fasel/geturl.php?api=")
+        add(listOf("cartoony"), listOf("cartoony.com"), "https://mawdhou3.com/decrypt_cartoony.php?apiurl=")
+        add(listOf("updown"), listOf("updown.com"), "https://mawdhou3.com/scrapefinal/updown.php?api=")
+        add(listOf("earnvids"), listOf("earnvids.com"), "https://mawdhou3.com/scrapefinal/earnvids.php?api=")
+        add(listOf("videas"), listOf("videas.com"), "https://mawdhou3.com/scrapefinal/vedas.php?api=")
+        add(listOf("turkiiiijdid"), listOf("turkiiiijdid.com"), "https://mawdhou3.com/scrapefinal/turki.php?api=")
+        add(listOf("hdup20"), listOf("hdup20.com"), "https://mawdhou3.com/scrapefinal/hdup20.php?api=")
+        add(listOf("vidnest"), listOf("vidnest.com"), "https://mawdhou3.com/scrapefinal/vidnest.php?api=")
+        add(listOf("turbovidhls"), listOf("turbovidhls.com"), "https://mawdhou3.com/scrapefinal/turbovidhls.php?api=")
+        add(listOf("arabseeeed.com"), listOf("arabseed"), "https://mawdhou3.com/test.php?api=")
+        return rules
+    }
+
+    private val RULES by lazy { buildRules() }
+
+    private fun matchRule(host: String): HostRule? =
+        RULES.firstOrNull { r -> r.domains.any { d -> host.contains(d.lowercase()) } || r.hostIds.any { id -> host.contains(id.lowercase()) } }
 
     suspend fun extract(
         link: String,
@@ -73,35 +112,81 @@ object EgywatchHostExtractor {
         if (DEAD_HOSTS.any { host.contains(it) }) return false
         val fetchHeaders = mapOf("User-Agent" to (userAgent ?: BROWSER_UA))
 
-        // GET-style scrapers take the embed URL directly.
-        GET_ENDPOINTS.entries.firstOrNull { host.contains(it.key) }?.let { (_, endpoint) ->
-            val api = SCRAPER + endpoint + "?api=" + URLEncoder.encode(link, "UTF-8")
+        val rule = matchRule(host)
+        if (rule != null && rule.urlsite.isNotBlank()) {
+            val us = rule.urlsite
+            val scraperBase = runCatching {
+                val uri = URI(us)
+                "${uri.scheme}://${uri.host}${if (uri.port == -1) "" else ":" + uri.port}/"
+            }.getOrNull() ?: SCRAPER_DEFAULT
+
+            if (rule.isGetApi || us.contains("?api")) {
+                val api = if (us.contains("?api=")) {
+                    us.substringBefore("?api=") + "?api=" + URLEncoder.encode(link, "UTF-8")
+                } else if (us.endsWith("?api")) {
+                    us + URLEncoder.encode(link, "UTF-8")
+                } else {
+                    val sep = if (us.contains("?")) "&" else "?"
+                    us + sep + "api=" + URLEncoder.encode(link, "UTF-8")
+                }
+                val body = runCatching {
+                    app.get(api, headers = fetchHeaders, referer = scraperBase).text
+                }.getOrNull()
+                if (emitFrom(body, server, referer, callback)) return true
+                return false
+            }
+            // POST
+            val full = if (us.startsWith("http")) us else SCRAPER_DEFAULT + us.removePrefix(SCRAPER_DEFAULT)
+            val response = runCatching {
+                app.get(link, headers = fetchHeaders, referer = referer, allowRedirects = true)
+            }.getOrNull() ?: return false
+            if (response.code !in 200..299) {
+                Log.i(TAG, "embed $link -> HTTP ${response.code}, skipped")
+                return false
+            }
             val body = runCatching {
-                app.get(api, headers = fetchHeaders, referer = SCRAPER).text
+                app.post(
+                    full,
+                    data = mapOf("content" to response.text, "url" to link),
+                    referer = scraperBase
+                ).text
             }.getOrNull()
+            return emitFrom(body, server, referer, callback)
+        }
+
+        // fallback
+        val fallbackGet = mapOf(
+            "uqload" to "scrapefinal/uqload.php",
+            "fasel-hd" to "scripttestfasel.php",
+            "vidoba" to "scrapefinal/turki.php",
+            "film77" to "scrapefinal/turki.php",
+            "okhd" to "scrapefinal/turki.php"
+        )
+        fallbackGet.entries.firstOrNull { host.contains(it.key) }?.let { (_, endpoint) ->
+            val api = SCRAPER_DEFAULT + endpoint + "?api=" + URLEncoder.encode(link, "UTF-8")
+            val body = runCatching { app.get(api, headers = fetchHeaders, referer = SCRAPER_DEFAULT).text }.getOrNull()
             if (emitFrom(body, server, referer, callback)) return true
         }
-
-        // POST-style scrapers expect the fetched embed page HTML.
-        val endpoint = POST_ENDPOINTS.entries.firstOrNull { host.contains(it.key) }?.value
-            ?: "scrapefinal/earnvids.php"
-        val response = runCatching {
-            app.get(link, headers = fetchHeaders, referer = referer, allowRedirects = true)
-        }.getOrNull() ?: return false
-        // A 4xx/5xx embed page yields nothing but garbage links from the scraper.
-        if (response.code !in 200..299) {
-            Log.i(TAG, "embed $link -> HTTP ${response.code}, skipped")
-            return false
-        }
-
-        val body = runCatching {
-            app.post(
-                SCRAPER + endpoint,
-                data = mapOf("content" to response.text, "url" to link),
-                referer = SCRAPER
-            ).text
-        }.getOrNull()
-        return emitFrom(body, server, referer, callback)
+        val fallbackPost = mapOf(
+            "minochinos" to "scrapefinal/earnvids.php",
+            "callistanise" to "scrapefinal/earnvids.php",
+            "hanerix" to "scrapefinal/earnvids.php",
+            "morencius" to "scrapefinal/earnvids.php",
+            "vidspeed" to "scrapefinal/earnvids.php",
+            "stmruby" to "scrapefinal/earnvids.php",
+            "streamwish" to "scrapefinal/earnvids.php",
+            "forafile" to "recuperepost.php",
+            "upzur" to "scrapefinal/upzur.php",
+            "vidaraa" to "scrapefinal/vidaara.php",
+            "luluvdo" to "scrapefinal/extractm3u8.php",
+            "vidtube" to "scrapefinal/vidtubepost.php",
+            "seriesmp4" to "scrapefinal/dramaramadanPost.php"
+        )
+        val fep = fallbackPost.entries.firstOrNull { host.contains(it.key) }?.value ?: "scrapefinal/earnvids.php"
+        val fresp = runCatching { app.get(link, headers = fetchHeaders, referer = referer, allowRedirects = true) }.getOrNull() ?: return false
+        if (fresp.code !in 200..299) return false
+        val fbody = runCatching { app.post(SCRAPER_DEFAULT + fep, data = mapOf("content" to fresp.text, "url" to link), referer = SCRAPER_DEFAULT).text }.getOrNull()
+        return emitFrom(fbody, server, referer, callback)
     }
 
     private suspend fun emitFrom(
@@ -112,14 +197,10 @@ object EgywatchHostExtractor {
     ): Boolean {
         if (body.isNullOrBlank()) return false
         val links = parseLinks(body)
-        if (links.isEmpty()) {
-            Log.i(TAG, "scraper returned no links for $server")
-            return false
-        }
+        if (links.isEmpty()) return false
         val seen = HashSet<String>()
         var found = false
         for ((url, height) in links) {
-            // The scraper often repeats one master playlist once per quality label; keep it once.
             val key = if (url.contains(".m3u8")) url.substringBefore('?') else url
             if (!seen.add(key)) continue
             callback(
@@ -129,7 +210,7 @@ object EgywatchHostExtractor {
                     url,
                     if (url.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                 ) {
-                    this.referer = referer ?: SCRAPER
+                    this.referer = referer ?: SCRAPER_DEFAULT
                     if (height != null) this.quality = height
                 }
             )
@@ -138,28 +219,45 @@ object EgywatchHostExtractor {
         return found
     }
 
-    /** `[{url} to {height}]` extracted from a scraper response (JSON or raw `file:"..."`). */
     private fun parseLinks(body: String): List<Pair<String, Int?>> {
         val trimmed = body.trim()
         val result = mutableListOf<Pair<String, Int?>>()
         if (trimmed.startsWith("{")) {
             val json = runCatching { JSONObject(trimmed) }.getOrNull() ?: return emptyList()
-            if (json.optString("status") != "success") return emptyList()
-            val content = json.optJSONArray("filtered_content") ?: return emptyList()
-            val quality = json.optJSONArray("Quality")
-            for (i in 0 until content.length()) {
-                val url = content.optString(i).takeIf { it.startsWith("http") } ?: continue
-                val height = quality?.optString(i)
-                    ?.replace(Regex("[^0-9]"), "")?.toIntOrNull()
-                result += url to height
+            if (json.optString("status") != "success" && !json.has("filtered_content") && !json.has("sources") && !json.has("file")) {
+                // still try
             }
-        } else {
-            // Some routes (e.g. uqload) answer with a raw `file:"https://..."`.
-            Regex("""file\s*:\s*"(https?://[^"]+)""").findAll(trimmed).forEach { m ->
-                result += m.groupValues[1] to null
+            val content = json.optJSONArray("filtered_content") ?: json.optJSONArray("sources") ?: json.optJSONArray("links")
+            val quality = json.optJSONArray("Quality") ?: json.optJSONArray("qualities")
+            if (content != null) {
+                for (i in 0 until content.length()) {
+                    val item = content.opt(i)
+                    val url = when {
+                        item is String -> item
+                        item is JSONObject -> item.optString("file").ifEmpty { item.optString("url") }
+                        else -> null
+                    }?.takeIf { it.startsWith("http") } ?: continue
+                    val height = when {
+                        quality?.opt(i) is String -> quality.optString(i)
+                        item is JSONObject -> item.optString("label").ifEmpty { item.optString("quality") }
+                        else -> null
+                    }?.replace(Regex("[^0-9]"), "")?.toIntOrNull()
+                    result += url to height
+                }
+                if (result.isNotEmpty()) return result.distinctBy { it.first }
             }
+            val file = json.optString("file", json.optString("url"))
+            if (file.startsWith("http")) return listOf(file to null)
+            return emptyList()
         }
-        return result
+        Regex("""file\s*:\s*"(https?://[^"]+)""", RegexOption.DOT_MATCHES_ALL).findAll(trimmed).forEach { m ->
+            result += m.groupValues[1] to null
+        }
+        if (result.isNotEmpty()) return result.distinctBy { it.first }
+        Regex("""sources.*?(https?://[^"']+)""", RegexOption.DOT_MATCHES_ALL).findAll(trimmed).forEach { m ->
+            result += m.groupValues[1] to null
+        }
+        return result.distinctBy { it.first }
     }
 
     private fun hostOf(url: String): String =
