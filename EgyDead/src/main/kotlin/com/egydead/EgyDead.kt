@@ -16,7 +16,9 @@ import com.lagradost.cloudstream3.newMovieLoadResponse
 import com.lagradost.cloudstream3.newMovieSearchResponse
 import com.lagradost.cloudstream3.newTvSeriesLoadResponse
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.loadExtractor
+import com.lagradost.cloudstream3.utils.newExtractorLink
 import org.json.JSONObject
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
@@ -469,21 +471,48 @@ class EgyDead : MainAPI() {
             if (mirrors.isNotEmpty()) {
                 var found = false
                 for (mirror in mirrors) {
-                    try {
-                        if (loadExtractor(mirror, server, subtitleCallback, emit)) found = true
-                    } catch (e: Throwable) {
-                        Log.i(TAG, "mirror failed $mirror -> $e")
-                    }
+                    found = resolveOne(mirror, server, subtitleCallback, emit) || found
                 }
                 return found
             }
         }
-        return try {
-            loadExtractor(server, referer, subtitleCallback, emit)
+        return resolveOne(server, referer, subtitleCallback, emit)
+    }
+
+    /**
+     * Resolves a single embed URL: the CloudStream built-ins first, then the external
+     * EarnVids/StreamHG extractor as a fallback. This mirrors the proven re-3arabi
+     * approach and fixes the hosts whose own JS loader defeats the built-in extractors.
+     */
+    private suspend fun resolveOne(
+        url: String,
+        referer: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        emit: (ExtractorLink) -> Unit
+    ): Boolean {
+        var found = false
+        try {
+            if (loadExtractor(url, referer, subtitleCallback, emit)) found = true
         } catch (e: Throwable) {
-            Log.i(TAG, "extractor failed $server -> $e")
-            false
+            Log.i(TAG, "extractor failed $url -> $e")
         }
+        if (!found) {
+            val direct = try {
+                ExternalEarnVidsExtractor.extract(url, mainUrl)
+            } catch (e: Throwable) {
+                Log.i(TAG, "external extractor failed $url -> $e")
+                null
+            }
+            if (!direct.isNullOrBlank()) {
+                emit(
+                    newExtractorLink(name, "EarnVids/StreamHG", direct, ExtractorLinkType.M3U8) {
+                        this.referer = mainUrl
+                    }
+                )
+                found = true
+            }
+        }
+        return found
     }
 
     private fun isExtractorHost(url: String): Boolean {
