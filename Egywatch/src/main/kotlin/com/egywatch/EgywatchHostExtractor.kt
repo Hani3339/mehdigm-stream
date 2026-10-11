@@ -17,12 +17,23 @@ object EgywatchHostExtractor {
 
     private val DEAD_HOSTS = listOf("ostvapp.cam")
 
+    /**
+     * Scraper endpoints that only answer to POST (embed HTML in `content`, link in `url`).
+     * Everything else is queried with GET, appending the link to the urlsite's own query key
+     * (`?api=`, `?url=`, `?apiurl=`); endpoints without a query default to `?api=`.
+     * Verified live against mawdhou3.com.
+     */
+    private val POST_ENDPOINTS = setOf(
+        "upzur.php", "vidaara.php", "extractm3u8.php", "earnvids.php",
+        "dramaramadanPost.php", "okprimePost.php", "faselpost.php",
+        "recuperepost.php"
+    )
+
     private data class HostRule(
         val hostIds: List<String>,
         val domains: List<String>,
         val urlsite: String,
-        val isPost: Boolean,
-        val isGetApi: Boolean
+        val isPost: Boolean
     )
 
     private fun buildRules(): List<HostRule> {
@@ -34,19 +45,11 @@ object EgywatchHostExtractor {
         ) {
             if (urlsite.isBlank()) return
             val us = urlsite.trim()
-            val isGetApi = us.contains("?api=") || us.endsWith("?api") || us.contains("?api") && us.contains("api=")
-            val looksPost = us.endsWith(".php") && !us.contains("?") ||
-                us.contains("/scrapefinal/") ||
-                us.contains("recuperepost") ||
-                us.contains("upzur") ||
-                us.contains("vidaara") ||
-                us.contains("extractm3u8") ||
-                us.contains("vidtubepost") ||
-                us.contains("dramaramadanPost") ||
-                us.contains("okprimePost") ||
-                us.contains("earnvids")
-            val isPost = !isGetApi && looksPost
-            rules += HostRule(hostIds, domains, us, isPost = isPost, isGetApi = isGetApi)
+            // Method is decided by the endpoint filename: these scrapers only answer POST
+            // regardless of an `?api=` suffix; everything else is a GET.
+            val file = us.substringAfterLast('/').substringBefore('?')
+            val isPost = file in POST_ENDPOINTS
+            rules += HostRule(hostIds, domains, us, isPost = isPost)
         }
         // Generated from hosts_config.json (string urlsite)
         add(listOf("uqload"), listOf("uqload.com"), "https://mawdhou3.com/scrapefinal/uqload.php?api=")
@@ -102,6 +105,13 @@ object EgywatchHostExtractor {
         add(listOf("forafile"), listOf("forafile.com"), "https://mawdhou3.com/recuperepost.php")
         add(listOf("fasel-hd"), listOf("fasel-hd.co"), "https://mawdhou3.com/scripttestfasel.php?api=")
         add(listOf("mp4plus"), listOf("mp4plus.cyou"), "https://mawdhou3.com/scrapefinal/earnvids.php")
+        // Remaining config hosts (GET via turki.php / post.php) and their live aliases.
+        add(listOf("vidtube"), listOf("vidtube.one", "vidtube.com"), "https://mawdhou3.com/scrapefinal/vidtubepost.php")
+        add(listOf("okhd"), listOf("okhd.site", "okhd.com"), "https://mawdhou3.com/scrapefinal/turki.php")
+        add(listOf("film77"), listOf("film77.xyz", "film77.com"), "https://mawdhou3.com/scrapefinal/turki.php")
+        add(listOf("laroza"), listOf("laroza.com"), "https://mawdhou3.com/scrapefinal/turki.php")
+        add(listOf("plusfas"), listOf("plusfas.com"), "https://autumn-dust-1a31.flechlivraison.workers.dev/?url=")
+        add(listOf("plusserie"), listOf("plusserie.com"), "https://proud-river-0a64.flechlivraison.workers.dev/?url=")
         return rules
     }
 
@@ -125,6 +135,22 @@ object EgywatchHostExtractor {
         }
     }
 
+    /**
+     * Append the embed link to the urlsite's own query key. `?api=`/`?url=`/`?apiurl=` are honoured;
+     * a bare endpoint defaults to `?api=`.
+     */
+    private fun buildGetUrl(us: String, link: String): String {
+        val encoded = URLEncoder.encode(link, "UTF-8")
+        val q = us.indexOf('?')
+        return if (q >= 0) {
+            val base = us.substring(0, q)
+            val key = us.substring(q + 1).substringBefore('=').ifBlank { "api" }
+            "$base?$key=$encoded"
+        } else {
+            "$us?api=$encoded"
+        }
+    }
+
     suspend fun extract(
         link: String,
         server: String,
@@ -144,17 +170,9 @@ object EgywatchHostExtractor {
                 "${uri.scheme}://${uri.host}${if (uri.port == -1) "" else ":" + uri.port}/"
             }.getOrNull() ?: SCRAPER_DEFAULT
 
-            if (rule.isGetApi || us.contains("?api")) {
-                val api = if (us.contains("?api=")) {
-                    us.substringBefore("?api=") + "?api=" + URLEncoder.encode(link, "UTF-8")
-                } else if (us.endsWith("?api")) {
-                    us + URLEncoder.encode(link, "UTF-8")
-                } else {
-                    val sep = if (us.contains("?")) "&" else "?"
-                    us + sep + "api=" + URLEncoder.encode(link, "UTF-8")
-                }
+            if (!rule.isPost) {
                 val body = runCatching {
-                    app.get(api, headers = fetchHeaders, referer = scraperBase).text
+                    app.get(buildGetUrl(us, link), headers = fetchHeaders, referer = scraperBase).text
                 }.getOrNull()
                 if (emitFrom(body, server, referer, callback)) return true
                 return false
@@ -203,7 +221,6 @@ object EgywatchHostExtractor {
             "upzur" to "scrapefinal/upzur.php",
             "vidaraa" to "scrapefinal/vidaara.php",
             "luluvdo" to "scrapefinal/extractm3u8.php",
-            "vidtube" to "scrapefinal/vidtubepost.php",
             "seriesmp4" to "scrapefinal/dramaramadanPost.php"
         )
         val fep = fallbackPost.entries.firstOrNull { host.contains(it.key) }?.value ?: "scrapefinal/earnvids.php"
