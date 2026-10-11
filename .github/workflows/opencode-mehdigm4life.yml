@@ -63,7 +63,7 @@ on:
       backup_interval_minutes:
         description: "حفظ كامل حالة OpenCode (ذاكرة + أدوات + ملفات) كل كم دقيقة"
         required: true
-        default: "10"
+        default: "5"
         type: string
 
       extra_backup_paths:
