@@ -231,17 +231,16 @@ class EgyDead : MainAPI() {
             }
         }
 
-        val keys = listOf(normKey(seriesName), normKey(seriesNameFromUrl(anchor ?: detailUrl)))
+        val anchorOrUrl = anchor ?: detailUrl
+        val baseName = slugBaseName(anchorOrUrl)
+        val keys = listOf(normKey(seriesName), normKey(seriesNameFromUrl(anchorOrUrl)), baseName)
             .filter { it.isNotBlank() }
             .distinct()
 
-        val sameSeries = if (keys.isEmpty()) {
-            seasons.toList()
-        } else {
-            seasons.filter { href ->
-                val text = candidateText[href].orEmpty()
-                keys.any { key -> normKey(decode(text)).contains(key) }
-            }
+        val sameSeries = seasons.filter { href ->
+            val byText = keys.any { key -> normKey(decode(candidateText[href].orEmpty())).contains(key) }
+            val bySlug = baseName.isNotBlank() && slugBaseName(href) == baseName
+            byText || bySlug
         }
         val finalSeasons = sameSeries.ifEmpty {
             if (anchor != null) listOf(anchor) else seasons.toList()
@@ -300,6 +299,31 @@ class EgyDead : MainAPI() {
 
     private fun seasonTitleOf(doc: Document, seasonUrl: String): String =
         "${titleOf(doc)} ${decode(seasonUrl)}".trim()
+
+    /**
+     * Stable key that identifies the series a season/episode URL belongs to, regardless of
+     * how the site names it. Handles both style of slugs used by the site:
+     *   `/season/mobland-s02/`                                  -> `mobland`
+     *   `/serie/mobland-2025/`                                  -> `mobland`
+     *   `/season/مسلسل-badlands-الموسم-الثالث-مترجم-كامل/`      -> `badlands`
+     */
+    private fun slugBaseName(rawUrl: String): String {
+        var s = decode(rawUrl).substringBefore("?")
+        s = when {
+            s.contains("/serie/") -> s.substringAfterLast("/serie/")
+            s.contains("/season/") -> s.substringAfterLast("/season/")
+            s.contains("/episode/") -> s.substringAfterLast("/episode/")
+            else -> s
+        }
+        s = s.trim('/')
+        listOf("الموسم", "موسم", "مترجم", "مدبلج", "الحلقة", "الحلقه").forEach { s = s.substringBefore(it) }
+        s = s.replace("جميع-مواسم", " ").replace("جميع مواسم", " ").replace("مسلسل", " ")
+        s = s.replace(Regex("(?i)[-_ ]?e\\d+$"), "")
+        s = s.replace(Regex("(?i)[-_ ]?season[-_ ]?\\d+$"), "")
+        s = s.replace(Regex("(?i)[-_ ]?s\\d+$"), "")
+        s = s.replace(Regex("[-_ ]?(19|20)\\d{2}$"), "")
+        return normKey(s)
+    }
 
     private fun seriesDisplayName(detailUrl: String, doc: Document, anchor: String?): String {
         if (detailUrl.contains("/episode/")) {

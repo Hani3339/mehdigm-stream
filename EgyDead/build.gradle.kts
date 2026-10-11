@@ -1,4 +1,4 @@
-version = 2
+version = 3
 
 cloudstream {
     description = "EgyDead — إيجي ديد | أفلام ومسلسلات وكرتون وأنمي مترجم ومدبلج."
