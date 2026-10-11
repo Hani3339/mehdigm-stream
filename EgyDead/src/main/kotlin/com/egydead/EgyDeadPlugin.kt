@@ -10,6 +10,10 @@ class EgyDeadPlugin : Plugin() {
         registerExtractorAPI(EgyDeadStreamRubyCom())
         registerExtractorAPI(EgyDeadStreamRubyNet())
         registerExtractorAPI(EgyDeadStreamRubyVip())
+        registerExtractorAPI(EgyDeadUqload())
+        registerExtractorAPI(EgyDeadByse())
+        registerExtractorAPI(EgyDeadStreamHg())
+        registerExtractorAPI(EgyDeadStreamHgCloud())
 
         registerMainAPI(EgyDead())
     }

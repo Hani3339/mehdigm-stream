@@ -47,9 +47,16 @@ class EgyDead : MainAPI() {
         )
 
         private val SEASON_WORDS = listOf(
-            "الاول", "الثاني", "الثالث", "الرابع", "الخامس", "السادس",
-            "السابع", "الثامن", "التاسع", "العاشر", "الحادي عشر", "الثاني عشر"
+            "الثاني عشر" to 12, "الحادي عشر" to 11,
+            "الاول" to 1, "الثاني" to 2, "الثالث" to 3, "الرابع" to 4,
+            "الخامس" to 5, "السادس" to 6, "السابع" to 7, "الثامن" to 8,
+            "التاسع" to 9, "العاشر" to 10
         )
+
+        private const val USER_AGENT =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
+
+        private val PAGE_HEADERS = mapOf("User-Agent" to USER_AGENT)
     }
 
     override var name = "EgyDead"
@@ -136,76 +143,196 @@ class EgyDead : MainAPI() {
 
     override suspend fun load(url: String): com.lagradost.cloudstream3.LoadResponse {
         val doc = try {
-            app.get(url).document
+            app.get(url, headers = PAGE_HEADERS).document
         } catch (e: Throwable) {
             Log.i(TAG, "load failed $url -> $e")
             return newMovieLoadResponse(url, url, TvType.Movie, "") { this.plot = "تعذّر تحميل الصفحة." }
         }
-        val title = titleOf(doc)
+
+        if (!isSeriesUrl(url)) return movieResponse(url, doc)
+
+        val anchor = anchorSeasonUrl(url, doc)
         val poster = posterOf(doc)
+        val title = seriesDisplayName(url, doc, anchor)
         val plot = plotOf(doc)
         val year = Regex("(19|20)\\d{2}").find(title)?.value?.toIntOrNull()
         val tags = doc.select(".breadcrumbs-single a").map { it.text().trim() }
             .filter { it.isNotBlank() && it != "الرئيسيه" }
 
-        return when {
-            url.contains("/serie/") -> {
-                val episodes = mutableListOf<Episode>()
-                val seasons = doc.select("div.seasons-list li.movieItem a[href], ul.seasons-list li.movieItem a[href]")
-                seasons.forEachIndexed { index, a ->
-                    val seasonUrl = a.attr("href").trim().takeIf { it.isNotBlank() } ?: return@forEachIndexed
-                    val seasonName = a.attr("title").ifBlank { a.text() }.trim()
-                    val seasonNumber = arabicSeason(seasonName) ?: (index + 1)
-                    try {
-                        val sdoc = app.get(seasonUrl).document
-                        episodes += parseEpisodeLinks(sdoc, seasonNumber, poster)
-                    } catch (e: Throwable) {
-                        Log.i(TAG, "season failed $seasonUrl -> $e")
-                    }
-                }
-                episodes.sortWith(compareBy({ it.season ?: 0 }, { it.episode ?: 0 }))
-                newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-                    this.posterUrl = poster
-                    this.plot = plot
-                    this.year = year
-                    this.tags = tags
-                }
-            }
+        val episodes = resolveSeriesEpisodes(url, doc, anchor, title, poster)
 
-            url.contains("/season/") -> {
-                val seasonNumber = arabicSeason(title) ?: 1
-                val episodes = parseEpisodeLinks(doc, seasonNumber, poster)
-                newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-                    this.posterUrl = poster
-                    this.plot = plot
-                    this.year = year
-                    this.tags = tags
-                }
+        if (episodes.isEmpty() && url.contains("/episode/")) {
+            // No season structure found — expose just the single episode.
+            val episode = newEpisode(url) {
+                this.name = titleOf(doc)
+                this.episode = numAfterHalka(titleOf(doc))
+                this.posterUrl = poster
+                this.description = plot
             }
-
-            url.contains("/episode/") -> {
-                val episode = newEpisode(url) {
-                    this.name = title
-                    this.episode = numAfterHalka(title)
-                    this.posterUrl = poster
-                    this.description = plot
-                }
-                newTvSeriesLoadResponse(title, url, TvType.TvSeries, listOf(episode)) {
-                    this.posterUrl = poster
-                    this.plot = plot
-                    this.year = year
-                    this.tags = tags
-                }
-            }
-
-            else -> newMovieLoadResponse(title, url, TvType.Movie, url) {
+            return newTvSeriesLoadResponse(title, url, TvType.TvSeries, listOf(episode)) {
                 this.posterUrl = poster
                 this.plot = plot
                 this.year = year
                 this.tags = tags
             }
         }
+
+        return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
+            this.posterUrl = poster
+            this.plot = plot
+            this.year = year
+            this.tags = tags
+        }
     }
+
+    private fun isSeriesUrl(url: String): Boolean =
+        url.contains("/serie/") || url.contains("/season/") || url.contains("/episode/")
+
+    private suspend fun movieResponse(url: String, doc: Document): com.lagradost.cloudstream3.LoadResponse {
+        val title = titleOf(doc)
+        val year = Regex("(19|20)\\d{2}").find(title)?.value?.toIntOrNull()
+        val tags = doc.select(".breadcrumbs-single a").map { it.text().trim() }
+            .filter { it.isNotBlank() && it != "الرئيسيه" }
+        return newMovieLoadResponse(title, url, TvType.Movie, url) {
+            this.posterUrl = posterOf(doc)
+            this.plot = plotOf(doc)
+            this.year = year
+            this.tags = tags
+        }
+    }
+
+    /**
+     * Resolves every season of the series the given detail page belongs to.
+     *
+     * All three page types expose the available seasons through a `.seasons-list`
+     * block, but that list mixes the real seasons with unrelated "related series"
+     * links. The season URLs of the current show are filtered by the series name
+     * taken from the `/serie/` breadcrumb.
+     */
+    private suspend fun resolveSeriesEpisodes(
+        detailUrl: String,
+        doc: Document,
+        anchor: String?,
+        seriesName: String,
+        poster: String?
+    ): List<Episode> {
+        val anchorDoc = if (anchor != null && anchor != detailUrl) safeGet(anchor) ?: doc else doc
+
+        val seasons = LinkedHashSet<String>()
+        if (anchor != null) seasons += anchor
+        val candidateText = mutableMapOf<String, String>()
+        for (d in listOf(anchorDoc, doc)) {
+            d.select(".seasons-list li.movieItem a[href], .seasons-list li a[href]").forEach { a ->
+                val href = a.attr("href").trim()
+                if (href.isNotBlank() && href.contains("/season/")) {
+                    seasons += href
+                    candidateText.putIfAbsent(href, a.attr("title").ifBlank { a.text() }.trim())
+                }
+            }
+        }
+
+        val keys = listOf(normKey(seriesName), normKey(seriesNameFromUrl(anchor ?: detailUrl)))
+            .filter { it.isNotBlank() }
+            .distinct()
+
+        val sameSeries = if (keys.isEmpty()) {
+            seasons.toList()
+        } else {
+            seasons.filter { href ->
+                val text = candidateText[href].orEmpty()
+                keys.any { key -> normKey(decode(text)).contains(key) }
+            }
+        }
+        val finalSeasons = sameSeries.ifEmpty {
+            if (anchor != null) listOf(anchor) else seasons.toList()
+        }
+
+        val episodes = mutableListOf<Episode>()
+        finalSeasons.forEachIndexed { index, seasonUrl ->
+            val sdoc = if (seasonUrl == detailUrl) doc else safeGet(seasonUrl) ?: return@forEachIndexed
+            val seasonNumber = arabicSeason(seasonTitleOf(sdoc, seasonUrl)) ?: (index + 1)
+            episodes += parseEpisodeLinks(sdoc, seasonNumber, poster)
+        }
+
+        return episodes
+            .distinctBy { it.data }
+            .sortedWith(compareBy({ it.season ?: 0 }, { it.episode ?: 0 }))
+    }
+
+    private suspend fun safeGet(target: String): Document? = try {
+        app.get(target, headers = PAGE_HEADERS, referer = mainUrl).document
+    } catch (e: Throwable) {
+        Log.i(TAG, "season fetch failed $target -> $e")
+        null
+    }
+
+    private fun anchorSeasonUrl(detailUrl: String, doc: Document): String? = when {
+        detailUrl.contains("/season/") -> detailUrl
+        detailUrl.contains("/episode/") ->
+            doc.selectFirst(".breadcrumbs-single a[href*='/season/']")
+                ?.attr("href")?.trim()?.takeIf { it.isNotBlank() }
+        else -> null
+    }
+
+    /**
+     * The site slugs encode the series name, e.g.
+     * `/season/مسلسل-into-the-badlands-الموسم-الثالث-مترجم-كامل/`. Stripping the known
+     * decorations yields a clean, stable series name that is also used to tell the
+     * current series' seasons apart from the unrelated "related series" cards.
+     */
+    private fun seriesNameFromUrl(rawUrl: String): String {
+        var s = decode(rawUrl).substringBefore("?")
+        s = when {
+            s.contains("/serie/") -> s.substringAfterLast("/serie/")
+            s.contains("/season/") -> s.substringAfterLast("/season/")
+            s.contains("/episode/") -> s.substringAfterLast("/episode/")
+            else -> s
+        }
+        s = s.trim('/')
+        s = s.replace("جميع-مواسم", " ").replace("جميع مواسم", " ").trim()
+        s = s.substringAfter("مسلسل", s).trim('-')
+        s = s.substringBefore("الموسم").substringBefore("موسم")
+            .substringBefore("مترجم").substringBefore("مدبلج")
+            .substringBefore("الحلقه").substringBefore("الحلقة")
+            .trim('-')
+        return s.replace('-', ' ').replace(Regex("\\s+"), " ").trim()
+    }
+
+    private fun seasonTitleOf(doc: Document, seasonUrl: String): String =
+        "${titleOf(doc)} ${decode(seasonUrl)}".trim()
+
+    private fun seriesDisplayName(detailUrl: String, doc: Document, anchor: String?): String {
+        if (detailUrl.contains("/episode/")) {
+            return seriesNameFromUrl(anchor ?: detailUrl).ifBlank { cleanSeriesName(titleOf(doc)) }
+        }
+        // The season/series breadcrumb holds the real series crumb, but a bare `/serie/`
+        // entry is just the listing ("المسلسلات") and must be ignored.
+        val crumb = doc.selectFirst(".breadcrumbs-single a[href*='/serie/']")
+            ?.takeIf { it.attr("href").trimEnd('/').substringAfter(mainUrl).trimEnd('/') != "/serie" }
+            ?.text()?.trim()
+        val raw = crumb?.takeIf { it.isNotBlank() } ?: doc.title().substringBefore("|").trim()
+        return cleanSeriesName(raw).ifBlank { seriesNameFromUrl(anchor ?: detailUrl) }
+    }
+
+    private fun cleanSeriesName(raw: String): String {
+        var t = raw.substringBefore("|").trim()
+        listOf(
+            "جميع مواسم", "جميع المواسم", "مشاهدة", "مسلسل", "انمي", "أنمي",
+            "مترجمة", "مترجم", "مدبلجة", "مدبلج", "كامل", "الموسم", "موسم"
+        ).forEach { t = t.replace(it, " ") }
+        SEASON_WORDS.forEach { (w, _) -> t = t.replace(w, " ") }
+        t = t.replace(Regex("\\s+"), " ").trim()
+        return t.ifBlank { raw.trim() }
+    }
+
+    private fun decode(value: String): String = try {
+        java.net.URLDecoder.decode(value, "UTF-8")
+    } catch (_: Throwable) {
+        value
+    }
+
+    private fun normKey(value: String): String =
+        value.lowercase().filter { it.isLetterOrDigit() }
 
     private fun parseEpisodeLinks(doc: Document, season: Int, poster: String?): List<Episode> =
         doc.select("div.EpsList li a[href], ul.EpsList li a[href]").mapNotNull { a ->
@@ -246,7 +373,7 @@ class EgyDead : MainAPI() {
 
     private fun arabicSeason(text: String): Int? {
         Regex("الموسم\\s*(\\d+)").find(text)?.groupValues?.get(1)?.toIntOrNull()?.let { return it }
-        SEASON_WORDS.forEachIndexed { i, w -> if (text.contains(w)) return i + 1 }
+        SEASON_WORDS.forEach { (word, number) -> if (text.contains(word)) return number }
         Regex("(?i)S(\\d{1,2})").find(text)?.groupValues?.get(1)?.toIntOrNull()?.let { return it }
         return null
     }
@@ -260,7 +387,7 @@ class EgyDead : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val doc = try {
-            app.post(data, data = mapOf("View" to "1"), referer = data).document
+            app.post(data, data = mapOf("View" to "1"), referer = data, headers = PAGE_HEADERS).document
         } catch (e: Throwable) {
             Log.i(TAG, "View=1 failed $data -> $e")
             return false
@@ -330,7 +457,7 @@ class EgyDead : MainAPI() {
      */
     private suspend fun resolveMirrors(iframeUrl: String): List<String> {
         val page = try {
-            app.get(iframeUrl, referer = mainUrl).text
+            app.get(iframeUrl, headers = PAGE_HEADERS, referer = mainUrl).text
         } catch (e: Throwable) {
             return emptyList()
         }
@@ -341,6 +468,7 @@ class EgyDead : MainAPI() {
             app.get(
                 iframeUrl,
                 headers = mapOf(
+                    "User-Agent" to USER_AGENT,
                     "X-Inertia" to "true",
                     "X-Inertia-Version" to version,
                     "X-Inertia-Partial-Component" to IFRAME_HOST,
