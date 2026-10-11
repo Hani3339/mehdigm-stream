@@ -20,9 +20,13 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
+import java.util.concurrent.TimeUnit
 
 /**
  * Egywatch (إيجي واتش) provider.
@@ -88,6 +92,13 @@ class Egywatch : MainAPI() {
 
     // ------------------------------------------------------------------ HTTP
 
+    private val probeClient by lazy {
+        app.baseClient.newBuilder()
+            .connectTimeout(8, TimeUnit.SECONDS)
+            .readTimeout(8, TimeUnit.SECONDS)
+            .build()
+    }
+
     private suspend fun getJson(path: String): JSONObject? {
         var last: Throwable? = null
         for (base in BASES) {
@@ -110,6 +121,27 @@ class Egywatch : MainAPI() {
             }
         }
         return emptyList()
+    }
+
+    /**
+     * Some entries in the video list look like real files but are empty placeholders on the CDN
+     * (they answer `416 Range Not Satisfiable` / size 0). Probe with a minimal range request and
+     * only treat a definitive 416/404 as dead, so uncertain responses never drop a good source.
+     */
+    private suspend fun isDeadDirect(url: String, userAgent: String?): Boolean {
+        return try {
+            val request = Request.Builder()
+                .url(url)
+                .header("User-Agent", userAgent ?: APP_UA)
+                .header("Range", "bytes=0-1")
+                .get()
+                .build()
+            withContext(Dispatchers.IO) { probeClient.newCall(request).execute() }.use { response ->
+                response.code == 416 || response.code == 404
+            }
+        } catch (e: Exception) {
+            false
+        }
     }
 
     // ------------------------------------------------------------------ main
@@ -320,8 +352,12 @@ class Egywatch : MainAPI() {
         val headerRaw = video.optString("header")
         val referer = if (headerRaw.startsWith("http")) headerRaw else null
 
-        // Direct media file — no extraction needed.
+        // Direct media file — no extraction needed, but skip empty placeholders.
         if (DIRECT_FILE.containsMatchIn(link)) {
+            if (isDeadDirect(link, userAgent)) {
+                Log.i(TAG, "dead direct link, skipped: $link")
+                return false
+            }
             callback(newExtractorLink(name, server, link, ExtractorLinkType.VIDEO) {
                 this.referer = referer ?: mainUrl
                 if (!userAgent.isNullOrBlank()) this.headers = mapOf("User-Agent" to userAgent)

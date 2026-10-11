@@ -1,4 +1,4 @@
-version = 1
+version = 2
 
 cloudstream {
     description = "Egywatch — إيجي واتش | أفلام ومسلسلات وأنمي وبث مباشر مترجم."
