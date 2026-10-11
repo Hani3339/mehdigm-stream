@@ -93,13 +93,37 @@ object EgywatchHostExtractor {
         add(listOf("vidnest"), listOf("vidnest.com"), "https://mawdhou3.com/scrapefinal/vidnest.php?api=")
         add(listOf("turbovidhls"), listOf("turbovidhls.com"), "https://mawdhou3.com/scrapefinal/turbovidhls.php?api=")
         add(listOf("arabseeeed.com"), listOf("arabseed"), "https://mawdhou3.com/test.php?api=")
+        // Hosts seen live in captured Egywatch traffic but absent from hosts/config domain lists.
+        add(listOf("minochinos"), listOf("minochinos.com"), "https://mawdhou3.com/scrapefinal/earnvids.php")
+        add(listOf("callistanise"), listOf("callistanise.com"), "https://mawdhou3.com/scrapefinal/earnvids.php")
+        add(listOf("hanerix"), listOf("hanerix.com"), "https://mawdhou3.com/scrapefinal/earnvids.php")
+        add(listOf("morencius"), listOf("morencius.com"), "https://mawdhou3.com/scrapefinal/earnvids.php")
+        add(listOf("streamwish"), listOf("streamwish.fun", "streamwish.com"), "https://mawdhou3.com/scrapefinal/earnvids.php")
+        add(listOf("forafile"), listOf("forafile.com"), "https://mawdhou3.com/recuperepost.php")
+        add(listOf("fasel-hd"), listOf("fasel-hd.co"), "https://mawdhou3.com/scripttestfasel.php?api=")
+        add(listOf("mp4plus"), listOf("mp4plus.cyou"), "https://mawdhou3.com/scrapefinal/earnvids.php")
         return rules
     }
 
     private val RULES by lazy { buildRules() }
 
-    private fun matchRule(host: String): HostRule? =
-        RULES.firstOrNull { r -> r.domains.any { d -> host.contains(d.lowercase()) } || r.hostIds.any { id -> host.contains(id.lowercase()) } }
+    /** Registrable label, e.g. `mp5.okhd.site` / `okhd.com` -> `okhd`. */
+    private fun baseName(value: String): String {
+        val h = value.substringBefore(':').lowercase()
+        val parts = h.split('.').filter { it.isNotBlank() }
+        if (parts.isEmpty()) return h
+        // Strip the public suffix-ish tail, then drop generic prefixes.
+        val core = if (parts.size >= 2) parts[parts.size - 2] else parts[0]
+        return core.removePrefix("www")
+    }
+
+    private fun matchRule(host: String): HostRule? {
+        val hb = baseName(host)
+        return RULES.firstOrNull { r ->
+            r.domains.any { d -> baseName(d) == hb || host.contains(d.lowercase()) } ||
+                r.hostIds.any { id -> baseName(id) == hb || host.contains(id.lowercase()) }
+        }
+    }
 
     suspend fun extract(
         link: String,

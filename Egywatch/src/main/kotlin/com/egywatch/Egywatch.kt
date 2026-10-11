@@ -1,6 +1,8 @@
 package com.egywatch
 
 import android.util.Log
+import com.lagradost.cloudstream3.Actor
+import com.lagradost.cloudstream3.ActorData
 import com.lagradost.cloudstream3.Episode
 import com.lagradost.cloudstream3.HomePageResponse
 import com.lagradost.cloudstream3.LoadResponse
@@ -217,6 +219,7 @@ class Egywatch : MainAPI() {
             this.year = json.optString("release_date").take(4).toIntOrNull()
             this.tags = genresOf(json)
             this.duration = json.optString("runtime").toIntOrNull()
+            this.actors = castOf(json)
         }
     }
 
@@ -227,6 +230,7 @@ class Egywatch : MainAPI() {
             this.posterUrl = json.optString("poster_path").ifBlank { null }
             this.plot = json.optString("overview").ifBlank { null }
             this.tags = genresOf(json)
+            this.actors = castOf(json)
         }
     }
 
@@ -268,12 +272,27 @@ class Egywatch : MainAPI() {
             this.plot = json.optString("overview").ifBlank { null }
             this.year = json.optString("first_air_date").take(4).toIntOrNull()
             this.tags = genresOf(json)
+            this.actors = castOf(json)
         }
     }
 
     private fun genresOf(json: JSONObject): List<String> {
         val arr = json.optJSONArray("genreslist") ?: return emptyList()
         return (0 until arr.length()).mapNotNull { arr.optString(it).ifBlank { null } }
+    }
+
+    /** `casterslist` -> [{name, profile_path}] as CloudStream actor entries. */
+    private fun castOf(json: JSONObject): List<ActorData> {
+        val arr = json.optJSONArray("casterslist") ?: return emptyList()
+        val result = mutableListOf<ActorData>()
+        for (i in 0 until arr.length()) {
+            val o = runCatching { arr.getJSONObject(i) }.getOrNull() ?: continue
+            val name = o.optString("name").ifBlank { o.optString("original_name") }.trim()
+            if (name.isBlank()) continue
+            val image = o.optString("profile_path").ifBlank { null }
+            result += ActorData(Actor(name, image), roleString = null)
+        }
+        return result
     }
 
     // ----------------------------------------------------------------- links
