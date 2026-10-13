@@ -481,12 +481,48 @@ jobs:
 
           echo "📦 Extracting full state to / ..."
 
-          $SUDO tar \
-            --zstd \
-            -xpf "$RUNNER_TEMP/oc4life-restore.tar.zst" \
+          # --------------------------------------------------------
+          # Decompress FIRST, then extract.
+          #
+          # The 4Life archive captures the runner's own zstd binary
+          # (/usr/local/bin/zstd) through the system-dir delta. If tar
+          # decompresses on the fly (`tar --zstd`), it spawns zstd and
+          # then tries to overwrite that very executable while it is
+          # still running, which fails with:
+          #
+          #   tar: usr/local/bin/zstd: Cannot open: Text file busy
+          #   tar: Exiting with failure status due to previous errors
+          #
+          # (ETXTBSY) and aborts the whole restore with exit code 2.
+          # Decompressing first lets zstd exit before tar writes
+          # anything, so the busy file is gone by extraction time.
+          # --------------------------------------------------------
+
+          PLAIN_TAR="$RUNNER_TEMP/oc4life-restore.tar"
+
+          rm -f "$PLAIN_TAR"
+
+          if ! zstd -q -d -f \
+            "$RUNNER_TEMP/oc4life-restore.tar.zst" \
+            -o "$PLAIN_TAR"; then
+
+            echo "⚠️ Decompression failed — starting fresh."
+            exit 0
+
+          fi
+
+          # Extraction must never abort the whole job with a fatal
+          # exit code if an odd file cannot be written; the session can
+          # still run with the (partially) restored state.
+          if ! $SUDO tar \
+            -xpf "$PLAIN_TAR" \
             -C / \
             --overwrite \
-            --transform="s|^home/[^/]*|home/$(id -un)|"
+            --transform="s|^home/[^/]*|home/$(id -un)|"; then
+
+            echo "⚠️ tar reported errors while extracting — continuing with the files it managed to restore."
+
+          fi
 
           # Replace the live DB with the consistent snapshot that was
           # stored inside the archive.
@@ -511,6 +547,7 @@ jobs:
           rm -f \
             "$RUNNER_TEMP/oc4life-restore.enc" \
             "$RUNNER_TEMP/oc4life-restore.tar.zst" \
+            "$RUNNER_TEMP/oc4life-restore.tar" \
             2>/dev/null || true
 
           echo "✅ OpenCode 4Life state restored."
