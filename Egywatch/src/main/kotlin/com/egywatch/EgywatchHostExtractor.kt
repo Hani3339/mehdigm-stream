@@ -4,6 +4,7 @@ import android.util.Log
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.utils.M3u8Helper
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import org.json.JSONArray
 import org.json.JSONObject
@@ -24,6 +25,7 @@ object EgywatchHostExtractor {
     private const val SCRAPER = "https://mawdhou3.com/"
     private const val BROWSER_UA =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+    private const val ACCEPT_LANGUAGE = "en-US,en;q=0.9"
 
     private val DEAD_HOSTS = listOf("ostvapp.cam", "admin.dramaramadan.net")
 
@@ -148,16 +150,30 @@ object EgywatchHostExtractor {
             if (resolveRedirectWorker(link, server, userAgent, callback)) return true
         }
 
-        val fetchHeaders = buildMap {
+        // The embed page mints the CDN token bound to the exact User-Agent +
+        // Accept-Language of the request that fetched it (e.g. luluvdo -> *.tnmr.org
+        // answers 403 the moment these differ), so the SAME header set must be used
+        // to fetch the page and to play the emitted link.
+        val cdnHeaders = buildMap {
             put("User-Agent", userAgent ?: BROWSER_UA)
+            put("Accept-Language", ACCEPT_LANGUAGE)
             if (!origin.isNullOrBlank()) put("Origin", origin)
         }
-        val playReferer = referer?.takeIf { it.startsWith("http") } ?: "https://$host/"
+        val embedOrigin = "https://$host/"
+        // Playback referer: the embed origin, unless the API gave a referer on the
+        // same registrable domain (some hosts hand out the embed domain while the
+        // API header points at a different player page, e.g. updown.icu vs
+        // topcinema.media — that mismatch is what triggered the 403).
+        val playReferer = when {
+            referer.isNullOrBlank() -> embedOrigin
+            label(hostOf(referer)) == label(host) -> referer
+            else -> embedOrigin
+        }
 
         val rule = matchRule(host)
 
         val embed = runCatching {
-            app.get(link, headers = fetchHeaders, referer = referer, allowRedirects = true)
+            app.get(link, headers = cdnHeaders, referer = referer, allowRedirects = true)
         }.getOrNull()?.let { if (it.code in 200..299) it.text else null }
 
         // Directly readable embeds (e.g. anafast: `sources: [{file: "…m3u8"}]`). This is a fast
@@ -165,14 +181,14 @@ object EgywatchHostExtractor {
         suspend fun tryDirect(): Boolean {
             if (embed == null) return false
             val direct = parseLinks(embed)
-            return direct.isNotEmpty() && emit(direct, server, playReferer, callback)
+            return direct.isNotEmpty() && emit(direct, server, playReferer, cdnHeaders, callback)
         }
 
         if (rule == null) return tryDirect()
 
         if (rule.method == Method.GET) {
             val body = runCatching { app.get(buildGetUrl(rule.endpoint, link), referer = SCRAPER).text }.getOrNull()
-            if (emit(parseLinks(body), server, playReferer, callback)) return true
+            if (emit(parseLinks(body), server, playReferer, cdnHeaders, callback)) return true
             return tryDirect()
         }
 
@@ -186,10 +202,10 @@ object EgywatchHostExtractor {
                     referer = SCRAPER
                 ).text
             }.getOrNull()
-            if (emit(parseLinks(body), server, playReferer, callback)) return true
+            if (emit(parseLinks(body), server, playReferer, cdnHeaders, callback)) return true
         }
         val body = runCatching { app.get(buildGetUrl(rule.endpoint, link), referer = SCRAPER).text }.getOrNull()
-        if (emit(parseLinks(body), server, playReferer, callback)) return true
+        if (emit(parseLinks(body), server, playReferer, cdnHeaders, callback)) return true
         return tryDirect()
     }
 
@@ -203,7 +219,7 @@ object EgywatchHostExtractor {
         val body = runCatching {
             app.get(link, headers = mapOf("User-Agent" to (userAgent ?: BROWSER_UA))).text
         }.getOrNull() ?: return false
-        return emit(parseLinks(body), server, null, callback)
+        return emit(parseLinks(body), server, null, emptyMap(), callback)
     }
 
     /** `…/get-links?id=` answers 302 with the final media URL in `Location`. */
@@ -218,7 +234,7 @@ object EgywatchHostExtractor {
         }.getOrNull() ?: return false
         val location = response.headers["Location"] ?: response.headers["location"] ?: return false
         if (!location.startsWith("http")) return false
-        emit(listOf(location to null), server, null, callback)
+        emit(listOf(location to null), server, null, emptyMap(), callback)
         return true
     }
 
@@ -226,6 +242,7 @@ object EgywatchHostExtractor {
         links: List<Pair<String, Int?>>,
         server: String,
         referer: String?,
+        headers: Map<String, String>,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         if (links.isEmpty()) return false
@@ -234,6 +251,20 @@ object EgywatchHostExtractor {
         for ((url, height) in links) {
             val key = if (url.contains(".m3u8")) url.substringBefore('?') else url
             if (!seen.add(key)) continue
+            // HLS: enumerate variants through M3u8Helper so the (token-bound) request
+            // headers reach master, variants and segments. When the helper cannot parse
+            // the playlist (e.g. fMP4-only) we still emit the raw master with headers.
+            if (url.contains(".m3u8") && !referer.isNullOrBlank()) {
+                val fetchHeaders = headers + mapOf("Referer" to referer)
+                val generated = runCatching {
+                    M3u8Helper.generateM3u8(server, url, referer, headers = fetchHeaders)
+                }.getOrNull()
+                if (!generated.isNullOrEmpty()) {
+                    generated.forEach { callback(it) }
+                    found = true
+                    continue
+                }
+            }
             callback(
                 newExtractorLink(
                     server,
@@ -242,6 +273,7 @@ object EgywatchHostExtractor {
                     if (url.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                 ) {
                     if (!referer.isNullOrBlank()) this.referer = referer
+                    if (headers.isNotEmpty()) this.headers = headers.toMutableMap()
                     if (height != null) this.quality = height
                 }
             )
