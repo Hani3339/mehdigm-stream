@@ -29,9 +29,9 @@ import org.json.JSONObject
  *  answer HTTP 403 unless BOTH `Referer` and `Origin: https://photos.google.com`
  *  are sent, and they are pinned to the `User-Agent` that minted them — exactly
  *  the headers [PHOTO_HEADERS] carries. The probed progressive `=m37` / `=m22` /
- *  `=m18` MP4 renditions are the only emitted sources: the DASH manifests serve
- *  IP-pinned, short-lived segment URLs, so seeking past the buffered range hits
- *  an expired segment and errors — the MP4 renditions seek reliably.
+ *  `=m18` MP4 renditions are the preferred sources (they seek reliably); the
+ *  adaptive DASH manifest is emitted only as a last resort when no MP4 rendition
+ *  exists, since its IP-pinned, short-lived segments make seeking unreliable.
  *
  *  This file is intentionally the single place where extraction lives; the main
  *  API only fetches/decrypts the server list and hands each link to [emit].
@@ -47,6 +47,10 @@ object AnimeDayExtractors {
 
     private const val PHOTO_REFERER = "https://photos.google.com/"
     private const val PHOTO_ORIGIN = "https://photos.google.com"
+
+    /** DASH option that lists every real rendition (audio + video), exactly like the apps' player. */
+    private const val DASH_OPTION =
+        "=mm,dash-vm-vf,dr.sdr,sdrCodec.vp9.h264?alr=true&mpd_version=5&pacing=0"
 
     /**
      * Google Photos googlevideo URLs are pinned to the `User-Agent` that minted
@@ -418,7 +422,9 @@ object AnimeDayExtractors {
      *   The progressive muxed MP4 renditions (`=m37`/`=m22`/`=m18`). Those
      *   suffixes are NOT fixed resolutions, so each one is probed and its real
      *   size is read straight from the MP4 `tkhd` box; renditions that do not
-     *   exist (e.g. a 404 on `=m37`) are skipped.
+     *   exist (e.g. a 404 on `=m37`) are skipped. Only when *no* MP4 rendition
+     *   exists is the adaptive DASH manifest emitted as a last resort, so an
+     *   episode that offers nothing else still plays (its seek may be imperfect).
      *
      * Google Photos googlevideo URLs answer HTTP 403 unless BOTH the `Referer`
      * and `Origin: https://photos.google.com` are sent, and they are pinned to
@@ -447,6 +453,23 @@ object AnimeDayExtractors {
                     this.quality = size.second
                 }
             )
+        }
+
+        // Last-resort fallback: when Google Photos exposes no progressive MP4
+        // rendition, fall back to the adaptive DASH manifest so the episode still
+        // plays. Seeking past the buffered range may fail (the segments are
+        // IP-pinned and short-lived), which is why MP4 is preferred.
+        if (!found) {
+            val adaptiveUrl = base + DASH_OPTION + "&_=" + System.currentTimeMillis().toString(36)
+            if (done.add("ga:$adaptiveUrl")) {
+                found = true
+                callback(
+                    newExtractorLink(label, "DASH تلقائي", adaptiveUrl, ExtractorLinkType.DASH) {
+                        this.referer = PHOTO_REFERER
+                        this.headers = PHOTO_HEADERS
+                    }
+                )
+            }
         }
         return found
     }
