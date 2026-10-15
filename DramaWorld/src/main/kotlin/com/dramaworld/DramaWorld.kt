@@ -21,6 +21,11 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
@@ -64,6 +69,16 @@ class DramaWorld : MainAPI() {
 
         private const val MAIN_HOST = "https://dwapp.arabypros.com"
         private const val DETAIL_URL = "$MAIN_HOST/detail/"
+
+        // While resolving the embed list every source runs in parallel; a dead or hung host is
+        // dropped after this budget instead of stalling the whole player load.
+        private const val SOURCE_TIMEOUT_MS = 12_000L
+
+        // Embeds that are JS-rendered or no longer resolve. They are squeezed to the end of the
+        // queue so working servers surface first, but they are still attempted (never removed).
+        private val DEAD_OR_SLOW_HOSTS = setOf(
+            "streamhls", "uqload", "cimanow", "cimanowtv", "upns", "tuktuk", "megamax", "megatuktuk"
+        )
     }
 
     override var name = "DramaWorld"
@@ -406,26 +421,33 @@ class DramaWorld : MainAPI() {
             return false
         }
 
-        val seen = mutableSetOf<String>()
-        val emit: (ExtractorLink) -> Unit = { link -> if (seen.add(link.url)) callback(link) }
+        // Sources are resolved in parallel, so guard the shared dedup set and serialise the
+        // framework callbacks (they are not documented as thread-safe).
+        val seen = HashSet<String>()
+        val lock = Any()
+        val emit: (ExtractorLink) -> Unit = { link ->
+            synchronized(lock) { if (seen.add(link.url)) callback(link) }
+        }
+        val emitSub: (SubtitleFile) -> Unit = { sub ->
+            synchronized(lock) { subtitleCallback(sub) }
+        }
 
         val handled = when {
             data.contains(CHANNEL_DATA) -> {
                 val channel = getJson(api("channel/by/$id"))
                 val sources = channel?.optJSONArray("sources") ?: JSONArray()
-                for (i in 0 until sources.length()) {
-                    sources.optJSONObject(i)?.let { emitSource(it, subtitleCallback, emit) }
-                }
+                val list = (0 until sources.length()).mapNotNull { sources.optJSONObject(it) }
+                extractSources(list, emitSub, emit)
                 true
             }
             data.contains(MOVIE_DATA) -> {
-                loadSources(api("movie/source/by/$id"), subtitleCallback, emit)
-                loadSubtitles(api("subtitles/by/movie/$id"), subtitleCallback)
+                loadSources(api("movie/source/by/$id"), emitSub, emit)
+                loadSubtitles(api("subtitles/by/movie/$id"), emitSub)
                 true
             }
             data.contains(EPISODE_DATA) -> {
-                loadSources(api("episode/source/by/$id"), subtitleCallback, emit)
-                loadSubtitles(api("subtitles/by/episode/$id"), subtitleCallback)
+                loadSources(api("episode/source/by/$id"), emitSub, emit)
+                loadSubtitles(api("subtitles/by/episode/$id"), emitSub)
                 true
             }
             else -> {
@@ -457,10 +479,42 @@ class DramaWorld : MainAPI() {
         } catch (e: Throwable) {
             JSONArray()
         }
-        for (i in 0 until array.length()) {
-            array.optJSONObject(i)?.let { emitSource(it, subtitleCallback, callback) }
+        val list = (0 until array.length()).mapNotNull { array.optJSONObject(it) }
+        extractSources(list, subtitleCallback, callback)
+    }
+
+    /**
+     * Resolves every source concurrently. Each one gets its own [SOURCE_TIMEOUT_MS] budget so a
+     * dead/Cloudflare-blocked embed fails on its own instead of holding the player host; working
+     * servers are queued first so playable links surface immediately. Results are streamed to the
+     * callbacks as each source lands (never batched), and no source is ever silently dropped.
+     */
+    private suspend fun extractSources(
+        sources: List<JSONObject>,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        if (sources.isEmpty()) return
+        val ordered = sources.sortedBy { sourcePriority(it.optString("url")) }
+        supervisorScope {
+            ordered.map { src ->
+                async(Dispatchers.IO) {
+                    val link = src.optString("url")
+                    try {
+                        withTimeoutOrNull(SOURCE_TIMEOUT_MS) {
+                            emitSource(src, subtitleCallback, callback)
+                        }
+                    } catch (e: Throwable) {
+                        android.util.Log.i(TAG, "extract FAILED $link -> $e")
+                    }
+                }
+            }.awaitAll()
         }
     }
+
+    /** Working hosts first, known JS-rendered/dead embeds last (stable, preserves API order). */
+    private fun sourcePriority(url: String): Int =
+        if ((hostLabelOf(url) ?: "") in DEAD_OR_SLOW_HOSTS) 1 else 0
 
     private suspend fun emitSource(
         src: JSONObject,
