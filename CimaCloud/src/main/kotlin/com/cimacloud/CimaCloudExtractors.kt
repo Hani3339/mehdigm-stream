@@ -10,7 +10,6 @@ import com.lagradost.cloudstream3.utils.M3u8Helper
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import org.json.JSONObject
-import kotlin.random.Random
 
 /**
  * ============================================================================
@@ -29,9 +28,10 @@ import kotlin.random.Random
  *  manifest (`=mm,dash-vm-vf,...`). Its googlevideo segments are IP-pinned and
  *  answer HTTP 403 unless BOTH `Referer` and `Origin: https://photos.google.com`
  *  are sent, and they are pinned to the `User-Agent` that minted them — exactly
- *  the headers [PHOTO_HEADERS] carries. The full adaptive manifest and the probed
- *  progressive `=m37` / `=m22` / `=m18` MP4 renditions are emitted as the stable
- *  sources.
+ *  the headers [PHOTO_HEADERS] carries. The probed progressive `=m37` / `=m22` /
+ *  `=m18` MP4 renditions are the only emitted sources: the DASH manifests serve
+ *  IP-pinned, short-lived segment URLs, so seeking past the buffered range hits
+ *  an expired segment and errors — the MP4 renditions seek reliably.
  *
  *  This file is intentionally the single place where extraction lives; the main
  *  API only fetches/decrypts the server list and hands each link to [emit].
@@ -47,10 +47,6 @@ object CimaCloudExtractors {
 
     private const val PHOTO_REFERER = "https://photos.google.com/"
     private const val PHOTO_ORIGIN = "https://photos.google.com"
-
-    /** DASH option that lists every real rendition (audio + video), exactly like the apps' player. */
-    private const val DASH_OPTION =
-        "=mm,dash-vm-vf,dr.sdr,sdrCodec.vp9.h264?alr=true&mpd_version=5&pacing=0"
 
     /**
      * Google Photos googlevideo URLs are pinned to the `User-Agent` that minted
@@ -69,29 +65,6 @@ object CimaCloudExtractors {
         "$PHP_BASE/advanced_extractor.php"
     )
     private val SEEKABLE = listOf("=m37", "=m22", "=m18")
-
-    /**
-     * A per-play nonce appended to the DASH manifest URL.
-     *
-     * Google's DASH manifest embeds googlevideo `BaseURL`s that are pinned to the
-     * fetching IP and carry a short `expire`/`sig`. CloudStream caches by URL, so a
-     * manifest cached on an earlier play is served again later with already-expired
-     * segment URLs: the stream then starts (cached first segments) but every seek to
-     * an unbuffered position hits an expired segment (HTTP 403), the player reports
-     * an error and falls back to the next link. Changing the URL every play forces a
-     * brand-new manifest with fresh, valid segment URLs. The nonce is stable for the
-     * whole duration of one [newSession] so the same episode never emits duplicates.
-     */
-    @Volatile
-    private var sessionNonce: String = System.currentTimeMillis().toString(36)
-
-    /** Rotate the manifest nonce once per link-loading run (call from loadLinks). */
-    fun newSession() {
-        sessionNonce = System.currentTimeMillis().toString(36) + Integer.toHexString(Random.nextInt())
-    }
-
-    private fun freshDash(url: String): String =
-        if (url.contains("?")) "$url&_=$sessionNonce" else "$url?_=$sessionNonce"
 
     private val PW_RE = Regex("""https://lh3\.googleusercontent\.com/pw/[^=?"'\s\\]+""")
     private val HTML_RE = Regex("""data-url="(https://lh3\.googleusercontent\.com/pw/[^\s"?]+)""")
@@ -402,7 +375,7 @@ object CimaCloudExtractors {
     ): Boolean {
         val base = resolveGphotoBase(link)
         android.util.Log.i("CimaCloudExtractors", "gphotos base=${base != null} link=${link.take(140)}")
-        if (base != null) return emitGooglePhotos(base, label, link, mutableSetOf(), emit)
+        if (base != null) return emitGooglePhotos(base, label, mutableSetOf(), emit)
         return emitUnknown(link, referer, label, quality, subtitleCallback, emit)
     }
 
@@ -442,17 +415,16 @@ object CimaCloudExtractors {
     /**
      * Emit the stable Google Photos sources:
      *
-     *   1. The full adaptive DASH manifest (`DASH تلقائي`).
-     *   2. The progressive muxed MP4 renditions (`=m37`/`=m22`/`=m18`). Those
-     *      suffixes are NOT fixed resolutions, so each one is probed and its real
-     *      size is read straight from the MP4 `tkhd` box; renditions that do not
-     *      exist (e.g. a 404 on `=m37`) are skipped.
+     *   The progressive muxed MP4 renditions (`=m37`/`=m22`/`=m18`). Those
+     *   suffixes are NOT fixed resolutions, so each one is probed and its real
+     *   size is read straight from the MP4 `tkhd` box; renditions that do not
+     *   exist (e.g. a 404 on `=m37`) are skipped.
      *
      * Google Photos googlevideo URLs answer HTTP 403 unless BOTH the `Referer`
      * and `Origin: https://photos.google.com` are sent, and they are pinned to
      * the `User-Agent` that requested the manifest — hence [PHOTO_HEADERS] carries
      * the browser UA. CloudStream forwards an [ExtractorLink]'s `referer` +
-     * `headers` to every manifest/segment request, so every emitted link plays.
+     * `headers` to every segment request, so every emitted link plays.
      *
      * The API/website lists the same Google Photos base many times (once per
      * "quality"); [done] collapses those repeated servers into one source each.
@@ -460,26 +432,10 @@ object CimaCloudExtractors {
     internal suspend fun emitGooglePhotos(
         base: String,
         label: String,
-        dashHint: String?,
         done: MutableSet<String>,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         var found = false
-
-        val dashUrl = base + DASH_OPTION
-
-        // Direct adaptive DASH manifest — a fresh URL every session so the
-        // player's cache never replays a manifest with already-expired segments.
-        val adaptiveUrl = freshDash(dashUrl)
-        if (done.add("ga:$adaptiveUrl")) {
-            found = true
-            callback(
-                newExtractorLink(label, "DASH تلقائي", adaptiveUrl, ExtractorLinkType.DASH) {
-                    this.referer = PHOTO_REFERER
-                    this.headers = PHOTO_HEADERS
-                }
-            )
-        }
 
         // Direct progressive MP4 qualities (muxed video+audio).
         for (suffix in SEEKABLE) {
@@ -598,7 +554,7 @@ object CimaCloudExtractors {
             val json = safeJson(app.get(endpoint + "?url=" + Uri.encode(pageUrl), headers = headers).text) ?: return false
             val servers = json.optJSONArray("servers") ?: return false
             var emitted = false
-            val gpBases = linkedMapOf<String, String>()
+            val gpBases = linkedSetOf<String>()
             for (i in 0 until servers.length()) {
                 val s = servers.optJSONObject(i) ?: continue
                 val u = s.optString("url").trim()
@@ -608,7 +564,7 @@ object CimaCloudExtractors {
 
                 val gpBase = gphotoBase(u)
                 if (gpBase != null) {
-                    if (!gpBases.containsKey(gpBase)) gpBases[gpBase] = u
+                    gpBases.add(gpBase)
                     continue
                 }
 
@@ -665,8 +621,8 @@ object CimaCloudExtractors {
                     )
                 }
             }
-            for ((base, dashHint) in gpBases) {
-                if (emitGooglePhotos(base, label, dashHint, done, emit)) emitted = true
+            for (base in gpBases) {
+                if (emitGooglePhotos(base, label, done, emit)) emitted = true
             }
             emitted
         } catch (e: Throwable) {
@@ -704,7 +660,7 @@ class GooglePhotosExtractor : ExtractorApi() {
         callback: (ExtractorLink) -> Unit
     ) {
         val base = CimaCloudExtractors.gphotoBase(url) ?: return
-        CimaCloudExtractors.emitGooglePhotos(base, name, url, mutableSetOf(), callback)
+        CimaCloudExtractors.emitGooglePhotos(base, name, mutableSetOf(), callback)
     }
 }
 

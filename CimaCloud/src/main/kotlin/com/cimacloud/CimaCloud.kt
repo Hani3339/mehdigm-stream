@@ -342,7 +342,6 @@ class CimaCloud : MainAPI() {
     ): Boolean {
         var found = false
         try {
-            CimaCloudExtractors.newSession()
             val (headers, cf) = serverHeaders()
             android.util.Log.i("CimaCloud", "loadLinks GET $data cf=$cf")
             val res = app.get(data, headers = headers, allowRedirects = true)
