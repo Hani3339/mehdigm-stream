@@ -469,7 +469,8 @@ class DramaWorld : MainAPI() {
     ) {
         val link = src.optString("url").trim()
         if (link.isEmpty()) return
-        val label = src.optString("title").ifBlank { "سيرفر" }
+        // `src.title` is the stream type (m3u8/webm/mov/embed), not the server; use the embed host.
+        val label = hostLabelOf(link) ?: src.optString("title").ifBlank { "سيرفر" }
         if (isDirect(link)) {
             val type = if (link.contains(".m3u8", true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
             callback(
@@ -477,14 +478,31 @@ class DramaWorld : MainAPI() {
                     this.referer = "$mainUrl/"
                 }
             )
-        } else {
-            try {
-                loadExtractor(link, "$mainUrl/", subtitleCallback, callback)
-            } catch (e: Throwable) {
-                android.util.Log.i(TAG, "loadExtractor FAILED $link -> $e")
-            }
+            return
+        }
+        // First resolve the ecosystem embeds the official app handles via mawdhou3.com
+        // (okhd, vidspeed, morencius, vidaraa, upzur, luluvdo, vidoba, film77, anafast, mp4plus …).
+        val resolved = try {
+            DramaWorldHostExtractor.extract(link, "DramaWorld - $label", null, null, null, callback)
+        } catch (e: Throwable) {
+            android.util.Log.i(TAG, "DramaWorldHostExtractor FAILED $link -> $e")
+            false
+        }
+        if (resolved) return
+        // Anything else: fall back to CloudStream's global extractor registry.
+        try {
+            loadExtractor(link, "$mainUrl/", subtitleCallback, callback)
+        } catch (e: Throwable) {
+            android.util.Log.i(TAG, "loadExtractor FAILED $link -> $e")
         }
     }
+
+    /** Registrable label for the embed host, e.g. `mp5.okhd.site` -> `okhd`. */
+    private fun hostLabelOf(url: String): String? = runCatching {
+        val host = java.net.URI(url).host?.substringBefore(':')?.lowercase() ?: return null
+        val parts = host.split('.').filter { it.isNotBlank() }
+        if (parts.size >= 2) parts[parts.size - 2] else parts.firstOrNull()
+    }.getOrNull()
 
     private fun isDirect(url: String): Boolean =
         Regex("\\.(m3u8|mp4|webm|mkv|mpd)(\\?|#|$)", RegexOption.IGNORE_CASE).containsMatchIn(url)
