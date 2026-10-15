@@ -307,7 +307,7 @@
     "iconUrl": "https://egywatch.live/page/images/og-banner-home.jpg",
     "apiVersion": 1,
     "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-    "fileSize": 39757,
+    "fileSize": 39665,
     "status": 1,
     "language": "ar",
     "authors": [
@@ -320,7 +320,7 @@
       "AnimeMovie",
       "Live"
     ],
-    "version": 9,
+    "version": 10,
     "internalName": "Egywatch",
     "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/Egywatch.cs3",
     "name": "Egywatch (\u0625\u064a\u062c\u064a \u0648\u0627\u062a\u0634)",

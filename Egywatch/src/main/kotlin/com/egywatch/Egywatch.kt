@@ -277,7 +277,6 @@ class Egywatch : MainAPI() {
                     this.season = seasonNumber
                     this.episode = epNumber
                     this.posterUrl = still
-                    this.description = ep.optString("overview").ifBlank { null }
                 }
             }
         }
