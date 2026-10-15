@@ -67,6 +67,9 @@ class Egywatch : MainAPI() {
         )
 
         private val DIRECT_FILE = Regex("(?i)^https?://.+?\\.(mp4|m3u8|mkv|webm)(\\?.*)?$")
+
+        /** Leading markers of the pseudo-URLs we use as carrier `data`. */
+        private val TOKENS = listOf("movie:", "live:", "ep:")
     }
 
     override var name = "Egywatch"
@@ -333,7 +336,21 @@ class Egywatch : MainAPI() {
         return found
     }
 
-    private suspend fun videosFor(data: String): List<JSONObject> {
+    /**
+     * CloudStream runs the carrier `data` through [MainAPI.fixUrl] before calling [loadLinks], so a
+     * pseudo-URL like `ep:25165:1` arrives as `https://gateway.egywatch.live/ep:25165:1`. Strip
+     * everything before our own token so the id parsing below keeps working.
+     */
+    private fun carrierData(data: String): String {
+        for (token in TOKENS) {
+            val i = data.indexOf(token)
+            if (i >= 0) return data.substring(i)
+        }
+        return data
+    }
+
+    private suspend fun videosFor(rawData: String): List<JSONObject> {
+        val data = carrierData(rawData)
         val parts = data.split(":")
         return when (parts.firstOrNull()) {
             "movie" -> videosFrom("media/detail/${parts.getOrNull(1)}/$CODE")
