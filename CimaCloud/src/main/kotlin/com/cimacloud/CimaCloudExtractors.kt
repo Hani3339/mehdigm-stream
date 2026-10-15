@@ -89,18 +89,15 @@ object CimaCloudExtractors {
     private var sessionNonce: String = System.currentTimeMillis().toString(36)
 
     /** One (URL → body) manifest per session, so every listed base reuses the same
-     *  freshly-minted googlevideo segment URLs; reset by [newSession]. */
-    @Volatile
-    private var cachedManifestUrl: String? = null
-
-    @Volatile
-    private var cachedManifestBody: String? = null
+     *  freshly-minted googlevideo segment URLs; reset by [newSession]. Concurrent because
+     *  loadLinks resolves the whole server list in parallel — a plain two-field cache would
+     *  mismatch URL and body under concurrency. */
+    private val manifestCache = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     /** Rotate the manifest nonce once per link-loading run (call from loadLinks). */
     fun newSession() {
         sessionNonce = System.currentTimeMillis().toString(36) + Integer.toHexString(Random.nextInt())
-        cachedManifestUrl = null
-        cachedManifestBody = null
+        manifestCache.clear()
     }
 
     private fun freshDash(url: String): String =
@@ -546,10 +543,9 @@ object CimaCloudExtractors {
 
     /** The current session's freshly-fetched manifest for [url] (see [manifestFor]). */
     private suspend fun manifestFor(url: String): String? {
-        if (cachedManifestUrl == url) return cachedManifestBody
+        manifestCache[url]?.let { return it }
         val body = fetchManifest(url)
-        cachedManifestUrl = url
-        cachedManifestBody = body
+        if (body != null) manifestCache[url] = body
         return body
     }
 

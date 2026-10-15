@@ -23,8 +23,12 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
@@ -70,6 +74,10 @@ class Egywatch : MainAPI() {
 
         /** Leading markers of the pseudo-URLs we use as carrier `data`. */
         private val TOKENS = listOf("movie:", "live:", "ep:")
+
+        // Every video is resolved in parallel; a dead or hung embed is dropped after this budget
+        // instead of stalling the whole player load.
+        private const val SOURCE_TIMEOUT_MS = 12_000L
     }
 
     override var name = "Egywatch"
@@ -320,18 +328,31 @@ class Egywatch : MainAPI() {
             Log.i(TAG, "no videos for $data")
             return false
         }
-        // The API frequently lists the same file several times (different "quality" labels
-        // pointing at one master playlist). Collapse those into a single source.
+        // Resolve every video concurrently so a dead or Cloudflare-blocked embed fails on its own
+        // instead of holding up the player. Each gets its own [SOURCE_TIMEOUT_MS] budget. The
+        // framework callbacks are serialised because they are not documented as thread-safe.
         val emitted = HashSet<String>()
+        val lock = Any()
         val guarded: (ExtractorLink) -> Unit = { link ->
             val key = if (link.url.contains(".m3u8")) link.url.substringBefore('?') else link.url
-            if (emitted.add(key)) callback(link)
+            synchronized(lock) { if (emitted.add(key)) callback(link) }
         }
-        var found = false
-        for (video in videos) {
-            found = resolveVideo(video, subtitleCallback, guarded) || found
+        val guardedSub: (SubtitleFile) -> Unit = { sub -> synchronized(lock) { subtitleCallback(sub) } }
+        val results = supervisorScope {
+            videos.map { video ->
+                async(Dispatchers.IO) {
+                    try {
+                        withTimeoutOrNull(SOURCE_TIMEOUT_MS) {
+                            resolveVideo(video, guardedSub, guarded)
+                        } ?: false
+                    } catch (e: Throwable) {
+                        Log.i(TAG, "resolveVideo FAILED -> $e")
+                        false
+                    }
+                }
+            }.awaitAll()
         }
-        return found
+        return results.any { it }
     }
 
     /**

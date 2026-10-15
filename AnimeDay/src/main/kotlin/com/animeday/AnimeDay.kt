@@ -9,6 +9,7 @@ import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.MainAPI
 import com.lagradost.cloudstream3.MainPageRequest
 import com.lagradost.cloudstream3.SearchResponse
+import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.newEpisode
@@ -17,6 +18,11 @@ import com.lagradost.cloudstream3.newMovieLoadResponse
 import com.lagradost.cloudstream3.newMovieSearchResponse
 import com.lagradost.cloudstream3.newTvSeriesLoadResponse
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.random.Random
@@ -32,6 +38,10 @@ class AnimeDay : MainAPI() {
         private const val ALPHANUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
         private const val DEFAULT_API = "https://20042026.site/v3.8/api"
         private const val CONFIG_API = "https://backup-animeday.animegateshorts.workers.dev"
+
+        // Each server is resolved in parallel; a dead or hung one is dropped after this budget
+        // instead of stalling the whole player load.
+        private const val SOURCE_TIMEOUT_MS = 12_000L
 
         internal fun randomString(len: Int): String {
             val sb = StringBuilder(len)
@@ -356,17 +366,25 @@ class AnimeDay : MainAPI() {
             }
             val servers = json.optJSONArray("servers") ?: JSONArray()
             android.util.Log.i("AnimeDay", "loadLinks: status=${json.optString("status")} servers=${servers.length()} keys=${json.keys().asSequence().toList()}")
-            val seen = mutableSetOf<String>()
-            val emit: (ExtractorLink) -> Unit = { link -> if (seen.add(link.url)) callback(link) }
-            for (i in 0 until servers.length()) {
-                val srv = servers.optJSONObject(i) ?: continue
-                val raw = srv.optString("link").trim().replace("\\s+".toRegex(), "")
-                if (raw.isEmpty()) continue
+            val seen = HashSet<String>()
+            val lock = Any()
+            val emit: (ExtractorLink) -> Unit = { link ->
+                synchronized(lock) { if (seen.add(link.url)) callback(link) }
+            }
+            val emitSub: (SubtitleFile) -> Unit = { sub -> synchronized(lock) { subtitleCallback(sub) } }
 
-                val link = if (raw.startsWith("http")) {
-                    raw
+            // Pre-parse every server, then resolve them concurrently. A dead embed fails on its
+            // own budget (SOURCE_TIMEOUT_MS) instead of holding up the rest; the framework
+            // callbacks are serialised because they are not documented as thread-safe.
+            val parsed = (0 until servers.length()).mapNotNull { i ->
+                val srv = servers.optJSONObject(i) ?: return@mapNotNull null
+                val rawLink = srv.optString("link").trim().replace("\\s+".toRegex(), "")
+                if (rawLink.isEmpty()) return@mapNotNull null
+
+                val link = if (rawLink.startsWith("http")) {
+                    rawLink
                 } else {
-                    REFERER.trimEnd('/') + "/" + raw.trimStart('/')
+                    REFERER.trimEnd('/') + "/" + rawLink.trimStart('/')
                 }
                 val referer = srv.optString("referer")
                     .ifEmpty { srv.optString("origin") }
@@ -375,13 +393,28 @@ class AnimeDay : MainAPI() {
                     .ifEmpty { srv.optString("name") }
                     .ifEmpty { name }
                 val quality = srv.optString("height").toIntOrNull()
-
-                if (AnimeDayExtractors.emit(link, referer, label, quality, subtitleCallback, emit)) {
-                    found = true
-                }
+                Server(link, referer, label, quality)
             }
+
+            val results = supervisorScope {
+                parsed.map { s ->
+                    async(Dispatchers.IO) {
+                        try {
+                            withTimeoutOrNull(SOURCE_TIMEOUT_MS) {
+                                AnimeDayExtractors.emit(s.link, s.referer, s.label, s.quality, emitSub, emit)
+                            } ?: false
+                        } catch (e: Throwable) {
+                            android.util.Log.i("AnimeDay", "emit FAILED ${s.link.take(100)} -> $e")
+                            false
+                        }
+                    }
+                }.awaitAll()
+            }
+            if (results.any { it }) found = true
         } catch (_: Throwable) {
         }
         return found
     }
+
+    private data class Server(val link: String, val referer: String, val label: String, val quality: Int?)
 }
