@@ -92,7 +92,6 @@ class Egywatch : MainAPI() {
         "series/byrating" to "مسلسلات الأعلى تقييماً",
         "series/byviews" to "مسلسلات الأكثر مشاهدة",
         "animes/byrating" to "أنمي الأعلى تقييماً",
-        "animes/byviews" to "أنمي الأكثر مشاهدة",
         "categories/streaming/show/streaming" to "بث مباشر"
     )
 
