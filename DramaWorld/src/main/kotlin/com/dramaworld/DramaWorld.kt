@@ -371,7 +371,10 @@ class DramaWorld : MainAPI() {
                         this.season = seasonNumber
                         this.episode = e + 1
                         this.posterUrl = image
-                        this.description = ep.optString("description").ifBlank { null }
+                        // The API sends the literal string "null" for episodes without a
+                        // description, which would otherwise render as "null" in the UI.
+                        this.description = ep.optString("description")
+                            .takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
                     }
                 )
             }
