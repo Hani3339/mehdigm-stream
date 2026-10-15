@@ -23,6 +23,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.Request
 import org.json.JSONArray
@@ -103,13 +104,23 @@ class Egywatch : MainAPI() {
 
     private suspend fun getJson(path: String): JSONObject? {
         var last: Throwable? = null
-        for (base in BASES) {
-            try {
-                val text = app.get(base + path, headers = API_HEADERS).text
-                return JSONObject(text)
-            } catch (e: Throwable) {
-                last = e
+        // The gateway sporadically answers 404 with a bare `{"message":""}` (bad node);
+        // retry a couple of times across both mirrors before giving up.
+        repeat(3) { attempt ->
+            for (base in BASES) {
+                try {
+                    val text = app.get(base + path, headers = API_HEADERS).text
+                    val json = JSONObject(text)
+                    if (json.length() == 1 && json.has("message")) {
+                        last = IllegalStateException("empty message from $base")
+                        continue
+                    }
+                    return json
+                } catch (e: Throwable) {
+                    last = e
+                }
             }
+            if (attempt < 2) delay(400)
         }
         Log.i(TAG, "getJson failed $path -> $last")
         return null
@@ -359,6 +370,32 @@ class Egywatch : MainAPI() {
         return emptyList()
     }
 
+    /**
+     * The API `header` field is one of:
+     *  - ""                                        -> no extra headers
+     *  - "https://embed.host/"                     -> bare referer
+     *  - "origin:https://x|referer:https://y/"      -> explicit headers (order not guaranteed)
+     *  - "Accept-Encoding:identity|connection:..."  -> non-referer headers, ignored
+     */
+    private fun parseHeader(headerRaw: String): Pair<String?, String?> {
+        val raw = headerRaw.trim()
+        if (raw.isBlank()) return null to null
+        if (raw.startsWith("http") && !raw.contains('|')) return raw to null
+        var referer: String? = null
+        var origin: String? = null
+        raw.split('|').forEach { part ->
+            val p = part.trim()
+            val i = p.indexOf(':')
+            if (i <= 0) return@forEach
+            val value = p.substring(i + 1).trim()
+            when (p.substring(0, i).trim().lowercase()) {
+                "referer", "referrer" -> if (value.startsWith("http")) referer = value
+                "origin" -> if (value.startsWith("http")) origin = value
+            }
+        }
+        return referer to origin
+    }
+
     private suspend fun resolveVideo(
         video: JSONObject,
         subtitleCallback: (SubtitleFile) -> Unit,
@@ -368,8 +405,7 @@ class Egywatch : MainAPI() {
         if (link.isBlank() || !link.startsWith("http")) return false
         val server = video.optString("server").ifBlank { name }
         val userAgent = video.optString("useragent").ifBlank { null }
-        val headerRaw = video.optString("header")
-        val referer = if (headerRaw.startsWith("http")) headerRaw else null
+        val (referer, origin) = parseHeader(video.optString("header"))
 
         // Direct media file — no extraction needed, but skip empty placeholders.
         if (DIRECT_FILE.containsMatchIn(link)) {
@@ -378,14 +414,17 @@ class Egywatch : MainAPI() {
                 return false
             }
             callback(newExtractorLink(name, server, link, ExtractorLinkType.VIDEO) {
-                this.referer = referer ?: mainUrl
-                if (!userAgent.isNullOrBlank()) this.headers = mapOf("User-Agent" to userAgent)
+                if (!referer.isNullOrBlank()) this.referer = referer
+                this.headers = buildMap {
+                    if (!userAgent.isNullOrBlank()) put("User-Agent", userAgent)
+                    if (!origin.isNullOrBlank()) put("Origin", origin)
+                }
             })
             return true
         }
 
         // The app resolves embeds through its own server-side scraper first.
-        if (EgywatchHostExtractor.extract(link, server, referer, userAgent, callback)) return true
+        if (EgywatchHostExtractor.extract(link, server, referer, origin, userAgent, callback)) return true
 
         // CloudStream built-in extractors as a fallback (streamwish, uqload, streamruby ...).
         return runCatching {
