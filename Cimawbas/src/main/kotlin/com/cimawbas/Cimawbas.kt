@@ -264,7 +264,7 @@ class Cimawbas : MainAPI() {
     ): Boolean {
         val host = runCatching { URI(embed).host?.lowercase() }.getOrNull() ?: ""
         val scraperHost = host.contains("liiivideo") || host.contains("minochinos") ||
-            host.contains("bysebuho") || host.contains("vipserver")
+            host.contains("vipserver")
 
         if (scraperHost) {
             val done = runCatching {
@@ -273,13 +273,63 @@ class Cimawbas : MainAPI() {
             if (done) return true
         }
 
-        val done = runCatching {
+        val doneLoad = runCatching {
             loadExtractor(embed, referer, subtitleCallback, callback)
         }.getOrDefault(false)
-        if (done) return true
+        if (doneLoad) return true
 
-        return runCatching {
+        val doneHost = runCatching {
             CimawbasHostExtractor.extract(embed, server, referer, null, null, callback)
         }.getOrDefault(false)
+        if (doneHost) return true
+
+        // Fallback: fetch embed page and try to extract direct sources (VidMoly, Bysebuho, etc.)
+        val embedPage = runCatching {
+            app.get(embed, headers = HEADERS, referer = referer).text
+        }.getOrNull() ?: return false
+
+        val direct = extractFromHtml(embedPage)
+        if (direct.isNotEmpty()) {
+            direct.forEach { (url, qual) ->
+                callback(
+                    com.lagradost.cloudstream3.utils.newExtractorLink(
+                        server,
+                        server,
+                        url,
+                        if (url.contains(".m3u8")) com.lagradost.cloudstream3.utils.ExtractorLinkType.M3U8 else com.lagradost.cloudstream3.utils.ExtractorLinkType.VIDEO
+                    ) {
+                        this.referer = embed
+                        qual?.let { this.quality = it }
+                    }
+                )
+            }
+            return true
+        }
+        return false
+    }
+
+    private fun extractFromHtml(html: String): List<Pair<String, Int?>> {
+        val out = mutableListOf<Pair<String, Int?>>()
+        if (html.isBlank()) return out
+        // JWPlayer sources: sources: [{ file: "..." }]
+        Regex("""sources\s*:\s*\[\s*\{[^}]*file\s*:\s*["']([^"']+)["'][^}]*\}""", RegexOption.DOT_MATCHES_ALL)
+            .findAll(html).forEach { m ->
+                val u = m.groupValues[1]
+                if (u.startsWith("http")) out.add(u to null)
+            }
+        // file: "https://...m3u8"
+        Regex("""file\s*:\s*["'](https?://[^"']+\.(?:m3u8|mp4)[^"']*)["']""")
+            .findAll(html).forEach { m ->
+                val u = m.groupValues[1]
+                if (u.startsWith("http")) out.add(u to null)
+            }
+        // master.m3u8, index.m3u8
+        Regex("(https?://[^\"']+master\\.m3u8[^\"']*)").findAll(html).forEach { m ->
+            out.add(m.groupValues[1] to null)
+        }
+        Regex("(https?://[^\"']+\\.m3u8)").findAll(html).forEach { m ->
+            out.add(m.groupValues[1] to null)
+        }
+        return out.distinctBy { it.first }
     }
 }
