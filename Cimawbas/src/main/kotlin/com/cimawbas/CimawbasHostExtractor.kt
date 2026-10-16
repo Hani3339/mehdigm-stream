@@ -45,6 +45,7 @@ object CimawbasHostExtractor {
         "streamruby" to Rule("scrapefinal/earnvids.php", Method.POST),
         "vidspeed" to Rule("scrapefinal/earnvids.php", Method.POST),
         "vidspeeds" to Rule("scrapefinal/earnvids.php", Method.POST),
+        "bysebuho" to Rule("scrapefinal/earnvids.php", Method.POST),
         // other POST scrapers
         "upzur" to Rule("scrapefinal/upzur.php", Method.POST),
         "vidaraa" to Rule("scrapefinal/vidaara.php", Method.POST),
