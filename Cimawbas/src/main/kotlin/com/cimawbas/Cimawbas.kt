@@ -330,6 +330,10 @@ class Cimawbas : MainAPI() {
         Regex("(https?://[^\"']+\\.m3u8)").findAll(html).forEach { m ->
             out.add(m.groupValues[1] to null)
         }
+        Regex("hls\\d*['\"]\\s*:\\s*['\"]([^'\"]+)").findAll(html).forEach { m -> out.add(m.groupValues[1] to null) }
+        Regex("\"file\"\\s*:\\s*\"([^\"]+)").findAll(html).forEach { m -> out.add(m.groupValues[1] to null) }
+        Regex("'file'\\s*:\\s*'([^']+)").findAll(html).forEach { m -> out.add(m.groupValues[1] to null) }
+        out.removeIf { !it.first.startsWith("http") }
         return out.distinctBy { it.first }
     }
 }

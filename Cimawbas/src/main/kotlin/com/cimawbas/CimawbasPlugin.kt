@@ -9,6 +9,9 @@ class CimawbasPlugin : Plugin() {
     override fun load(context: Context) {
         registerExtractorAPI(MixdropExtractor())
         registerExtractorAPI(StreamHgExtractor())
+        registerExtractorAPI(VidmolyCustom())
+        registerExtractorAPI(BysebuhoCustom())
+        registerExtractorAPI(LiivideoCustom())
 
         registerMainAPI(Cimawbas())
     }

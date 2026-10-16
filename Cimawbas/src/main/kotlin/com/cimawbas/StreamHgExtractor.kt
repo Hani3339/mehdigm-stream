@@ -74,8 +74,13 @@ class StreamHgExtractor : ExtractorApi() {
             "User-Agent" to BROWSER_UA,
             "Referer" to "$PLAYER_HOST/"
         )
+        val url = when {
+            m3u8.startsWith("http") -> m3u8
+            m3u8.startsWith("/") -> "$PLAYER_HOST$m3u8"
+            else -> m3u8
+        }
         val generated = try {
-            M3u8Helper.generateM3u8(name, m3u8, "$PLAYER_HOST/", headers = headers)
+            M3u8Helper.generateM3u8(name, url, "$PLAYER_HOST/", headers = headers)
         } catch (_: Throwable) {
             emptyList()
         }
@@ -87,7 +92,7 @@ class StreamHgExtractor : ExtractorApi() {
             ExtractorLink(
                 source = m3u8,
                 name = name,
-                url = m3u8,
+                url = url,
                 referer = "$PLAYER_HOST/",
                 quality = -1,
                 headers = headers,
