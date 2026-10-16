@@ -12,6 +12,7 @@ class CimawbasPlugin : Plugin() {
         registerExtractorAPI(VidmolyCustom())
         registerExtractorAPI(BysebuhoCustom())
         registerExtractorAPI(LiivideoCustom())
+        registerExtractorAPI(VipserverLiivideoExtractor())
 
         registerMainAPI(Cimawbas())
     }

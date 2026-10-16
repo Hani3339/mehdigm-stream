@@ -264,7 +264,7 @@ class Cimawbas : MainAPI() {
     ): Boolean {
         val host = runCatching { URI(embed).host?.lowercase() }.getOrNull() ?: ""
         val scraperHost = host.contains("liiivideo") || host.contains("minochinos") ||
-            host.contains("vipserver")
+            host.contains("vipserver") || host.contains("bysebuho") || host.contains("visitmycityfor365days")
 
         if (scraperHost) {
             val done = runCatching {
