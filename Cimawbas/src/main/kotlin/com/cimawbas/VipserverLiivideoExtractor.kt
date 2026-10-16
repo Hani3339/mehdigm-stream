@@ -1,16 +1,18 @@
 package com.cimawbas
 
-import android.util.Log
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.M3u8Helper
+import org.json.JSONObject
 
 class VipserverLiivideoExtractor : ExtractorApi() {
-    override val name = "LiiVideo CDN"
+    override val name = "Vipserver LiiVideo"
     override val mainUrl = "https://vipserver.liiivideo.com"
     override val requiresReferer = true
+
+
 
     override fun getExtractorUrl(id: String): String {
         return if (id.startsWith("http")) id else "$mainUrl/$id"
@@ -22,38 +24,57 @@ class VipserverLiivideoExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        // If direct m3u8
+        val ref = referer ?: url
         if (url.contains(".m3u8")) {
             val headers = mapOf(
-                "Referer" to (referer ?: "https://vipserver.liiivideo.com/"),
-                "Origin" to "https://vipserver.liiivideo.com",
-                "User-Agent" to "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36"
+                "Referer" to ref,
+                "Origin" to "https://vipserver.liiivideo.com"
             )
-            M3u8Helper.generateM3u8(name, url, referer ?: url).forEach {
-                it.headers = headers
-                callback(it)
+            M3u8Helper.generateM3u8(name, url, ref).forEach { link ->
+                link.headers = headers
+                callback(link)
             }
             return
         }
-        val text = try {
-            app.get(url, referer = referer ?: mainUrl).text
-        } catch (t: Throwable) {
-            Log.i(TAG, "fetch failed $url: $t")
+
+        val page = try {
+            app.get(url, referer = ref).text
+        } catch (e: Exception) {
             return
         }
-        val m3u8 = Regex("""https?://[^"'\s]+\.m3u8[^"'\s]*""").find(text)?.value
-            ?: Regex(""""file"\s*:\s*"([^"]*\.m3u8[^"]*)"""").find(text)?.groupValues?.get(1)
-            ?: Regex("""'file'\s*:\s*'([^']*\.m3u8[^']*)""").find(text)?.groupValues?.get(1)
-            ?: Regex("""src\s*:\s*["']([^"']+\.m3u8[^"']*)["']""").find(text)?.groupValues?.get(1)
-            ?: ""
+
+        val m3u8 = extractM3u8(page)
         if (m3u8.isNotEmpty()) {
-            val finalUrl = if (m3u8.startsWith("//")) "https:$m3u8" else m3u8
-            M3u8Helper.generateM3u8(name, finalUrl, url).forEach(callback)
-            return
+            val headers = mapOf(
+                "Referer" to ref,
+                "Origin" to "https://vipserver.liiivideo.com"
+            )
+            M3u8Helper.generateM3u8(name, m3u8, ref).forEach { link ->
+                link.headers = headers
+                callback(link)
+            }
         }
     }
 
+    private fun extractM3u8(html: String): String {
+        val cleaned = html.replace("\\/", "/").replace("\\\"", "\"")
+        // try common patterns
+        val patterns = listOf(
+            Regex("""file\s*["']?\s*:\s*["']([^"']+\.m3u8[^"']*)["']"""),
+            Regex("""hls\s*["']?\s*:\s*["']([^"']+\.m3u8[^"']*)["']"""),
+            Regex("""src\s*["']?\s*:\s*["']([^"']+\.m3u8[^"']*)["']"""),
+            Regex("""["'](https?://[^"']+\.m3u8[^"']*)["']"""),
+            Regex("""(https?://[^"'\s]+\.m3u8[^"'\s]*)""")
+        )
+        for (p in patterns) {
+            p.find(cleaned)?.groupValues?.get(1)?.let {
+                return if (it.startsWith("//")) "https:$it" else it
+            }
+        }
+        return ""
+    }
+
     companion object {
-        private const val TAG = "VipserverLiivideo"
+        private const val TAG = "VipserverLiiVideo"
     }
 }
