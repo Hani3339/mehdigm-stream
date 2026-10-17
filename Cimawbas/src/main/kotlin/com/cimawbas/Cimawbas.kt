@@ -313,8 +313,8 @@ class Cimawbas : MainAPI() {
         seasonCards.values.forEach { ref ->
             val season = ref.second
             // A series page (no season in its title) usually holds every season, so always take it;
-            // a season page is needed only when we still lack that season.
-            if (season == null || season !in knownSeasons) {
+            // also take any season card found - the clicked card's page might be incomplete for other seasons.
+            if (season == null || true) {
                 if (targets.putIfAbsent(ref.first, ref) == null && season != null) {
                     targetedSeasons.add(season)
                 }
