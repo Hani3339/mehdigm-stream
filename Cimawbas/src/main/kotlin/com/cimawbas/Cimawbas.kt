@@ -128,8 +128,17 @@ class Cimawbas : MainAPI() {
             .map { it.text().trim() }.filter { it.isNotBlank() }.distinct()
 
         val playHref = doc.selectFirst("a.xtgo[href]")?.attr("href")?.let { fixUrl(it) }
-        val isSeries = doc.selectFirst("div.SeasonsBox, div.SeasonsEpisodesMain, .seasons-sec, .SeasonsEpisodes") != null
-        val episodes = if (isSeries) parseEpisodes(doc) else emptyList()
+        val hasSeasonBox = doc.selectFirst(
+            "div.SeasonsBox, div.SeasonsEpisodesMain, .seasons-sec, .SeasonsEpisodes, .AiredEPS"
+        ) != null
+        var episodes = if (hasSeasonBox) parseEpisodes(doc) else emptyList()
+
+        // Season/category pages (category.php?cat=<Show>-S<NN>) list the episodes in a plain
+        // grid without any season box, so they would otherwise be mistaken for movies. Treat
+        // them as series too (season/episode numbers are read from each episode's own title).
+        if (episodes.isEmpty() && looksLikeSeries(title, url)) {
+            episodes = parseEpisodeGrid(doc, url)
+        }
 
         if (episodes.isNotEmpty()) {
             return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
@@ -167,15 +176,68 @@ class Cimawbas : MainAPI() {
             }
         }
 
+        // Variant C: div.AiredEPS > a[href=watch.php?vid=] (episodes of the same season)
+        doc.select(".AiredEPS").forEach { grp ->
+            grp.select("a[href]").forEach { a ->
+                val label = a.text().trim().ifBlank { a.attr("title").trim() }
+                addEpisode(out, a.attr("href"), label, seasonFromText(label) ?: 1)
+            }
+        }
+
         return out.distinctBy { it.data }
             .sortedWith(compareBy({ it.season ?: 1 }, { it.episode ?: 0 }))
+    }
+
+    /** Season/category pages expose the episodes in the same grid used by search/listing pages. */
+    private fun parseEpisodeGrid(doc: Document, url: String): List<Episode> {
+        val out = mutableListOf<Episode>()
+        val urlSeason = seasonFromText(url)
+        doc.select("ul.pm-ul-browse-videos > li, ul#pm-grid > li").forEach { li ->
+            val anchor = li.selectFirst("div.caption h3 a[href]")
+                ?: li.selectFirst("a[href*=watch.php]") ?: return@forEach
+            val label = anchor.text().trim().ifBlank { anchor.attr("title").trim() }
+            if (!isEpisodeLabel(label)) return@forEach
+            addEpisode(out, anchor.attr("href"), label, seasonFromText(label) ?: urlSeason ?: 1)
+        }
+        return out.distinctBy { it.data }
+            .sortedWith(compareBy({ it.season ?: 1 }, { it.episode ?: 0 }))
+    }
+
+    private fun looksLikeSeries(title: String, url: String): Boolean =
+        url.contains("category.php") || url.contains("categories-cimawbas.php") ||
+            url.contains("/series") || title.contains("مسلسل") || title.contains("انمي") ||
+            title.contains("الموسم") || title.contains("حلقة")
+
+    private fun isEpisodeLabel(label: String): Boolean =
+        label.contains("الحلقة") || label.contains("حلقة") ||
+            Regex("""(?i)s\d{1,3}\s*e\d{1,3}""").containsMatchIn(label)
+
+    private fun seasonFromText(text: String): Int? {
+        Regex("""الموسم\s*(\d+)""").find(text)?.groupValues?.get(1)?.toIntOrNull()?.let { return it }
+        Regex("""(?i)(?:^|[^a-z])s0*(\d{1,3})(?:[^0-9]|$)""").find(text)
+            ?.groupValues?.get(1)?.toIntOrNull()?.let { return it }
+        val ordinals = listOf(
+            "الاول" to 1, "الأول" to 1, "الثانى" to 2, "الثاني" to 2, "الثالث" to 3, "الرابع" to 4,
+            "الخامس" to 5, "السادس" to 6, "السابع" to 7, "الثامن" to 8, "التاسع" to 9, "العاشر" to 10,
+            "الحادي عشر" to 11, "الثاني عشر" to 12, "الثالث عشر" to 13, "الرابع عشر" to 14,
+            "الخامس عشر" to 15, "السادس عشر" to 16, "السابع عشر" to 17, "الثامن عشر" to 18,
+            "التاسع عشر" to 19, "العشرون" to 20
+        )
+        val idx = text.indexOf("الموسم")
+        if (idx >= 0) {
+            val tail = text.substring(idx + 6).trim()
+            ordinals.firstOrNull { tail.startsWith(it.first) }?.let { return it.second }
+        }
+        return null
     }
 
     private fun addEpisode(out: MutableList<Episode>, href: String, label: String, season: Int) {
         if (href.isBlank()) return
         val abs = fixUrl(href)
         if (!abs.contains("watch.php") && !abs.contains("play.php")) return
-        val episode = Regex("""\d+""").find(label)?.value?.toIntOrNull()
+        val episode = Regex("""(?:الحلقة|حلقة|episode|ep)\s*(\d+)""", RegexOption.IGNORE_CASE)
+            .find(label)?.groupValues?.get(1)?.toIntOrNull()
+            ?: Regex("""\d+""").find(label)?.value?.toIntOrNull()
         out += newEpisode(abs) {
             this.name = label.ifBlank { "الحلقة" }
             this.season = season
