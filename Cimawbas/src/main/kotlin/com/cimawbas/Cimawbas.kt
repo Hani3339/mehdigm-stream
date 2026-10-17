@@ -180,14 +180,26 @@ class Cimawbas : MainAPI() {
         val out = mutableListOf<Episode>()
         val pageSeason = seasonFromText(title)
 
+        // The panel id is only an index (`Season1`, `Season2`, …), not the real season number: the
+        // tab whose episodes belong to "الموسم السادس" can still be `id="Season1"`. Map each tab id
+        // to the season spelled out in its button ("الموسم 6") so the numbering is correct.
+        val tabSeasons = doc.select("div.SeasonsBox button.tablinks[onclick]").mapNotNull { button ->
+            val id = Regex("""openCity\([^,]+,\s*['"]([^'"]+)['"]\)""")
+                .find(button.attr("onclick"))?.groupValues?.get(1)
+            val season = seasonFromText(button.text())
+            if (id != null && season != null) id to season else null
+        }.toMap()
+
         // Variant A: season panels. Newer templates use div.SeasonsEpisodesMains (and render the
         // episodes as video cards, `a.postInner`, instead of a plain list of links); older ones use
-        // div.SeasonsEpisodesMain with a bare `<ul>` of anchors. Each panel id is `Season<N>`.
+        // div.SeasonsEpisodesMain with a bare `<ul>` of anchors.
         doc.select(
             "div.SeasonsEpisodesMain .tabcontent, div.SeasonsEpisodesMains .tabcontent, " +
                 "div.tabcontent[id^=Season]"
         ).forEach { panel ->
-            val season = panel.id().removePrefix("Season").toIntOrNull() ?: pageSeason ?: 1
+            val season = tabSeasons[panel.id()]
+                ?: panel.id().removePrefix("Season").toIntOrNull()
+                ?: pageSeason ?: 1
             collectAnchors(panel, season, out)
         }
 
@@ -210,8 +222,12 @@ class Cimawbas : MainAPI() {
         container.select("a[href]").forEach { a ->
             val abs = fixUrl(a.attr("href"))
             if (!abs.contains("watch.php") && !abs.contains("play.php")) return@forEach
+            val label = episodeLabel(a)
+            // The episode title ("… الموسم السادس الحلقة 30 …") is the authoritative season; the
+            // card badge and the container are only fallbacks.
             val cardSeason = a.selectFirst("div.topSpan2")?.text()?.let { seasonFromText(it) }
-            addEpisode(out, a.attr("href"), episodeLabel(a), cardSeason ?: defaultSeason)
+            val season = seasonFromText(label) ?: cardSeason ?: defaultSeason
+            addEpisode(out, a.attr("href"), label, season)
         }
     }
 
