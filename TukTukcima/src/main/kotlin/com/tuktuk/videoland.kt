@@ -1,4 +1,4 @@
-package com.tuk
+package com.tuktuk
 
 import android.util.Log
 import com.lagradost.cloudstream3.SubtitleFile

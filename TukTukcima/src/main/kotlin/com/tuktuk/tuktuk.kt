@@ -1,4 +1,4 @@
-package com.tuk
+package com.tuktuk
 
 import android.util.Base64
 import com.fasterxml.jackson.annotation.JsonProperty
