@@ -403,8 +403,8 @@ class Cimawbas : MainAPI() {
             .find(label)?.groupValues?.get(1)?.toIntOrNull()
             ?: Regex("""(?i)s\d+\s*e\s*(\d+)""").find(label)?.groupValues?.get(1)?.toIntOrNull()
             ?: run {
-                val matches = Regex("""\d+""").findAll(label).map { it.value.toIntOrNull() }.filterNotNull().toList()
-                matches.lastOrNull()
+                val matches = Regex("""\d+""").findAll(label).map { it.value.toInt() }.toList()
+                if (matches.size == 1) matches[0] else matches.lastOrNull()
             }
         out += newEpisode(abs) {
             this.name = label.ifBlank { "الحلقة" }
