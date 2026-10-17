@@ -54,11 +54,8 @@ class TukTukHd : MainAPI() {
                 ?: linkTag.text()
         }
         if (title.isBlank()) return null
-        val imgTag = element.selectFirst("img")
-        val posterUrl = imgTag?.attr("src").takeIf { !it.isNullOrEmpty() }
-            ?: imgTag?.attr("data-src")
-            ?: imgTag?.attr("data-lazy-src")
-            ?: imgTag?.attr("srcset")?.split(',')?.lastOrNull()?.trim()?.split(' ')?.firstOrNull()
+        val imgTag = element.selectFirst(".Poster--Block img, .Poster img, .SeriesEpisodeThumb img, .SeriesPosterCard img, img")
+        val posterUrl = bestImageUrl(imgTag)?.let { fixUrl(it) }
 
         val lowerTitle = title.lowercase()
         val isMovie = !lowerTitle.contains("مسلسل") && !lowerTitle.contains("حلقة") && !href.contains("/series/")
@@ -100,10 +97,43 @@ class TukTukHd : MainAPI() {
         return doc.selectFirst(".story p")?.text() ?: doc.selectFirst(".story")?.text()
     }
 
+    private fun bestImageUrl(img: Element?): String? {
+        if (img == null) return null
+        val srcset = img.attr("srcset")
+        if (srcset.isNotBlank()) {
+            val best = srcset.split(',').mapNotNull { part ->
+                val p = part.trim().split(Regex("\\s+"))
+                val u = p.getOrNull(0)?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                val w = p.getOrNull(1)?.removeSuffix("w")?.toIntOrNull()
+                    ?: p.getOrNull(1)?.removeSuffix("x")?.toFloatOrNull()?.toInt() ?: 0
+                Pair(u, w)
+            }.maxByOrNull { it.second }?.first
+            if (!best.isNullOrBlank()) return best
+        }
+        for (attr in listOf("src", "data-src", "data-lazy-src", "data-original", "data-srcset")) {
+            val v = img.attr(attr)
+            if (v.isNotBlank() && !v.startsWith("data:")) {
+                if (attr == "data-srcset") {
+                    val b = v.split(',').mapNotNull { part ->
+                        val p = part.trim().split(Regex("\\s+"))
+                        p.getOrNull(0)?.takeIf { it.isNotBlank() }
+                    }.lastOrNull()
+                    if (!b.isNullOrBlank()) return b
+                } else {
+                    return v
+                }
+            }
+        }
+        return null
+    }
+
     private fun extractPoster(doc: org.jsoup.nodes.Document): String? {
+        val mainImg = doc.selectFirst(".MainSingle .left .image img")
+            ?: doc.selectFirst(".MainSingle .image img")
+            ?: doc.selectFirst(".image img")
+        bestImageUrl(mainImg)?.let { return it }
         return doc.selectFirst("meta[property=og:image]")?.attr("content")
-            ?: doc.selectFirst(".MainSingle .left .image img")?.attr("src")
-            ?: doc.selectFirst(".image img")?.attr("src")
+            ?: doc.selectFirst("meta[name=twitter:image]")?.attr("content")
     }
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url, referer = mainUrl).document
@@ -169,7 +199,7 @@ class TukTukHd : MainAPI() {
                 val epHref = fixUrl(ep.attr("href"))
                 val epTitle = ep.attr("title") ?: ep.text()
                 val epNum = Regex("الحلقة\\s*(\\d+)").find(epTitle)?.groupValues?.get(1)?.toIntOrNull()
-                val epThumb = ep.selectFirst("img")?.attr("src") ?: ep.selectFirst("img")?.attr("data-src")
+                val epThumb = bestImageUrl(ep.selectFirst("img"))?.let { fixUrl(it) }
                 episodesMap[epHref] = newEpisode(epHref) {
                     this.name = epTitle
                     this.episode = epNum
@@ -193,7 +223,7 @@ class TukTukHd : MainAPI() {
                     val epHref = fixUrl(ep.attr("href"))
                     val epTitle = ep.attr("title") ?: ep.text()
                     val epNum = Regex("الحلقة\\s*(\\d+)").find(epTitle)?.groupValues?.get(1)?.toIntOrNull()
-                    val epThumb = ep.selectFirst("img")?.attr("src") ?: ep.selectFirst("img")?.attr("data-src")
+                    val epThumb = bestImageUrl(ep.selectFirst("img"))?.let { fixUrl(it) }
                     if (!episodesMap.containsKey(epHref)) {
                         episodesMap[epHref] = newEpisode(epHref) {
                             this.name = epTitle
