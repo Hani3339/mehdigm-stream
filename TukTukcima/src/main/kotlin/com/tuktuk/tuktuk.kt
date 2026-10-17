@@ -341,6 +341,12 @@ class TukTukHd : MainAPI() {
                                 callback(extractorLink)
                             }
                         }
+                        mirror.driver?.contains("lulustream", ignoreCase = true) == true -> {
+                            TukTukLuluExtractor().getUrl(link, playerUrl, subtitleCallback) { extractorLink ->
+                                if (extractorLink.quality == Qualities.Unknown.value) extractorLink.quality = qualityInt
+                                callback(extractorLink)
+                            }
+                        }
                         else -> {
                             loadExtractor(link, subtitleCallback) { extractorLink ->
                                 if (extractorLink.quality == Qualities.Unknown.value) extractorLink.quality = qualityInt
