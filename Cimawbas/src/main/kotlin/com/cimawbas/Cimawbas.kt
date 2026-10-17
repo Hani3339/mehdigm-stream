@@ -18,6 +18,7 @@ import com.lagradost.cloudstream3.newMovieSearchResponse
 import com.lagradost.cloudstream3.newTvSeriesLoadResponse
 import com.lagradost.cloudstream3.newTvSeriesSearchResponse
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.M3u8Helper
 import com.lagradost.cloudstream3.utils.loadExtractor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -244,16 +245,25 @@ class Cimawbas : MainAPI() {
         return found
     }
 
-    private fun parseEmbeds(doc: Document): List<Pair<String, String>> =
-        doc.select("[data-embed]").mapNotNull { el ->
+    private fun parseEmbeds(doc: Document): List<Pair<String, String>> {
+        val out = mutableListOf<Pair<String, String>>()
+        doc.select("[data-embed]").forEach { el ->
             val embed = el.attr("data-embed").trim()
-            if (embed.isBlank()) return@mapNotNull null
-            val src = Regex("""src\s*=\s*['"]([^'"]+)['"]""").find(embed)?.groupValues?.get(1)?.trim()
-            if (src.isNullOrBlank()) return@mapNotNull null
-            val label = el.selectFirst("strong")?.text()?.trim().orEmpty()
-                .ifBlank { el.attr("id").removePrefix("server_").ifBlank { "Server" } }
-            src to label
-        }.distinctBy { it.first }
+            if (embed.isBlank()) return@forEach
+            Regex("""src\s*=\s*['"]([^'"]+)['"]""").find(embed)?.groupValues?.get(1)?.trim()?.let { src ->
+                if (src.startsWith("http")) {
+                    val label = el.selectFirst("strong")?.text()?.trim().orEmpty()
+                        .ifBlank { el.attr("id").removePrefix("server_").ifBlank { "Server" } }
+                    out.add(src to label)
+                }
+            }
+        }
+        doc.select("iframe[src]").forEach { iframe ->
+            val src = iframe.attr("src").trim()
+            if (src.startsWith("http")) out.add(src to iframe.attr("title").trim().ifBlank { "Server" })
+        }
+        return out.distinctBy { it.first }
+    }
 
     private suspend fun resolve(
         embed: String,
@@ -263,8 +273,44 @@ class Cimawbas : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val host = runCatching { URI(embed).host?.lowercase() }.getOrNull() ?: ""
+        val origin = runCatching {
+            val u = URI(embed)
+            "${u.scheme}://${u.host}"
+        }.getOrNull() ?: mainUrl
+
+        // Direct tokenised HLS (visitmycityfor365days.cc / liiivideo CDN) - play as-is.
+        if (embed.contains(".m3u8")) {
+            val headers = mapOf(
+                "User-Agent" to HEADERS.getValue("User-Agent"),
+                "Referer" to "$origin/",
+                "Origin" to origin
+            )
+            val emitted = runCatching {
+                M3u8Helper.generateM3u8(server, embed, "$origin/").forEach {
+                    it.headers = headers.toMutableMap()
+                    callback(it)
+                }
+                true
+            }.getOrDefault(false)
+            if (emitted) return true
+        }
+
+        // vipserver.liiivideo.com uses an obfuscated Playerjs setup the mawdhou3 scraper
+        // cannot read ("Pas de lien m3u8 trouvé dans le JS"), so decode it locally.
+        if (host.contains("vipserver.liiivideo.com")) {
+            val done = runCatching {
+                VipserverLiivideoExtractor().resolve(embed, referer, callback)
+            }.getOrDefault(false)
+            if (done) return true
+        }
+
         val scraperHost = host.contains("liiivideo") || host.contains("minochinos") ||
             host.contains("vipserver") || host.contains("bysebuho") || host.contains("visitmycityfor365days")
+
+        val doneLoad = runCatching {
+            loadExtractor(embed, referer, subtitleCallback, callback)
+        }.getOrDefault(false)
+        if (doneLoad) return true
 
         if (scraperHost) {
             val done = runCatching {
@@ -272,11 +318,6 @@ class Cimawbas : MainAPI() {
             }.getOrDefault(false)
             if (done) return true
         }
-
-        val doneLoad = runCatching {
-            loadExtractor(embed, referer, subtitleCallback, callback)
-        }.getOrDefault(false)
-        if (doneLoad) return true
 
         val doneHost = runCatching {
             CimawbasHostExtractor.extract(embed, server, referer, null, null, callback)
