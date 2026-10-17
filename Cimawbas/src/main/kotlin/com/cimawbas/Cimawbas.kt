@@ -254,9 +254,13 @@ class Cimawbas : MainAPI() {
     }
 
     /**
-     * Merges the episodes of every season page that belongs to the same show as [title]. Uses the
-     * site search to discover the sibling pages (the site itself does not link seasons together),
-     * keeping only results whose normalised show name matches exactly.
+     * Merges the episodes of every season page that belongs to the same show as [title], so that
+     * opening any season card yields the whole series. The site does not link seasons together, so
+     * we look the show up in its search and collect:
+     *  - season/series cards (a title without an episode number), and
+     *  - one representative episode per season (a title with an episode number),
+     * because on some series only episode results are returned while the season pages themselves
+     * carry just a single season.
      */
     private suspend fun aggregateSeasons(
         title: String,
@@ -273,20 +277,44 @@ class Cimawbas : MainAPI() {
 
         val self = fixUrl(url)
         val knownSeasons = current.mapNotNull { it.season }.toSet()
-        val siblings = searchDoc.select("a[href*=watch.php]").mapNotNull { a ->
+        val seasonCards = LinkedHashMap<String, Triple<String, Int?, String>>()
+        val episodeReps = LinkedHashMap<Int, Triple<String, Int?, String>>()
+        searchDoc.select("a[href*=watch.php]").forEach { a ->
             val label = episodeLabel(a)
-            if (label.isBlank() || isEpisodeLabel(label)) return@mapNotNull null
-            if (!baseSeriesName(label).equals(base, ignoreCase = true)) return@mapNotNull null
-            Triple(fixUrl(a.attr("href")), seasonFromText(label), label)
-        }.distinctBy { it.first }
-            .filter { sibling ->
-                // A series page (no season in its title) is worth fetching only while we are still
-                // missing seasons; a season page is needed only when we lack that season.
-                val season = sibling.second
-                sibling.first != self && if (season == null) knownSeasons.size <= 1 else season !in knownSeasons
+            if (label.isBlank()) return@forEach
+            if (!baseSeriesName(label).equals(base, ignoreCase = true)) return@forEach
+            val href = fixUrl(a.attr("href"))
+            if (href == self) return@forEach
+            val season = seasonFromText(label)
+            if (isEpisodeLabel(label)) {
+                if (season != null && season !in knownSeasons) {
+                    episodeReps.putIfAbsent(season, Triple(href, season, label))
+                }
+            } else {
+                seasonCards.putIfAbsent(href, Triple(href, season, label))
             }
-            .take(MAX_SEASON_PAGES)
+        }
 
+        val targets = LinkedHashMap<String, Triple<String, Int?, String>>()
+        val targetedSeasons = HashSet<Int>()
+        seasonCards.values.forEach { ref ->
+            val season = ref.second
+            // A series page (no season in its title) usually holds every season, so always take it;
+            // a season page is needed only when we still lack that season.
+            if (season == null || season !in knownSeasons) {
+                if (targets.putIfAbsent(ref.first, ref) == null && season != null) {
+                    targetedSeasons.add(season)
+                }
+            }
+        }
+        episodeReps.values.forEach { ref ->
+            val season = ref.second
+            if (season != null && season !in knownSeasons && season !in targetedSeasons) {
+                targets.putIfAbsent(ref.first, ref)
+            }
+        }
+
+        val siblings = targets.values.take(MAX_SEASON_PAGES)
         if (siblings.isEmpty()) return current
 
         val extra = coroutineScope {
