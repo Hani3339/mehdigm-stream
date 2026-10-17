@@ -401,7 +401,7 @@ class Cimawbas : MainAPI() {
         if (!abs.contains("watch.php") && !abs.contains("play.php")) return
         val episode = Regex("""(?:الحلقة|حلقة|episode|ep)\s*(\d+)""", RegexOption.IGNORE_CASE)
             .find(label)?.groupValues?.get(1)?.toIntOrNull()
-            ?: Regex("""\d+""").find(label)?.value?.toIntOrNull()
+            ?: Regex("""(?<=\s|^|\()\d+(?=\s|$|[^\d])""").find(label)?.value?.toIntOrNull()
         out += newEpisode(abs) {
             this.name = label.ifBlank { "الحلقة" }
             this.season = season
