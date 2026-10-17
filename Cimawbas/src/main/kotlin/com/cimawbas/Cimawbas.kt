@@ -174,7 +174,23 @@ class Cimawbas : MainAPI() {
         if (episodes.isEmpty() && looksLikeSeries(title, url)) {
             episodes = parseEpisodeGrid(doc, url)
         }
-        return episodes
+        return withSelfEpisode(episodes, url, title)
+    }
+
+    /**
+     * The page that is being parsed usually plays one specific episode, and that episode (often the
+     * first of the season) is frequently left out of the season list on the page itself. Make sure
+     * the page's own episode is present so that switching seasons never misses الحلقة 1.
+     */
+    private fun withSelfEpisode(episodes: List<Episode>, url: String, title: String): List<Episode> {
+        if (!isEpisodeLabel(title)) return episodes
+        val season = seasonFromText(title) ?: return episodes
+        val number = episodeNumber(title) ?: return episodes
+        if (episodes.any { it.season == season && it.episode == number }) return episodes
+        val out = episodes.toMutableList()
+        addEpisode(out, url, title, season)
+        return out.distinctBy { it.data }
+            .sortedWith(compareBy({ it.season ?: 1 }, { it.episode ?: 0 }))
     }
 
     private fun parseEpisodes(doc: Document, title: String): List<Episode> {
