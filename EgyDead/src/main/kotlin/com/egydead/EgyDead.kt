@@ -1,6 +1,8 @@
 package com.egydead
 
 import android.util.Log
+import android.webkit.CookieManager
+import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.Episode
 import com.lagradost.cloudstream3.HomePageResponse
 import com.lagradost.cloudstream3.MainAPI
@@ -19,10 +21,13 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
+import java.net.URL
 
 /**
  * EgyDead (إيجي ديد) provider.
@@ -61,6 +66,81 @@ class EgyDead : MainAPI() {
         private val PAGE_HEADERS = mapOf("User-Agent" to USER_AGENT)
     }
 
+    private var savedCookies: String? = null
+    private val cfMutex = Mutex()
+
+    private fun buildHeaders(referer: String?): MutableMap<String, String> {
+        val headers = mutableMapOf("User-Agent" to USER_AGENT, "Referer" to (referer ?: mainUrl), "Accept-Language" to "ar,en-US;q=0.9")
+        savedCookies?.let { headers["Cookie"] = it }
+        return headers
+    }
+
+    private suspend fun cfGet(url: String, referer: String? = null): Document {
+        var currentUrl = url
+        var headers = buildHeaders(referer)
+        var res = app.get(currentUrl, headers = headers, timeout = 30)
+        if (res.code in listOf(403, 503, 429) || res.text.contains("Just a moment", true) || res.text.contains("Attention Required", true)) {
+            cfMutex.withLock {
+                val cm = CookieManager.getInstance()
+                val current = cm.getCookie(currentUrl)
+                if (current != null && current != savedCookies && current.contains("cf_clearance")) {
+                    savedCookies = current
+                } else {
+                    val activity = CommonActivity.activity
+                    if (activity != null) {
+                        val solver = CloudflareSolver.solve(activity, currentUrl, USER_AGENT)
+                        if (solver != null) {
+                            if (!solver.cookies.isNullOrEmpty()) savedCookies = solver.cookies
+                            if (solver.finalUrl != currentUrl) {
+                                try {
+                                    val nh = URL(solver.finalUrl).host
+                                    mainUrl = "https://$nh"
+                                } catch (_: Exception) {}
+                                currentUrl = solver.finalUrl
+                            }
+                        }
+                    }
+                }
+            }
+            headers = buildHeaders(referer)
+            res = app.get(currentUrl, headers = headers, timeout = 30)
+        }
+        return res.document
+    }
+
+    private suspend fun cfPost(url: String, data: Map<String, String>, referer: String? = null): Document {
+        var currentUrl = url
+        var headers = buildHeaders(referer).apply { put("X-Requested-With", "XMLHttpRequest") }
+        var res = app.post(currentUrl, data = data, headers = headers, timeout = 30)
+        if (res.code in listOf(403, 503, 429) || res.text.contains("Just a moment", true)) {
+            cfMutex.withLock {
+                val cm = CookieManager.getInstance()
+                val current = cm.getCookie(currentUrl)
+                if (current != null && current != savedCookies && current.contains("cf_clearance")) {
+                    savedCookies = current
+                } else {
+                    val activity = CommonActivity.activity
+                    if (activity != null) {
+                        val solver = CloudflareSolver.solve(activity, currentUrl, USER_AGENT)
+                        if (solver != null) {
+                            if (!solver.cookies.isNullOrEmpty()) savedCookies = solver.cookies
+                            if (solver.finalUrl != currentUrl) {
+                                try {
+                                    val nh = URL(solver.finalUrl).host
+                                    mainUrl = "https://$nh"
+                                } catch (_: Exception) {}
+                                currentUrl = solver.finalUrl
+                            }
+                        }
+                    }
+                }
+            }
+            headers = buildHeaders(referer).apply { put("X-Requested-With", "XMLHttpRequest") }
+            res = app.post(currentUrl, data = data, headers = headers, timeout = 30)
+        }
+        return res.document
+    }
+
     override var name = "EgyDead"
     override var mainUrl = "https://tv10.egydead.live"
     override var lang = "ar"
@@ -97,7 +177,7 @@ class EgyDead : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = "$mainUrl${request.data}?page=$page"
         val doc = try {
-            app.get(url).document
+            cfGet(url)
         } catch (e: Throwable) {
             Log.i(TAG, "getMainPage failed $url -> $e")
             return newHomePageResponse(request.name, emptyList())
@@ -110,7 +190,7 @@ class EgyDead : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         val url = "$mainUrl/?s=${URLEncoder.encode(query, "UTF-8")}"
         val doc = try {
-            app.get(url).document
+            cfGet(url)
         } catch (e: Throwable) {
             Log.i(TAG, "search failed -> $e")
             return emptyList()
@@ -145,7 +225,7 @@ class EgyDead : MainAPI() {
 
     override suspend fun load(url: String): com.lagradost.cloudstream3.LoadResponse {
         val doc = try {
-            app.get(url, headers = PAGE_HEADERS).document
+            cfGet(url)
         } catch (e: Throwable) {
             Log.i(TAG, "load failed $url -> $e")
             return newMovieLoadResponse(url, url, TvType.Movie, "") { this.plot = "تعذّر تحميل الصفحة." }
@@ -261,7 +341,7 @@ class EgyDead : MainAPI() {
     }
 
     private suspend fun safeGet(target: String): Document? = try {
-        app.get(target, headers = PAGE_HEADERS, referer = mainUrl).document
+        cfGet(target)
     } catch (e: Throwable) {
         Log.i(TAG, "season fetch failed $target -> $e")
         null
@@ -429,7 +509,7 @@ class EgyDead : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val doc = try {
-            app.post(data, data = mapOf("View" to "1"), referer = data, headers = PAGE_HEADERS).document
+            cfPost(data, mapOf("View" to "1"), referer = data)
         } catch (e: Throwable) {
             Log.i(TAG, "View=1 failed $data -> $e")
             return false
@@ -526,7 +606,8 @@ class EgyDead : MainAPI() {
      */
     private suspend fun resolveMirrors(iframeUrl: String): List<String> {
         val page = try {
-            app.get(iframeUrl, headers = PAGE_HEADERS, referer = mainUrl).text
+            val res = app.get(iframeUrl, headers = buildHeaders(mainUrl))
+            res.text
         } catch (e: Throwable) {
             return emptyList()
         }
@@ -536,8 +617,7 @@ class EgyDead : MainAPI() {
         val body = try {
             app.get(
                 iframeUrl,
-                headers = mapOf(
-                    "User-Agent" to USER_AGENT,
+                headers = buildHeaders(iframeUrl) + mapOf(
                     "X-Inertia" to "true",
                     "X-Inertia-Version" to version,
                     "X-Inertia-Partial-Component" to IFRAME_HOST,
