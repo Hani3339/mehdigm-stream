@@ -27,6 +27,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URI
+import java.net.URLDecoder
 import java.net.URLEncoder
 
 /**
@@ -50,6 +51,8 @@ class Cimawbas : MainAPI() {
         private const val SOURCE_TIMEOUT_MS = 15_000L
         private const val MAX_SEASON_PAGES = 20
         private const val MAX_SEARCH_PAGES = 100
+        private const val MAX_CATEGORY_PAGES = 40
+        private const val CATEGORY_PAGE_CHUNK = 4
 
         // Arabic ordinal season names ("الموسم الخامس عشر"). Sorted by descending length so that
         // compound ordinals ("الخامس عشر" = 15) win over their prefixes ("الخامس" = 5).
@@ -161,10 +164,11 @@ class Cimawbas : MainAPI() {
 
         // The detail page of a series only carries the season that was opened on the real site
         // (a `SeasonsBox` with one season button), while other seasons live on their own pages
-        // with no link between them. Look the show up in the site search and merge the episodes of
-        // every sibling season page that is still missing, so the whole series is exposed.
+        // with no link between them. Prefer the show's own category listing (see
+        // [aggregateViaCategories]) so the whole series is exposed; fall back to searching the
+        // show and merging every sibling season page that is still missing.
         if (looksLikeSeries(title, url)) {
-            episodes = aggregateSeasons(title, url, episodes)
+            episodes = aggregateSeasons(doc, title, url, episodes)
         }
 
         if (episodes.isNotEmpty()) {
@@ -304,16 +308,30 @@ class Cimawbas : MainAPI() {
      * carry just a single season.
      */
     private suspend fun aggregateSeasons(
+        doc: Document,
         title: String,
         url: String,
         current: List<Episode>
     ): List<Episode> {
+        // Preferred path: every detail page links to its show's own category listings, and the
+        // umbrella `category.php?cat=<slug>-S00` holds the entire series in one paginated grid.
+        // This is the only reliable route on the real site, whose episode pages carry a
+        // `SeasonsBoxUL` related-grid (20 random episodes) instead of a season list.
+        val categories = findShowCategories(doc, title)
+        val umbrella = categories.filter { it.contains(Regex("""-S0+(\?|&|$)""")) }
+        if (umbrella.isNotEmpty()) return mergeEpisodes(current, fetchCategories(umbrella))
+
+        // Without an umbrella, merge whatever season categories the page links to, then still run
+        // the search-based aggregation below (some templates split every season onto its own page).
+        val seeded = if (categories.isEmpty()) current
+            else mergeEpisodes(current, fetchCategories(categories))
+
         val base = baseSeriesName(title)
-        if (base.length < 2) return current
+        if (base.length < 2) return seeded
 
         val q = URLEncoder.encode(base, "UTF-8").replace("+", "%20")
         val self = fixUrl(url)
-        val knownSeasons = current.mapNotNull { it.season }.toSet()
+        val knownSeasons = seeded.mapNotNull { it.season }.toSet()
         val seasonCards = LinkedHashMap<String, Triple<String, Int?, String>>()
         val episodeReps = LinkedHashMap<Int, Triple<String, Int?, String>>()
         val seenHrefs = HashSet<String>()
@@ -362,7 +380,7 @@ class Cimawbas : MainAPI() {
         episodeReps.values.forEach { targets.putIfAbsent(it.first, it) }
 
         val siblings = targets.values.take(MAX_SEASON_PAGES * 3)
-        if (siblings.isEmpty()) return current
+        if (siblings.isEmpty()) return seeded
 
         val extra = coroutineScope {
             siblings.map { (href, _, label) ->
@@ -373,9 +391,76 @@ class Cimawbas : MainAPI() {
             }.awaitAll().flatten()
         }
 
-        return (current + extra)
+        return mergeEpisodes(seeded, extra)
+    }
+
+    /** Merges two episode lists, de-duplicating by link and ordering by season/episode. */
+    private fun mergeEpisodes(a: List<Episode>, b: List<Episode>): List<Episode> =
+        (a + b)
             .distinctBy { it.data }
             .sortedWith(compareBy({ it.season ?: 1 }, { it.episode ?: 0 }))
+
+    /** Downloads several category listings in small parallel batches. */
+    private suspend fun fetchCategories(categories: List<String>): List<Episode> =
+        categories.chunked(CATEGORY_PAGE_CHUNK).flatMap { chunk ->
+            coroutineScope {
+                chunk.map { catUrl -> async(Dispatchers.IO) { fetchCategoryListing(catUrl) } }.awaitAll()
+            }.flatten()
+        }
+
+    /** Finds the `category.php` links that belong to [title]'s own series (matched by link text). */
+    private fun findShowCategories(doc: Document, title: String): List<String> {
+        val base = baseSeriesName(title)
+        if (base.length < 2) return emptyList()
+        val out = LinkedHashMap<String, String>()
+        doc.select("a[href*='category.php']").forEach { a ->
+            val href = a.attr("href").trim()
+            if (href.isBlank()) return@forEach
+            val cat = Regex("""[?&]cat=([^&]+)""").find(href)?.groupValues?.get(1) ?: return@forEach
+            // The category belongs to this show when its own label names the same series. Season
+            // labels ("مسلسل X الموسم الخامس مترجم") reduce to the same base as episode labels.
+            val label = a.text().trim().ifBlank { a.attr("title").trim() }
+            if (!baseSeriesName(label).equals(base, ignoreCase = true)) return@forEach
+            out.putIfAbsent(URLDecoder.decode(cat, "UTF-8"), fixUrl(href))
+        }
+        return out.values.toList()
+    }
+
+    /** Downloads a category listing and every one of its pages, returning the episodes it lists. */
+    private suspend fun fetchCategoryListing(catUrl: String): List<Episode> {
+        val first = runCatching { app.get(catUrl, headers = HEADERS).document }.getOrNull()
+            ?: return emptyList()
+        val episodes = parseEpisodeGrid(first, catUrl).toMutableList()
+
+        val lastPage = first.select("ul.pagination a[href], a[href*=page=]")
+            .mapNotNull { Regex("""[?&]page=(\d+)""").find(it.attr("href"))?.groupValues?.get(1)?.toIntOrNull() }
+            .maxOrNull() ?: 1
+        if (lastPage <= 1) return episodes
+
+        // Walk the remaining pages in small parallel batches (the first page already told us how
+        // many there are, so they can be fetched eagerly).
+        (2..minOf(lastPage, MAX_CATEGORY_PAGES)).chunked(CATEGORY_PAGE_CHUNK).forEach { chunk ->
+            val pages = coroutineScope {
+                chunk.map { page -> async(Dispatchers.IO) { fetchGridPage(catUrl, page) } }.awaitAll()
+            }
+            pages.forEach { episodes += it }
+        }
+        return episodes
+    }
+
+    private suspend fun fetchGridPage(catUrl: String, page: Int): List<Episode> {
+        val doc = runCatching { app.get(withPage(catUrl, page), headers = HEADERS).document }.getOrNull()
+            ?: return emptyList()
+        return parseEpisodeGrid(doc, catUrl)
+    }
+
+    /** Appends/overrides the `page` query parameter of a listing URL. */
+    private fun withPage(url: String, page: Int): String {
+        if (page <= 1) return url
+        if (Regex("""[?&]page=\d+""").containsMatchIn(url)) {
+            return url.replace(Regex("""([?&]page=)\d+"""), "$1$page")
+        }
+        return url + (if (url.contains("?")) "&" else "?") + "page=$page"
     }
 
     /** Reduces a title to the show's own name (drops season/episode parts and site decorations). */
