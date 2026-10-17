@@ -26,8 +26,6 @@ class TukTukHd : MainAPI() {
         "$mainUrl/category/series-1/page/" to "أحدث الحلقات",
         "$mainUrl/category/movies-2/%d8%a7%d9%81%d9%84%d8%a7%d9%85-%d9%85%d8%af%d8%a8%d9%84%d8%ac%d8%a9/page/" to "أفلام مدبلجة",
         "$mainUrl/category/anime-6/page/" to "أنمي",
-        "$mainUrl/popular-movies/" to "افلام شائعة",
-        "$mainUrl/most-viewed/" to "الأعلي مشاهدة",
         "$mainUrl/channel/film-netflix-1/page/" to "افلام نتفليكس",
         "$mainUrl/channel/series-netflix-2/page/" to "مسلسلات نتفليكس",
         "$mainUrl/channel/full-series-1/page/" to "تحميل مسلسلات برابط واحد"
