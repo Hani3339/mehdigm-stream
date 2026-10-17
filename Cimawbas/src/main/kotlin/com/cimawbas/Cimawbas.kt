@@ -25,6 +25,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
 import java.net.URI
 import java.net.URLEncoder
 
@@ -92,11 +93,14 @@ class Cimawbas : MainAPI() {
     private fun parseList(doc: Document): List<SearchResponse> =
         doc.select("ul.pm-ul-browse-videos > li, ul#pm-grid > li").mapNotNull { li ->
             val anchor = li.selectFirst("div.caption h3 a[href]")
+                ?: li.selectFirst("a.postInner[href]")
                 ?: li.selectFirst("a[href*=watch.php]")
                 ?: return@mapNotNull null
             val href = anchor.attr("href").trim()
             if (href.isBlank()) return@mapNotNull null
-            val title = anchor.text().trim().ifBlank { anchor.attr("title").trim() }
+            val title = anchor.attr("title").trim()
+                .ifBlank { anchor.selectFirst("div.title")?.text()?.trim().orEmpty() }
+                .ifBlank { anchor.text().trim() }
             if (title.isBlank()) return@mapNotNull null
             val poster = li.selectFirst("img")?.let { img ->
                 (img.attr("src").ifBlank { img.attr("data-src") }).trim().takeIf { it.startsWith("http") }
@@ -129,9 +133,10 @@ class Cimawbas : MainAPI() {
 
         val playHref = doc.selectFirst("a.xtgo[href]")?.attr("href")?.let { fixUrl(it) }
         val hasSeasonBox = doc.selectFirst(
-            "div.SeasonsBox, div.SeasonsEpisodesMain, .seasons-sec, .SeasonsEpisodes, .AiredEPS"
+            "div.SeasonsBox, div.SeasonsEpisodesMain, div.SeasonsEpisodesMains, " +
+                ".seasons-sec, .SeasonsEpisodes, .AiredEPS"
         ) != null
-        var episodes = if (hasSeasonBox) parseEpisodes(doc) else emptyList()
+        var episodes = if (hasSeasonBox) parseEpisodes(doc, title) else emptyList()
 
         // Season/category pages (category.php?cat=<Show>-S<NN>) list the episodes in a plain
         // grid without any season box, so they would otherwise be mistaken for movies. Treat
@@ -157,36 +162,49 @@ class Cimawbas : MainAPI() {
         }
     }
 
-    private fun parseEpisodes(doc: Document): List<Episode> {
+    private fun parseEpisodes(doc: Document, title: String): List<Episode> {
         val out = mutableListOf<Episode>()
+        val pageSeason = seasonFromText(title)
 
-        // Variant A: div.SeasonsEpisodesMain .tabcontent#SeasonN > ul > a[href=watch.php?vid=]
-        doc.select("div.SeasonsEpisodesMain .tabcontent").forEach { panel ->
-            val season = panel.id().removePrefix("Season").toIntOrNull() ?: 1
-            panel.select("a[href]").forEach { a ->
-                addEpisode(out, a.attr("href"), a.text().trim(), season)
-            }
+        // Variant A: season panels. Newer templates use div.SeasonsEpisodesMains (and render the
+        // episodes as video cards, `a.postInner`, instead of a plain list of links); older ones use
+        // div.SeasonsEpisodesMain with a bare `<ul>` of anchors. Each panel id is `Season<N>`.
+        doc.select(
+            "div.SeasonsEpisodesMain .tabcontent, div.SeasonsEpisodesMains .tabcontent, " +
+                "div.tabcontent[id^=Season]"
+        ).forEach { panel ->
+            val season = panel.id().removePrefix("Season").toIntOrNull() ?: pageSeason ?: 1
+            collectAnchors(panel, season, out)
         }
 
-        // Variant B: .SeasonsEpisodes[data-season] > a[href]
+        // Variant B: .SeasonsEpisodes[data-season]
         doc.select(".SeasonsEpisodes").forEach { grp ->
-            val season = grp.attr("data-season").toIntOrNull() ?: 1
-            grp.select("a[href]").forEach { a ->
-                addEpisode(out, a.attr("href"), a.text().trim(), season)
-            }
+            collectAnchors(grp, grp.attr("data-season").toIntOrNull() ?: pageSeason ?: 1, out)
         }
 
-        // Variant C: div.AiredEPS > a[href=watch.php?vid=] (episodes of the same season)
+        // Variant C: div.AiredEPS (episodes of the page's own season)
         doc.select(".AiredEPS").forEach { grp ->
-            grp.select("a[href]").forEach { a ->
-                val label = a.text().trim().ifBlank { a.attr("title").trim() }
-                addEpisode(out, a.attr("href"), label, seasonFromText(label) ?: 1)
-            }
+            collectAnchors(grp, pageSeason ?: 1, out)
         }
 
         return out.distinctBy { it.data }
             .sortedWith(compareBy({ it.season ?: 1 }, { it.episode ?: 0 }))
     }
+
+    /** Reads episode links from a season container (plain links or `.postInner` video cards). */
+    private fun collectAnchors(container: Element, defaultSeason: Int, out: MutableList<Episode>) {
+        container.select("a[href]").forEach { a ->
+            val abs = fixUrl(a.attr("href"))
+            if (!abs.contains("watch.php") && !abs.contains("play.php")) return@forEach
+            val cardSeason = a.selectFirst("div.topSpan2")?.text()?.let { seasonFromText(it) }
+            addEpisode(out, a.attr("href"), episodeLabel(a), cardSeason ?: defaultSeason)
+        }
+    }
+
+    private fun episodeLabel(anchor: Element): String =
+        anchor.attr("title").trim()
+            .ifBlank { anchor.selectFirst("div.title")?.text()?.trim().orEmpty() }
+            .ifBlank { anchor.text().trim() }
 
     /** Season/category pages expose the episodes in the same grid used by search/listing pages. */
     private fun parseEpisodeGrid(doc: Document, url: String): List<Episode> {
@@ -194,10 +212,12 @@ class Cimawbas : MainAPI() {
         val urlSeason = seasonFromText(url)
         doc.select("ul.pm-ul-browse-videos > li, ul#pm-grid > li").forEach { li ->
             val anchor = li.selectFirst("div.caption h3 a[href]")
+                ?: li.selectFirst("a.postInner[href]")
                 ?: li.selectFirst("a[href*=watch.php]") ?: return@forEach
-            val label = anchor.text().trim().ifBlank { anchor.attr("title").trim() }
+            val label = episodeLabel(anchor)
             if (!isEpisodeLabel(label)) return@forEach
-            addEpisode(out, anchor.attr("href"), label, seasonFromText(label) ?: urlSeason ?: 1)
+            val cardSeason = li.selectFirst("div.topSpan2")?.text()?.let { seasonFromText(it) }
+            addEpisode(out, anchor.attr("href"), label, seasonFromText(label) ?: cardSeason ?: urlSeason ?: 1)
         }
         return out.distinctBy { it.data }
             .sortedWith(compareBy({ it.season ?: 1 }, { it.episode ?: 0 }))
@@ -205,7 +225,8 @@ class Cimawbas : MainAPI() {
 
     private fun looksLikeSeries(title: String, url: String): Boolean =
         url.contains("category.php") || url.contains("categories-cimawbas.php") ||
-            url.contains("/series") || title.contains("مسلسل") || title.contains("انمي") ||
+            url.contains("mosalsalat.php") || url.contains("/series") ||
+            title.contains("مسلسل") || title.contains("انمي") ||
             title.contains("الموسم") || title.contains("حلقة")
 
     private fun isEpisodeLabel(label: String): Boolean =
