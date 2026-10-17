@@ -297,7 +297,7 @@ class Cimawbas : MainAPI() {
                 if (href == self) return@forEach
                 val season = seasonFromText(label)
                 if (isEpisodeLabel(label)) {
-                    if (season != null && season !in knownSeasons) {
+                    if (season != null) {
                         episodeReps.putIfAbsent(season, Triple(href, season, label))
                     }
                 } else {
@@ -322,7 +322,7 @@ class Cimawbas : MainAPI() {
         }
         episodeReps.values.forEach { ref ->
             val season = ref.second
-            if (season != null && season !in knownSeasons && season !in targetedSeasons) {
+            if (season != null && season !in targetedSeasons) {
                 targets.putIfAbsent(ref.first, ref)
             }
         }
