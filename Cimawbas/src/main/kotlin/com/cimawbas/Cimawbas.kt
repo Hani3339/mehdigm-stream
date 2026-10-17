@@ -298,7 +298,14 @@ class Cimawbas : MainAPI() {
                 val season = seasonFromText(label)
                 if (isEpisodeLabel(label)) {
                     if (season != null) {
-                        episodeReps[season] = Triple(href, season, label) // prefer newer/any episode card as rep
+                        // Keep the card with the lowest episode number (ideally الحلقة 1) so the
+                        // representative page is the one most likely to contain the season's start.
+                        val epNum = episodeNumber(label) ?: Int.MAX_VALUE
+                        val existing = episodeReps[season]
+                        val existingNum = existing?.third?.let { episodeNumber(it) } ?: Int.MAX_VALUE
+                        if (existing == null || epNum < existingNum) {
+                            episodeReps[season] = Triple(href, season, label)
+                        }
                     }
                 } else {
                     seasonCards.putIfAbsent(href, Triple(href, season, label))
@@ -308,26 +315,14 @@ class Cimawbas : MainAPI() {
             page++
         }
 
+        // Take every season/series card AND one representative episode page per season: a season
+        // card alone may not list the season's first episode, so the episode page fills the gaps
+        // (this is what makes الحلقة 1 appear for every season when switching inside the info page).
         val targets = LinkedHashMap<String, Triple<String, Int?, String>>()
-        val targetedSeasons = HashSet<Int>()
-        seasonCards.values.forEach { ref ->
-            val season = ref.second
-            // A series page (no season in its title) usually holds every season, so always take it;
-            // also take any season card found - the clicked card's page might be incomplete for other seasons.
-            if (season == null || true) {
-                if (targets.putIfAbsent(ref.first, ref) == null && season != null) {
-                    targetedSeasons.add(season)
-                }
-            }
-        }
-        episodeReps.values.forEach { ref ->
-            val season = ref.second
-            if (season != null && season !in targetedSeasons) {
-                targets.putIfAbsent(ref.first, ref)
-            }
-        }
+        seasonCards.values.forEach { targets.putIfAbsent(it.first, it) }
+        episodeReps.values.forEach { targets.putIfAbsent(it.first, it) }
 
-        val siblings = targets.values.take(MAX_SEASON_PAGES * 2)
+        val siblings = targets.values.take(MAX_SEASON_PAGES * 3)
         if (siblings.isEmpty()) return current
 
         val extra = coroutineScope {
@@ -395,17 +390,20 @@ class Cimawbas : MainAPI() {
         return null
     }
 
-    private fun addEpisode(out: MutableList<Episode>, href: String, label: String, season: Int) {
-        if (href.isBlank()) return
-        val abs = fixUrl(href)
-        if (!abs.contains("watch.php") && !abs.contains("play.php")) return
-        val episode = Regex("""(?:الحلقة|حلقة|episode|ep)\s*(\d+)""", RegexOption.IGNORE_CASE)
+    private fun episodeNumber(label: String): Int? =
+        Regex("""(?:الحلقة|حلقة|episode|ep)\s*(\d+)""", RegexOption.IGNORE_CASE)
             .find(label)?.groupValues?.get(1)?.toIntOrNull()
             ?: Regex("""(?i)s\d+\s*e\s*(\d+)""").find(label)?.groupValues?.get(1)?.toIntOrNull()
             ?: run {
                 val matches = Regex("""\d+""").findAll(label).map { it.value.toInt() }.toList()
                 if (matches.size == 1) matches[0] else matches.lastOrNull()
             }
+
+    private fun addEpisode(out: MutableList<Episode>, href: String, label: String, season: Int) {
+        if (href.isBlank()) return
+        val abs = fixUrl(href)
+        if (!abs.contains("watch.php") && !abs.contains("play.php")) return
+        val episode = episodeNumber(label)
         out += newEpisode(abs) {
             this.name = label.ifBlank { "الحلقة" }
             this.season = season
