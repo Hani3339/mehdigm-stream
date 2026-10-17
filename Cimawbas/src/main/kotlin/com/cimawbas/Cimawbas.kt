@@ -327,7 +327,7 @@ class Cimawbas : MainAPI() {
             }
         }
 
-        val siblings = targets.values.take(MAX_SEASON_PAGES)
+        val siblings = targets.values.take(MAX_SEASON_PAGES * 2)
         if (siblings.isEmpty()) return current
 
         val extra = coroutineScope {
