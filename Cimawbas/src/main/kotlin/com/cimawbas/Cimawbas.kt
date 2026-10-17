@@ -48,6 +48,7 @@ class Cimawbas : MainAPI() {
             "Accept-Language" to "ar,en;q=0.9"
         )
         private const val SOURCE_TIMEOUT_MS = 15_000L
+        private const val MAX_SEASON_PAGES = 20
     }
 
     override var name = "سيما وبس (Cimawbas)"
@@ -132,17 +133,14 @@ class Cimawbas : MainAPI() {
             .map { it.text().trim() }.filter { it.isNotBlank() }.distinct()
 
         val playHref = doc.selectFirst("a.xtgo[href]")?.attr("href")?.let { fixUrl(it) }
-        val hasSeasonBox = doc.selectFirst(
-            "div.SeasonsBox, div.SeasonsEpisodesMain, div.SeasonsEpisodesMains, " +
-                ".seasons-sec, .SeasonsEpisodes, .AiredEPS"
-        ) != null
-        var episodes = if (hasSeasonBox) parseEpisodes(doc, title) else emptyList()
+        var episodes = parseAllEpisodes(doc, url, title)
 
-        // Season/category pages (category.php?cat=<Show>-S<NN>) list the episodes in a plain
-        // grid without any season box, so they would otherwise be mistaken for movies. Treat
-        // them as series too (season/episode numbers are read from each episode's own title).
-        if (episodes.isEmpty() && looksLikeSeries(title, url)) {
-            episodes = parseEpisodeGrid(doc, url)
+        // The detail page of a series only carries the season that was opened on the real site
+        // (a `SeasonsBox` with one season button), while other seasons live on their own pages
+        // with no link between them. Look the show up in the site search and merge the episodes of
+        // every sibling season page that is still missing, so the whole series is exposed.
+        if (looksLikeSeries(title, url)) {
+            episodes = aggregateSeasons(title, url, episodes)
         }
 
         if (episodes.isNotEmpty()) {
@@ -160,6 +158,22 @@ class Cimawbas : MainAPI() {
             this.year = year
             this.tags = tags
         }
+    }
+
+    /**
+     * Reads the episodes of a detail page: season-box templates first, then the plain episode
+     * grid used by season/category pages (`category.php?cat=<Show>-S<NN>`, `mosalsalat.php`).
+     */
+    private fun parseAllEpisodes(doc: Document, url: String, title: String): List<Episode> {
+        val hasSeasonBox = doc.selectFirst(
+            "div.SeasonsBox, div.SeasonsEpisodesMain, div.SeasonsEpisodesMains, " +
+                ".seasons-sec, .SeasonsEpisodes, .AiredEPS"
+        ) != null
+        var episodes = if (hasSeasonBox) parseEpisodes(doc, title) else emptyList()
+        if (episodes.isEmpty() && looksLikeSeries(title, url)) {
+            episodes = parseEpisodeGrid(doc, url)
+        }
+        return episodes
     }
 
     private fun parseEpisodes(doc: Document, title: String): List<Episode> {
@@ -221,6 +235,78 @@ class Cimawbas : MainAPI() {
         }
         return out.distinctBy { it.data }
             .sortedWith(compareBy({ it.season ?: 1 }, { it.episode ?: 0 }))
+    }
+
+    /**
+     * Merges the episodes of every season page that belongs to the same show as [title]. Uses the
+     * site search to discover the sibling pages (the site itself does not link seasons together),
+     * keeping only results whose normalised show name matches exactly.
+     */
+    private suspend fun aggregateSeasons(
+        title: String,
+        url: String,
+        current: List<Episode>
+    ): List<Episode> {
+        val base = baseSeriesName(title)
+        if (base.length < 2) return current
+
+        val q = URLEncoder.encode(base, "UTF-8").replace("+", "%20")
+        val searchDoc = runCatching {
+            app.get("$mainUrl/search.php?keywords=$q", headers = HEADERS).document
+        }.getOrNull() ?: return current
+
+        val self = fixUrl(url)
+        val knownSeasons = current.mapNotNull { it.season }.toSet()
+        val siblings = searchDoc.select("a[href*=watch.php]").mapNotNull { a ->
+            val label = episodeLabel(a)
+            if (label.isBlank() || isEpisodeLabel(label)) return@mapNotNull null
+            if (!baseSeriesName(label).equals(base, ignoreCase = true)) return@mapNotNull null
+            Triple(fixUrl(a.attr("href")), seasonFromText(label), label)
+        }.distinctBy { it.first }
+            .filter { sibling ->
+                // A series page (no season in its title) is worth fetching only while we are still
+                // missing seasons; a season page is needed only when we lack that season.
+                val season = sibling.second
+                sibling.first != self && if (season == null) knownSeasons.size <= 1 else season !in knownSeasons
+            }
+            .take(MAX_SEASON_PAGES)
+
+        if (siblings.isEmpty()) return current
+
+        val extra = coroutineScope {
+            siblings.map { (href, _, label) ->
+                async(Dispatchers.IO) {
+                    runCatching { app.get(href, headers = HEADERS).document }.getOrNull()
+                        ?.let { parseAllEpisodes(it, href, label) } ?: emptyList()
+                }
+            }.awaitAll().flatten()
+        }
+
+        return (current + extra)
+            .distinctBy { it.data }
+            .sortedWith(compareBy({ it.season ?: 1 }, { it.episode ?: 0 }))
+    }
+
+    /** Reduces a title to the show's own name (drops season/episode parts and site decorations). */
+    private fun baseSeriesName(raw: String): String {
+        var t = raw
+        for (marker in listOf("الحلقة", "حلقة")) {
+            val i = t.indexOf(marker)
+            if (i > 0) {
+                t = t.substring(0, i)
+                break
+            }
+        }
+        val seasonIndex = t.indexOf("الموسم")
+        if (seasonIndex > 0) t = t.substring(0, seasonIndex)
+        for (noise in listOf(
+            "مشاهدة", "مسلسل", "انمي", "أنمي", "مترجم", "مترجمة", "كامل",
+            "ايجي بست", "ماي سيما", "وي سيما", "الملفات", "MYCIMA", "WECIMA"
+        )) {
+            t = t.replace(noise, " ")
+        }
+        t = t.replace(Regex("""[.\-–—:،,()\[\]«»"'’]+"""), " ")
+        return t.replace(Regex("""\s+"""), " ").trim()
     }
 
     private fun looksLikeSeries(title: String, url: String): Boolean =
