@@ -328,6 +328,13 @@ class TukTukHd : MainAPI() {
                                 callback(extractorLink)
                             }
                         }
+                        mirror.driver?.contains("earnvids", ignoreCase = true) == true ||
+                            mirror.symbol?.contains("TukTukVIP", ignoreCase = true) == true -> {
+                            TukTukVipExtractor().getUrl(link, playerUrl, subtitleCallback) { extractorLink ->
+                                if (extractorLink.quality == Qualities.Unknown.value) extractorLink.quality = qualityInt
+                                callback(extractorLink)
+                            }
+                        }
                         else -> {
                             loadExtractor(link, subtitleCallback) { extractorLink ->
                                 if (extractorLink.quality == Qualities.Unknown.value) extractorLink.quality = qualityInt

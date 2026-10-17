@@ -9,5 +9,6 @@ class TukTukHdPlugin: Plugin() {
     override fun load(context: Context) {
         registerMainAPI(TukTukHd())
         registerExtractorAPI(VideolandExtractor())
+        registerExtractorAPI(TukTukVipExtractor())
     }
 }
