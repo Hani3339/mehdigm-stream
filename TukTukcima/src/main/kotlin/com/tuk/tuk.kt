@@ -1,27 +1,16 @@
 package com.tuk
 
 import android.util.Base64
+import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
-import org.jsoup.nodes.Element
-import org.jsoup.select.Elements
-
-import java.net.URLEncoder
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
-import com.fasterxml.jackson.annotation.JsonProperty
-import com.lagradost.cloudstream3.amap
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import com.lagradost.cloudstream3.utils.JsUnpacker
 import com.lagradost.cloudstream3.utils.Qualities
+import org.jsoup.nodes.Element
 import kotlinx.coroutines.delay
-import java.net.URI
-import javax.crypto.Cipher
-import javax.crypto.spec.IvParameterSpec
-import javax.crypto.spec.SecretKeySpec
-import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
+import java.net.URLDecoder
+import java.net.URLEncoder
 
 class TukTukHd : MainAPI() {
     override var mainUrl = "https://tuktukhd.com"
@@ -29,31 +18,53 @@ class TukTukHd : MainAPI() {
     override val hasMainPage = true
     override var lang = "ar"
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime)
+    override val hasDownloadSupport = true
+
     override val mainPage = mainPageOf(
         "$mainUrl/recent/page/" to "المضاف حديثاً",
         "$mainUrl/category/movies-2/page/" to "أحدث الأفلام",
         "$mainUrl/category/series-1/page/" to "أحدث الحلقات",
-        "$mainUrl/category/movies-2/%d8%a7%d9%81%d9%84%d8%a7%d9%85-%d9%85%d8%af%d8%a8%d9%84%d8%ac%d8%a9/page/" to "أفلام مدبلجة"
+        "$mainUrl/category/movies-2/%d8%a7%d9%81%d9%84%d8%a7%d9%85-%d9%85%d8%af%d8%a8%d9%84%d8%ac%d8%a9/page/" to "أفلام مدبلجة",
+        "$mainUrl/category/anime-6/page/" to "أنمي",
+        "$mainUrl/popular-movies/" to "افلام شائعة",
+        "$mainUrl/most-viewed/" to "الأعلي مشاهدة",
+        "$mainUrl/channel/film-netflix-1/page/" to "افلام نتفليكس",
+        "$mainUrl/channel/series-netflix-2/page/" to "مسلسلات نتفليكس",
+        "$mainUrl/channel/full-series-1/page/" to "تحميل مسلسلات برابط واحد"
     )
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val url = request.data + page
-        val document = app.get(url).document
-        val home = document.select("li.Small--Box, div.Block--Item").mapNotNull {
+        val url = if (request.data.endsWith("/")) request.data + page else request.data + page
+        val document = app.get(url, referer = mainUrl).document
+        val home = document.select("li.Small--Box, div.Block--Item, li.AsidePost, li.Slides--Item").mapNotNull {
             toSearchResult(it)
         }
         return newHomePageResponse(request.name, home)
     }
-    private fun toSearchResult(element: Element): SearchResponse? {
-        val linkTag = element.selectFirst("a") ?: return null
-        val title = element.selectFirst(".title")?.text() ?: linkTag.attr("title")
-        val href = fixUrl(linkTag.attr("href"))
-        val imgTag = element.selectFirst("img")
-        val posterUrl = imgTag?.attr("data-src").takeIf { !it.isNullOrEmpty() }
-            ?: imgTag?.attr("src")
-        val isMovie =
-            !title.contains("مسلسل") && !title.contains("حلقة") && !href.contains("series")
 
-        return if (isMovie) {
+    private fun toSearchResult(element: Element): SearchResponse? {
+        val linkTag = element.selectFirst("a[href]") ?: return null
+        val href = fixUrl(linkTag.attr("href"))
+        if (href.isBlank()) return null
+        if (!href.contains(mainUrl.removePrefix("https://")) && !href.contains(mainUrl.removePrefix("http://"))) {
+            // keep only internal-ish links
+        }
+        val title = linkTag.attr("title").ifBlank {
+            element.selectFirst(".title, h2, h3")?.text()
+                ?: linkTag.text()
+        }
+        if (title.isBlank()) return null
+        val imgTag = element.selectFirst("img")
+        val posterUrl = imgTag?.attr("src").takeIf { !it.isNullOrEmpty() }
+            ?: imgTag?.attr("data-src")
+            ?: imgTag?.attr("data-lazy-src")
+            ?: imgTag?.attr("srcset")?.split(',')?.lastOrNull()?.trim()?.split(' ')?.firstOrNull()
+
+        val lowerTitle = title.lowercase()
+        val isMovie = !lowerTitle.contains("مسلسل") && !lowerTitle.contains("حلقة") && !href.contains("/series/")
+        val tvType = if (isMovie) TvType.Movie else TvType.TvSeries
+
+        return if (tvType == TvType.Movie) {
             newMovieSearchResponse(title, href, TvType.Movie) {
                 this.posterUrl = posterUrl
             }
@@ -63,147 +74,153 @@ class TukTukHd : MainAPI() {
             }
         }
     }
-        override suspend fun search(query: String): List<SearchResponse> {
-            return search(query, 1)?.items ?: emptyList()
-        }
 
-    override suspend fun search(query: String, page: Int): SearchResponseList? = coroutineScope {
-
-        val encoded = URLEncoder.encode(query, "utf-8")
-        val page1 = (page - 1) * 2 + 1
-        val page2 = page1 + 1
-
-        val urls = listOf(
-            "$mainUrl/?s=$encoded&page=$page1",
-            "$mainUrl/?s=$encoded&page=$page2"
-        )
-
-        val results = urls.map { url ->
-            async {
-                runCatching {
-                    val doc = app.get(url).document
-                    doc.select("div.Block--Item, li.Small--Box")
-                        .mapNotNull { toSearchResult(it) }
-                }.getOrDefault(emptyList())
-            }
-        }.awaitAll().flatten()
-        val cleaned = mergeSimilarResults(results)
-
-        newSearchResponseList(cleaned, cleaned.isNotEmpty())
-    }
-    private fun mergeSimilarResults(list: List<SearchResponse>): List<SearchResponse> {
-
-        val grouped = mutableMapOf<String, SearchResponse>()
-
-        for (item in list) {
-
-            val title = item.name
-            if (title.contains("فيلم", true) ||
-                title.contains("فلم", true) ||
-                title.contains("movie", true)
-            ) {
-                grouped[title] = item
-                continue
-            }
-            val normalized = title
-                .replace(Regex("""الحلقة\s*\d+"""), "")
-                .replace(Regex("""episode\s*\d+""", RegexOption.IGNORE_CASE), "")
-                .replace(Regex("""\d+$"""), "")
-                .trim()
-            if (!grouped.containsKey(normalized)) {
-                grouped[normalized] = item
-            }
-        }
-
-        return grouped.values.toList()
+    override suspend fun search(query: String, page: Int): SearchResponseList? {
+        val encoded = URLEncoder.encode(query, "UTF-8")
+        val url = "$mainUrl/?s=$encoded&page=$page"
+        val doc = app.get(url, referer = mainUrl).document
+        val results = doc.select("div.Block--Item, li.Small--Box").mapNotNull { toSearchResult(it) }
+        return newSearchResponseList(results, results.isNotEmpty())
     }
 
+    override suspend fun search(query: String): List<SearchResponse> {
+        return search(query, 1)?.items ?: emptyList()
+    }
+    private fun extractYear(title: String): Int? {
+        val match = Regex("(19|20)\\d{2}").find(title)
+        return match?.value?.toIntOrNull()
+    }
+
+    private fun extractRating(doc: org.jsoup.nodes.Document): Int? {
+        val text = doc.selectFirst(".imdbS strong")?.text() ?: ""
+        return text.toDoubleOrNull()?.times(10)?.toInt()
+    }
+
+    private fun extractPlot(doc: org.jsoup.nodes.Document): String? {
+        return doc.selectFirst(".story p")?.text() ?: doc.selectFirst(".story")?.text()
+    }
+
+    private fun extractPoster(doc: org.jsoup.nodes.Document): String? {
+        return doc.selectFirst("meta[property=og:image]")?.attr("content")
+            ?: doc.selectFirst(".MainSingle .left .image img")?.attr("src")
+            ?: doc.selectFirst(".image img")?.attr("src")
+    }
     override suspend fun load(url: String): LoadResponse {
-        val doc = app.get(url).document
-        val fullTitle = doc.selectFirst("h1.post-title a")?.text() ?: doc.selectFirst("h1")?.text() ?: "Unknown"
-        val cleanTitle = fullTitle.replace(Regex("""\s*(الحلقة\s*\d+|مترجم|مدبلج).*"""), "").trim()
+        val doc = app.get(url, referer = mainUrl).document
+        val ogType = doc.selectFirst("meta[property=og:type]")?.attr("content") ?: ""
+        val h1 = doc.selectFirst("h1.post-title, h1")?.text() ?: ""
+        val title = h1.replace(Regex("""\s*(الحلقة\s*\d+|مترجم|مدبلج).*"""), "").trim()
+        val poster = extractPoster(doc)
+        val plot = extractPlot(doc)
+        val year = extractYear(h1)
+        val rating = extractRating(doc)
+        val isEpisode = ogType.contains("episode") || h1.contains("الحلقة")
 
-        val desc = doc.select(".story p").text()
-        val poster = doc.selectFirst(".MainSingle .left .image img")?.attr("src")
-        val bgPoster = doc.selectFirst(".homepage__bg")?.attr("style")?.substringAfter("url(")?.substringBefore(")") ?: poster
+        if (isEpisode) {
+            // find series show page from breadcrumbs
+            var showUrl: String? = null
+            val crumbs = doc.select("#mpbreadcrumbs a[href]")
+            for (c in crumbs) {
+                val chref = fixUrl(c.attr("href"))
+                if (chref.contains("/series/")) {
+                    val ctext = c.text()
+                    if (!ctext.contains("الموسم")) {
+                        showUrl = chref
+                        break
+                    }
+                }
+            }
+            // if not found, try to extract from JSON-LD? fallback to showUrl from h1 logic not possible; use current as data
+            if (showUrl != null) {
+                return loadTvSeries(showUrl, doc, url, title, poster, plot, year, rating)
+            }
+        }
 
-        val year = doc.select(".RightTaxContent a[href*='release-year']").text().filter { it.isDigit() }.toIntOrNull()
-        val ratingText = doc.select(".imdbS strong").text()
-        val scoreValue = ratingText.toDoubleOrNull()?.times(1000)?.toInt()
-        val isSeries = doc.select(".allepcont, .allseasonss").isNotEmpty()
+        val isSeriesPage = doc.select("section.SeriesEpisodesGrid, section.SeriesSeasons, a.SeriesEpisodeCard").isNotEmpty() ||
+            doc.selectFirst(".allseasonss") != null || (ogType.contains("series") || url.contains("/series/"))
 
-        if (isSeries) {
-            val episodesByUrl = LinkedHashMap<String, Episode>()
-            val seasonElements = doc.select(".allseasonss .Block--Item a")
+        if (isSeriesPage && !isEpisode) {
+            return loadTvSeriesFromShow(doc, url, title, poster, plot, year, rating)
+        }
 
-            fun addEpisodes(epElements: List<Element>, seasonNum: Int) {
-                epElements.forEach { ep ->
+        // movie
+        return newMovieLoadResponse(title.ifBlank { h1 }, url, TvType.Movie, url) {
+            this.posterUrl = poster
+            this.plot = plot
+            this.year = year
+            this.score = Score.from10(rating)
+        }
+    }
+    private suspend fun loadTvSeriesFromShow(doc: org.jsoup.nodes.Document, url: String, title: String, poster: String?, plot: String?, year: Int?, rating: Int?): LoadResponse {
+        val episodesMap = linkedMapOf<String, Episode>()
+        val seasonLinks = mutableListOf<Pair<Int, String>>()
+        // from SeriesSeasons
+        doc.select("section.SeriesSeasons a[href*='/series/']").forEach { a ->
+            val shref = fixUrl(a.attr("href"))
+            val stitle = a.attr("title") ?: a.text()
+            val sNum = Regex("الموسم\\s*(\\d+)").find(stitle)?.groupValues?.get(1)?.toIntOrNull() ?: 1
+            if (shref != url) {
+                seasonLinks.add(Pair(sNum, shref))
+            }
+        }
+        // if no season links, maybe only this page; check episode cards
+        if (seasonLinks.isEmpty()) {
+            doc.select("a.SeriesEpisodeCard").forEach { ep ->
+                val epHref = fixUrl(ep.attr("href"))
+                val epTitle = ep.attr("title") ?: ep.text()
+                val epNum = Regex("الحلقة\\s*(\\d+)").find(epTitle)?.groupValues?.get(1)?.toIntOrNull()
+                val epThumb = ep.selectFirst("img")?.attr("src") ?: ep.selectFirst("img")?.attr("data-src")
+                episodesMap[epHref] = newEpisode(epHref) {
+                    this.name = epTitle
+                    this.episode = epNum
+                    this.season = 1
+                    this.posterUrl = epThumb
+                }
+            }
+            val sorted = episodesMap.values.sortedWith(compareBy({ it.season ?: 1 }, { it.episode ?: 0 }))
+            return newTvSeriesLoadResponse(title, url, TvType.TvSeries, sorted) {
+                this.posterUrl = poster
+                this.plot = plot
+                this.year = year
+                this.score = Score.from10(rating)
+            }
+        }
+        // fetch each season
+        for ((sNum, surl) in seasonLinks) {
+            try {
+                val sdoc = app.get(surl, referer = mainUrl).document
+                sdoc.select("a.SeriesEpisodeCard").forEach { ep ->
                     val epHref = fixUrl(ep.attr("href"))
-                    if (epHref.isBlank() || episodesByUrl.containsKey(epHref)) return@forEach
-                    val epTitle = ep.select(".ep-info h2").text()
-                    if (epTitle.isBlank()) return@forEach
-                    val epNum = ep.select(".epnum").text().filter { it.isDigit() }.toIntOrNull()
-                        ?: Regex("(?:الحلقة|episode|EP)[- _]?(\\d+)", RegexOption.IGNORE_CASE)
-                            .find(epTitle + " " + epHref)?.groupValues?.get(1)?.toIntOrNull()
-                    val epThumb = ep.select("img").attr("data-src")
-                        .ifEmpty { ep.select("img").attr("src") }
-
-                    episodesByUrl[epHref] = newEpisode(epHref) {
-                        this.name = epTitle
-                        episode = epNum
-                        season = seasonNum
-                        posterUrl = epThumb
+                    val epTitle = ep.attr("title") ?: ep.text()
+                    val epNum = Regex("الحلقة\\s*(\\d+)").find(epTitle)?.groupValues?.get(1)?.toIntOrNull()
+                    val epThumb = ep.selectFirst("img")?.attr("src") ?: ep.selectFirst("img")?.attr("data-src")
+                    if (!episodesMap.containsKey(epHref)) {
+                        episodesMap[epHref] = newEpisode(epHref) {
+                            this.name = epTitle
+                            this.episode = epNum
+                            this.season = sNum
+                            this.posterUrl = epThumb
+                        }
                     }
                 }
-            }
-
-            if (seasonElements.isNotEmpty()) {
-                val seasonResults = mutableListOf<Pair<Int, List<Element>>>()
-                seasonElements.forEach { seasonEl ->
-                    val seasonUrl = fixUrl(seasonEl.attr("href"))
-                    val seasonName = seasonEl.select("h3").text()
-                    val seasonNum = seasonName.filter { it.isDigit() }.toIntOrNull() ?: 1
-
-                    var episodeTags = emptyList<Element>()
-                    repeat(2) {
-                        episodeTags = runCatching {
-                            app.get(seasonUrl).document.select(".allepcont a")
-                        }.getOrDefault(emptyList<Element>())
-                        if (episodeTags.isNotEmpty()) return@repeat
-                    }
-                    seasonResults += Pair(seasonNum, episodeTags)
-                    delay(600)
-                }
-                seasonResults.forEach { (seasonNum, episodeTags) ->
-                    addEpisodes(episodeTags, seasonNum)
-                }
-                if (episodesByUrl.isEmpty()) {
-                    doc.select(".allepcont a").forEach { ep ->
-                        addEpisodes(listOf(ep), 1)
-                    }
-                }
-            } else {
-                addEpisodes(doc.select(".allepcont a"), 1)
-            }
-            val sortedEpisodes = episodesByUrl.values.sortedWith(compareBy({ it.season }, { it.episode }))
-
-            return newTvSeriesLoadResponse(cleanTitle, url, TvType.TvSeries, sortedEpisodes) {
-                this.posterUrl = poster
-                this.plot = desc
-                this.year = year
-                this.score = Score.from10(scoreValue)
-            }
-
-        } else {
-            return newMovieLoadResponse(cleanTitle, url, TvType.Movie, url) {
-                this.posterUrl = poster
-                this.plot = desc
-                this.year = year
-                this.score = Score.from10(scoreValue)
-            }
+                delay(300)
+            } catch (_: Exception) {}
+        }
+        val sorted = episodesMap.values.sortedWith(compareBy({ it.season ?: 1 }, { it.episode ?: 0 }))
+        return newTvSeriesLoadResponse(title, url, TvType.TvSeries, sorted) {
+            this.posterUrl = poster
+            this.plot = plot
+            this.year = year
+            this.score = Score.from10(rating)
         }
     }
 
+    private suspend fun loadTvSeries(showUrl: String, episodeDoc: org.jsoup.nodes.Document, episodeUrl: String, title: String, poster: String?, plot: String?, year: Int?, rating: Int?): LoadResponse {
+        // fetch show page
+        val showDoc = app.get(showUrl, referer = mainUrl).document
+        val showTitle = showDoc.selectFirst("h1")?.text() ?: title
+        return loadTvSeriesFromShow(showDoc, showUrl, showTitle, extractPoster(showDoc) ?: poster, extractPlot(showDoc) ?: plot, extractYear(showTitle) ?: year, extractRating(showDoc) ?: rating)
+    }
     private fun extractQuality(resolution: String?): Int {
         val cleanRes = resolution?.lowercase()?.trim() ?: return Qualities.Unknown.value
         if (cleanRes.contains("x")) {
@@ -230,295 +247,70 @@ class TukTukHd : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val doc = app.get(data).document
+        val doc = app.get(data, referer = mainUrl).document
         val iframeCrypt = doc.select("iframe#main-video-frame").attr("data-crypt")
-
         if (iframeCrypt.isEmpty()) return false
-
         try {
-            val playerUrl = String(Base64.decode(iframeCrypt, Base64.DEFAULT))
-
+            val decodedBytes = Base64.decode(iframeCrypt, Base64.DEFAULT)
+            val playerUrl = String(decodedBytes)
             val initialResponse = app.get(
                 playerUrl,
                 headers = mapOf(
-                    "User-Agent" to "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36",
+                    "User-Agent" to USER_AGENT,
                     "Referer" to mainUrl
                 )
             )
-
-            val cookies = initialResponse.cookies
-            val xsrfToken = cookies["XSRF-TOKEN"]?.let { java.net.URLDecoder.decode(it, "UTF-8") }
             val version = Regex(""""version":"([^"]+)"""").find(initialResponse.text)?.groupValues?.get(1)
-
-            if (xsrfToken != null && version != null) {
+            if (version != null) {
                 val inertiaHeaders = mapOf(
-                    "X-XSRF-TOKEN" to xsrfToken,
                     "X-Inertia" to "true",
                     "X-Inertia-Version" to version,
                     "X-Inertia-Partial-Component" to "files/mirror/video",
                     "X-Inertia-Partial-Data" to "streams",
                     "X-Requested-With" to "XMLHttpRequest",
                     "Referer" to playerUrl,
-                    "Content-Type" to "application/json"
+                    "Accept" to "text/html, application/xhtml+xml"
                 )
-
                 val inertiaResponse = app.get(
                     playerUrl,
-                    headers = inertiaHeaders,
-                    cookies = cookies
+                    headers = inertiaHeaders
                 ).parsed<InertiaResponse>()
-
                 val streams = inertiaResponse.props.streams?.data ?: emptyList()
-                val allMirrorsWithQuality = streams.flatMap { streamItem ->
+                val allMirrors = streams.flatMap { streamItem ->
                     val qualityInt = extractQuality(streamItem.resolution ?: streamItem.label)
                     streamItem.mirrors?.map { mirror ->
                         Pair(mirror, qualityInt)
                     } ?: emptyList()
                 }
-
-                allMirrorsWithQuality.amap { (mirror, qualityInt) ->
+                allMirrors.amap { (mirror, qualityInt) ->
                     val rawLink = mirror.link ?: return@amap
                     val link = if (rawLink.startsWith("//")) "https:$rawLink" else rawLink
-                    val displayName = mirror.symbol ?: mirror.driver ?: "Server"
-
+                    val displayName = mirror.driver ?: mirror.symbol ?: "Server"
                     when {
-                        mirror.symbol?.equals("TukTukVIP", ignoreCase = true) == true -> {
-                            extractTukTukVip(link, qualityInt, displayName, callback)
+                        mirror.driver?.contains("streamruby", ignoreCase = true) == true || mirror.symbol?.contains("streamruby", ignoreCase = true) == true -> {
+                            loadExtractor(link, subtitleCallback) { extractorLink ->
+                                if (extractorLink.quality == Qualities.Unknown.value) extractorLink.quality = qualityInt
+                                callback(extractorLink)
+                            }
                         }
-
-                        mirror.driver?.equals("rpmshare", ignoreCase = true) == true -> {
-                            SmartPlayer.extract(link, qualityInt, displayName, callback)
+                        mirror.driver?.contains("rpmshare", ignoreCase = true) == true -> {
+                            // reuse pattern if exists via loadExtractor? or skip
+                            loadExtractor(link, subtitleCallback) { extractorLink ->
+                                if (extractorLink.quality == Qualities.Unknown.value) extractorLink.quality = qualityInt
+                                callback(extractorLink)
+                            }
                         }
-
                         else -> {
                             loadExtractor(link, subtitleCallback) { extractorLink ->
-                                if (extractorLink.quality == Qualities.Unknown.value) {
-                                    extractorLink.quality = qualityInt
-                                }
+                                if (extractorLink.quality == Qualities.Unknown.value) extractorLink.quality = qualityInt
                                 callback(extractorLink)
                             }
                         }
                     }
                 }
             }
-
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-
+        } catch (_: Exception) {}
         return true
-    }
-
-    private suspend fun extractTukTukVip(url: String, qualityInt: Int, displayName: String, callback: (ExtractorLink) -> Unit) {
-        try {
-            val refererUrl = try {
-                val uri = java.net.URI(url)
-                "${uri.scheme}://${uri.host}/"
-            } catch (e: Exception) {
-                url
-            }
-
-            val originUrl = refererUrl.removeSuffix("/")
-
-            val response = app.get(url, referer = refererUrl).text
-            val unpackedHtml = JsUnpacker(response).unpack() ?: response
-
-            val regex = Regex("""https://[^"']+?/hls\d+/[^"']+?/master\.(?:txt|m3u8)(?:\?[^"']*)?""")
-            val matches = regex.findAll(unpackedHtml).toList()
-
-            matches.forEach { match ->
-                val link = match.value
-                val isM3u8 = link.contains(".m3u8") || link.contains(".txt")
-
-                callback.invoke(
-                    newExtractorLink(
-                        source = "TukTukVIP",
-                        name = displayName, // هنا نضع الاسم الجديد المدمج بالجودة
-                        url = link,
-                    ) {
-                        this.referer = refererUrl
-                        this.quality = qualityInt
-
-                        headers = mapOf(
-                            "sec-ch-ua-platform" to "\"Android\"",
-                            "sec-ch-ua" to "\"Chromium\";v=\"148\", \"Google Chrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"",
-                            "sec-ch-ua-mobile" to "?1",
-                            "accept" to "*/*",
-                            "origin" to originUrl,
-                            "sec-fetch-site" to "cross-site",
-                            "sec-fetch-mode" to "cors",
-                            "sec-fetch-dest" to "empty"
-                        )
-                    }
-                )
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-
-    object SmartPlayer {
-        private const val KEY_STRING = "kiemtienmua911ca"
-
-        private fun String.decodeHex(): ByteArray {
-            val cleanHex = this.trim().replace("\"", "").let { if (it.length % 2 != 0) it.dropLast(1) else it }
-            return cleanHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-        }
-
-        private fun generateIvCandidates(domain: String, videoId: String): List<ByteArray> {
-            val candidates = mutableListOf<ByteArray>()
-
-            val dOpts = mutableListOf<Int>(48, 323)
-            if (domain.isNotEmpty()) {
-                dOpts.add(domain.length * (domain.length + 2))
-                val parts = domain.split(".")
-                if (parts.size >= 2) {
-                    val shortDomain = "${parts[parts.size - 2]}.${parts[parts.size - 1]}"
-                    dOpts.add(shortDomain.length * (shortDomain.length + 2))
-                }
-            }
-
-            val wOpts = mutableListOf<Int>(0, 105, 141, 189, 63)
-            if (videoId.isNotEmpty()) {
-                wOpts.add(3 * videoId.first().code)
-            }
-
-            for (d in dOpts.distinct()) {
-                for (w in wOpts.distinct()) {
-                    val part1 = (1..9).map { (it + d).toChar() }.joinToString("")
-                    val part2 = intArrayOf(d, 111, w, 128, 132, 97, 95).map { it.toChar() }.joinToString("")
-                    val ivString = (part1 + part2)
-                    candidates.add(ivString.toByteArray(Charsets.UTF_8).copyOfRange(0, 16))
-                }
-            }
-            return candidates
-        }
-
-        private fun smartDecrypt(encryptedHex: String, domain: String, videoId: String): String? {
-            val encryptedBytes = try { encryptedHex.decodeHex() } catch (e: Exception) { return null }
-            val secretKey = SecretKeySpec(KEY_STRING.toByteArray(Charsets.UTF_8), "AES")
-
-            val ivCandidates = generateIvCandidates(domain, videoId)
-            for (iv in ivCandidates) {
-                try {
-                    val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
-                    cipher.init(Cipher.DECRYPT_MODE, secretKey, IvParameterSpec(iv))
-                    val decryptedBytes = cipher.doFinal(encryptedBytes)
-                    val decryptedText = String(decryptedBytes, Charsets.UTF_8)
-
-                    if (decryptedText.trim().startsWith("{")) {
-                        val data = tryParseJson<StrpResponse>(decryptedText)
-                        val source = data?.source
-                        if (!source.isNullOrBlank()) {
-                            val cleanSource = if (source.contains("://") && !source.startsWith("http")) {
-                                "https" + source.substring(source.indexOf("://"))
-                            } else {
-                                source
-                            }
-                            return cleanSource
-                        }
-                    }
-                } catch (e: Exception) { continue }
-            }
-
-            try {
-                val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
-                cipher.init(Cipher.DECRYPT_MODE, secretKey, IvParameterSpec(ByteArray(16)))
-                val decryptedPadded = cipher.doFinal(encryptedBytes)
-
-                if (decryptedPadded.size > 16) {
-                    val validText = String(decryptedPadded.copyOfRange(16, decryptedPadded.size), Charsets.UTF_8)
-                    val match = Regex("""([a-zA-Z0-9.-]+\.[a-zA-Z]{2,10}/[^\s",\\]+\.m3u8)""").find(validText)
-                        ?: Regex("""([a-zA-Z0-9.-]+\.[a-zA-Z]{2,10}/[^\s",\\]+)""").find(validText)
-
-                    if (match != null) {
-                        return "https://" + match.groupValues[1]
-                    }
-                }
-            } catch (e: Exception) { }
-
-            return null
-        }
-
-        suspend fun extract(playerUrl: String, qualityInt: Int, displayName: String, callback: (ExtractorLink) -> Unit) {
-            val MAX_RETRIES = 3
-
-            try {
-                val uri = URI(if (playerUrl.startsWith("//")) "https:$playerUrl" else playerUrl)
-                val domain = uri.host ?: return
-
-                val videoId = when {
-                    playerUrl.contains("#") -> playerUrl.substringAfterLast("#").substringBefore("&")
-                    playerUrl.contains("id=") -> playerUrl.substringAfter("id=").substringBefore("&")
-                    else -> return
-                }
-
-                val apiUrl = "https://$domain/api/v1/video?id=$videoId"
-                val headers = mapOf(
-                    "Referer" to "https://$domain/",
-                    "Origin" to "https://$domain",
-                    "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                    "Accept" to "application/json, text/plain, */*"
-                )
-
-                for (attempt in 1..MAX_RETRIES) {
-                    val res = app.get(apiUrl, headers = headers)
-
-                    if (res.isSuccessful && res.text.isNotBlank()) {
-                        val rawM3u8 = smartDecrypt(res.text, domain, videoId)
-
-                        if (!rawM3u8.isNullOrBlank()) {
-                            val masterM3u8 = sanitizeUrl(rawM3u8)
-                            val finalM3u8 = getFinalM3u8(masterM3u8, "https://$domain/")
-
-                            callback.invoke(
-                                newExtractorLink(
-                                    source = "Share VIP",
-                                    name = displayName, // هنا نضع الاسم الجديد المدمج بالجودة لـ rpmshare
-                                    url = finalM3u8 ?: masterM3u8,
-                                ) {
-                                    referer = "https://$domain/"
-                                    quality = qualityInt
-                                }
-                            )
-                            return
-                        }
-                    }
-                    delay(1000)
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-
-        private suspend fun getFinalM3u8(masterUrl: String, referer: String): String? {
-            return try {
-                val playlistContent = app.get(masterUrl, headers = mapOf("Referer" to referer)).text
-                val qualityLine = playlistContent.lines().firstOrNull { it.isNotBlank() && !it.startsWith("#") }
-
-                if (qualityLine != null && !qualityLine.contains("://")) {
-                    val basePath = masterUrl.substringBeforeLast("/")
-                    "$basePath/$qualityLine"
-                } else if (qualityLine != null) {
-                    qualityLine
-                } else {
-                    masterUrl
-                }
-            } catch (e: Exception) {
-                masterUrl
-            }
-        }
-
-        private fun sanitizeUrl(rawLink: String): String {
-            val urlRegex = Regex("""([a-zA-Z0-9.-]+\.[a-zA-Z]{2,10}/.*)""")
-            val match = urlRegex.find(rawLink)
-            return if (match != null) "https://${match.value}" else rawLink
-        }
-
-        data class StrpResponse(
-            @JsonProperty("source") val source: String?,
-            @JsonProperty("cf") val cf: String?
-        )
     }
 
     data class InertiaResponse(
