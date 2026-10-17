@@ -10,5 +10,6 @@ class TukTukHdPlugin: Plugin() {
         registerMainAPI(TukTukHd())
         registerExtractorAPI(VideolandExtractor())
         registerExtractorAPI(TukTukVipExtractor())
+        registerExtractorAPI(TukTukByseExtractor())
     }
 }

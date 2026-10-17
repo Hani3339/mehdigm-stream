@@ -335,6 +335,12 @@ class TukTukHd : MainAPI() {
                                 callback(extractorLink)
                             }
                         }
+                        mirror.driver?.contains("byse", ignoreCase = true) == true -> {
+                            TukTukByseExtractor().getUrl(link, playerUrl, subtitleCallback) { extractorLink ->
+                                if (extractorLink.quality == Qualities.Unknown.value) extractorLink.quality = qualityInt
+                                callback(extractorLink)
+                            }
+                        }
                         else -> {
                             loadExtractor(link, subtitleCallback) { extractorLink ->
                                 if (extractorLink.quality == Qualities.Unknown.value) extractorLink.quality = qualityInt
