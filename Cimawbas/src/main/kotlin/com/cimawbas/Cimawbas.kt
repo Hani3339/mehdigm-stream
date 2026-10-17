@@ -50,6 +50,29 @@ class Cimawbas : MainAPI() {
         private const val SOURCE_TIMEOUT_MS = 15_000L
         private const val MAX_SEASON_PAGES = 20
         private const val MAX_SEARCH_PAGES = 100
+
+        // Arabic ordinal season names ("الموسم الخامس عشر"). Sorted by descending length so that
+        // compound ordinals ("الخامس عشر" = 15) win over their prefixes ("الخامس" = 5).
+        private val SEASON_ORDINALS: List<Pair<String, Int>> = buildList {
+            add("الاول" to 1); add("الأول" to 1); add("الواحد" to 1)
+            add("الثاني" to 2); add("الثانى" to 2)
+            add("الثالث" to 3); add("الرابع" to 4); add("الخامس" to 5)
+            add("السادس" to 6); add("السابع" to 7); add("الثامن" to 8); add("التاسع" to 9)
+            add("العاشر" to 10)
+            add("الحادي عشر" to 11); add("الثاني عشر" to 12); add("الثالث عشر" to 13); add("الرابع عشر" to 14)
+            add("الخامس عشر" to 15); add("السادس عشر" to 16); add("السابع عشر" to 17); add("الثامن عشر" to 18)
+            add("التاسع عشر" to 19); add("العشرون" to 20); add("العشرين" to 20)
+            add("الحادي والعشرون" to 21); add("الحادي والعشرين" to 21)
+            add("الثاني والعشرون" to 22); add("الثاني والعشرين" to 22)
+            add("الثالث والعشرون" to 23); add("الثالث والعشرين" to 23)
+            add("الرابع والعشرون" to 24); add("الرابع والعشرين" to 24)
+            add("الخامس والعشرون" to 25); add("الخامس والعشرين" to 25)
+            add("السادس والعشرون" to 26); add("السادس والعشرين" to 26)
+            add("السابع والعشرون" to 27); add("السابع والعشرين" to 27)
+            add("الثامن والعشرون" to 28); add("الثامن والعشرين" to 28)
+            add("التاسع والعشرون" to 29); add("التاسع والعشرين" to 29)
+            add("الثلاثون" to 30); add("الثلاثين" to 30)
+        }.sortedByDescending { it.first.length }
     }
 
     override var name = "سيما وبس (Cimawbas)"
@@ -391,17 +414,10 @@ class Cimawbas : MainAPI() {
         Regex("""الموسم\s*(\d+)""").find(text)?.groupValues?.get(1)?.toIntOrNull()?.let { return it }
         Regex("""(?i)(?:^|[^a-z])s0*(\d{1,3})(?:[^0-9]|$)""").find(text)
             ?.groupValues?.get(1)?.toIntOrNull()?.let { return it }
-        val ordinals = listOf(
-            "الاول" to 1, "الأول" to 1, "الثانى" to 2, "الثاني" to 2, "الثالث" to 3, "الرابع" to 4,
-            "الخامس" to 5, "السادس" to 6, "السابع" to 7, "الثامن" to 8, "التاسع" to 9, "العاشر" to 10,
-            "الحادي عشر" to 11, "الثاني عشر" to 12, "الثالث عشر" to 13, "الرابع عشر" to 14,
-            "الخامس عشر" to 15, "السادس عشر" to 16, "السابع عشر" to 17, "الثامن عشر" to 18,
-            "التاسع عشر" to 19, "العشرون" to 20
-        )
         val idx = text.indexOf("الموسم")
         if (idx >= 0) {
             val tail = text.substring(idx + 6).trim()
-            ordinals.firstOrNull { tail.startsWith(it.first) }?.let { return it.second }
+            SEASON_ORDINALS.firstOrNull { tail.startsWith(it.first) }?.let { return it.second }
         }
         return null
     }
