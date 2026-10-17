@@ -49,6 +49,7 @@ class Cimawbas : MainAPI() {
         )
         private const val SOURCE_TIMEOUT_MS = 15_000L
         private const val MAX_SEASON_PAGES = 20
+        private const val MAX_SEARCH_PAGES = 100
     }
 
     override var name = "سيما وبس (Cimawbas)"
@@ -256,7 +257,8 @@ class Cimawbas : MainAPI() {
     /**
      * Merges the episodes of every season page that belongs to the same show as [title], so that
      * opening any season card yields the whole series. The site does not link seasons together, so
-     * we look the show up in its search and collect:
+     * we page through the show's search results (the seasons are spread over several pages) and
+     * collect:
      *  - season/series cards (a title without an episode number), and
      *  - one representative episode per season (a title with an episode number),
      * because on some series only episode results are returned while the season pages themselves
@@ -271,28 +273,39 @@ class Cimawbas : MainAPI() {
         if (base.length < 2) return current
 
         val q = URLEncoder.encode(base, "UTF-8").replace("+", "%20")
-        val searchDoc = runCatching {
-            app.get("$mainUrl/search.php?keywords=$q", headers = HEADERS).document
-        }.getOrNull() ?: return current
-
         val self = fixUrl(url)
         val knownSeasons = current.mapNotNull { it.season }.toSet()
         val seasonCards = LinkedHashMap<String, Triple<String, Int?, String>>()
         val episodeReps = LinkedHashMap<Int, Triple<String, Int?, String>>()
-        searchDoc.select("a[href*=watch.php]").forEach { a ->
-            val label = episodeLabel(a)
-            if (label.isBlank()) return@forEach
-            if (!baseSeriesName(label).equals(base, ignoreCase = true)) return@forEach
-            val href = fixUrl(a.attr("href"))
-            if (href == self) return@forEach
-            val season = seasonFromText(label)
-            if (isEpisodeLabel(label)) {
-                if (season != null && season !in knownSeasons) {
-                    episodeReps.putIfAbsent(season, Triple(href, season, label))
+        val seenHrefs = HashSet<String>()
+        var page = 1
+        while (page <= MAX_SEARCH_PAGES) {
+            val searchDoc = runCatching {
+                app.get("$mainUrl/search.php?keywords=$q&page=$page", headers = HEADERS).document
+            }.getOrNull() ?: break
+            val anchors = searchDoc.select("a[href*=watch.php]")
+            if (anchors.isEmpty()) break
+            var newHrefs = 0
+            anchors.forEach { a ->
+                val hrefRaw = a.attr("href").trim()
+                if (hrefRaw.isBlank() || !seenHrefs.add(hrefRaw)) return@forEach
+                newHrefs++
+                val label = episodeLabel(a)
+                if (label.isBlank()) return@forEach
+                if (!baseSeriesName(label).equals(base, ignoreCase = true)) return@forEach
+                val href = fixUrl(hrefRaw)
+                if (href == self) return@forEach
+                val season = seasonFromText(label)
+                if (isEpisodeLabel(label)) {
+                    if (season != null && season !in knownSeasons) {
+                        episodeReps.putIfAbsent(season, Triple(href, season, label))
+                    }
+                } else {
+                    seasonCards.putIfAbsent(href, Triple(href, season, label))
                 }
-            } else {
-                seasonCards.putIfAbsent(href, Triple(href, season, label))
             }
+            if (newHrefs == 0) break
+            page++
         }
 
         val targets = LinkedHashMap<String, Triple<String, Int?, String>>()
