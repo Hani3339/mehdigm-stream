@@ -12,5 +12,6 @@ class TukTukHdPlugin: Plugin() {
         registerExtractorAPI(TukTukVipExtractor())
         registerExtractorAPI(TukTukByseExtractor())
         registerExtractorAPI(TukTukLuluExtractor())
+        registerExtractorAPI(TukTukUpnExtractor())
     }
 }

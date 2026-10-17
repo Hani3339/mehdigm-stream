@@ -347,6 +347,13 @@ class TukTukHd : MainAPI() {
                                 callback(extractorLink)
                             }
                         }
+                        mirror.driver?.contains("upnshare", ignoreCase = true) == true ||
+                            link.contains("upns.one", ignoreCase = true) -> {
+                            TukTukUpnExtractor().getUrl(link, playerUrl, subtitleCallback) { extractorLink ->
+                                if (extractorLink.quality == Qualities.Unknown.value) extractorLink.quality = qualityInt
+                                callback(extractorLink)
+                            }
+                        }
                         else -> {
                             loadExtractor(link, subtitleCallback) { extractorLink ->
                                 if (extractorLink.quality == Qualities.Unknown.value) extractorLink.quality = qualityInt
