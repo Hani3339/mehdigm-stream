@@ -298,7 +298,7 @@ class Cimawbas : MainAPI() {
                 val season = seasonFromText(label)
                 if (isEpisodeLabel(label)) {
                     if (season != null) {
-                        episodeReps.putIfAbsent(season, Triple(href, season, label))
+                        episodeReps[season] = Triple(href, season, label) // prefer newer/any episode card as rep
                     }
                 } else {
                     seasonCards.putIfAbsent(href, Triple(href, season, label))
