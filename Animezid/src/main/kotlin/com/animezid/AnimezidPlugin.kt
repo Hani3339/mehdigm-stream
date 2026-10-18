@@ -24,9 +24,10 @@ class AnimezidPlugin : Plugin() {
         registerExtractorAPI(AnimezidMegaMaxExtractor())
         registerExtractorAPI(AnimezidVidTubeExtractor())
         registerExtractorAPI(AnimezidAbyssExtractor())
+        registerExtractorAPI(AnimezidPlayMateExtractor())
 
-        // PlayMate (playmate.to) and DoodStream (playmogo.com) are covered by
-        // Cloudstream's built-in extractors via loadExtractor().
+        // DoodStream (playmogo.com) is covered by Cloudstream's built-in
+        // extractors via loadExtractor().
 
         registerMainAPI(Animezid())
     }
