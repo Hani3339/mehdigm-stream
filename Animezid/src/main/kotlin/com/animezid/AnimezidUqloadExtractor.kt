@@ -10,9 +10,11 @@ class AnimezidUqloadToExtractor : AnimezidUqloadExtractor() {
 }
 
 /**
- * Uqload on the domains Animezid serves (uqload.vc / uqload.to).
- * It mirrors the same file id across uqload domains as Cloudstream's built-in
- * extractor, which only covers uqload.com / .co / .cx / .bz.
+ * Uqload on the domains Animezid serves (uqload.vc / uqload.to). Cloudstream's built-in Uqload
+ * extractor only covers uqload.com / .co / .cx / .bz, so we handle these domains ourselves.
+ *
+ * The embed page is a Dean Edwards packed player holding an HLS master playlist; it is unpacked
+ * and expanded through M3u8Helper so every advertised quality is emitted.
  */
 open class AnimezidUqloadExtractor : ExtractorApi() {
     override var name = "Uqload"
@@ -25,36 +27,63 @@ open class AnimezidUqloadExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        val videoUrl = try {
-            app.get(url, referer = referer ?: mainUrl).text
+        val origin = "https://" + url.substringAfter("://").substringBefore("/")
+
+        val page = try {
+            app.get(
+                url,
+                headers = mapOf(
+                    "User-Agent" to USER_AGENT,
+                    "Accept" to "*/*",
+                    "Referer" to (referer ?: "$origin/")
+                ),
+                referer = referer ?: "$origin/"
+            ).text
         } catch (_: Exception) {
             return
         }
+        if (page.isBlank()) return
 
-        val unpacked = JsUnpacker(videoUrl).unpack() ?: videoUrl
+        val unpacked = JsUnpacker(page).unpack() ?: page
+        val texts = listOf(page, unpacked)
 
-        val fileUrl = listOf(
-            Regex("""sources\s*:\s*\[\s*["']([^"']+)["']""").find(unpacked)?.groupValues?.get(1),
-            Regex("""sources\s*:\s*\{[^}]*"?file"?\s*:\s*["']([^"']+)["']""").find(unpacked)?.groupValues?.get(1),
-            Regex("""sources\s*:\s*\["[^"]*"\s*,\s*"([^"]+\.mp4[^"]*)"\s*\]""").find(unpacked)?.groupValues?.get(1),
-            Regex("""https?://[^"'\s<>]+\.mp4[^"'\s<>]*""").find(unpacked)?.value
-        ).firstNotNullOfOrNull { it }
+        val linkHeaders = mapOf(
+            "User-Agent" to USER_AGENT,
+            "Accept" to "*/*",
+            "Referer" to "$origin/"
+        )
 
-        if (fileUrl.isNullOrBlank()) return
+        // Prefer an HLS master playlist (expanded to all qualities).
+        val m3u8 = texts.asSequence()
+            .flatMap { Regex("""https?://[^"'<>\s]+\.m3u8[^"'<>\s]*""").findAll(it).map { m -> m.value } }
+            .firstOrNull { it.isNotBlank() }
+        if (m3u8 != null) {
+            val generated = try {
+                M3u8Helper.generateM3u8(name, m3u8, "$origin/", headers = linkHeaders)
+            } catch (_: Throwable) {
+                emptyList()
+            }
+            if (generated.isNotEmpty()) {
+                generated.forEach(callback)
+                return
+            }
+        }
+
+        // Fallback: direct mp4.
+        val mp4 = texts.asSequence()
+            .flatMap { Regex("""https?://[^"'<>\s]+\.mp4[^"'<>\s]*""").findAll(it).map { m -> m.value } }
+            .firstOrNull { it.isNotBlank() } ?: return
 
         callback.invoke(
             newExtractorLink(
                 source = name,
                 name = name,
-                url = fileUrl,
+                url = mp4,
                 type = ExtractorLinkType.VIDEO
             ) {
-                this.referer = "$mainUrl/"
+                this.referer = "$origin/"
                 this.quality = Qualities.Unknown.value
-                this.headers = mapOf(
-                    "User-Agent" to USER_AGENT,
-                    "Referer" to "$mainUrl/"
-                )
+                this.headers = linkHeaders
             }
         )
     }

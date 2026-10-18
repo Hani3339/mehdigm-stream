@@ -7,22 +7,23 @@ import android.content.Context
 @CloudstreamPlugin
 class AnimezidPlugin : Plugin() {
     override fun load(context: Context) {
-        registerExtractorAPI(AnimezidStreamRubyExtractor())
-        registerExtractorAPI(AnimezidStreamRubyComExtractor())
-
-        registerExtractorAPI(AnimezidTurboViPlayExtractor())
-        registerExtractorAPI(AnimezidTurboViPlayComExtractor())
-
+        // Zid / SmartPlayer family
         registerExtractorAPI(AnimezidRpmHostExtractor())
         registerExtractorAPI(AnimezidUpnShareExtractor())
         registerExtractorAPI(AnimezidStreamP2PExtractor())
         registerExtractorAPI(AnimezidEasyVidPlayExtractor())
 
+        // Direct HLS hosts
         registerExtractorAPI(AnimezidUqloadExtractor())
         registerExtractorAPI(AnimezidUqloadToExtractor())
+        registerExtractorAPI(AnimezidStreamWishExtractor())
 
+        // Best-effort hosts
         registerExtractorAPI(AnimezidMegaMaxExtractor())
         registerExtractorAPI(AnimezidVidTubeExtractor())
+
+        // PlayMate (playmate.to) and DoodStream (playmogo.com) are covered by
+        // Cloudstream's built-in extractors via loadExtractor().
 
         registerMainAPI(Animezid())
     }

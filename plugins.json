@@ -20,10 +20,10 @@
     "description": "شاهد الأنمي مترجم — بوسترات ورئيسية عبر api، تشغيل مباشر للحلقات المجانية."
   },
   {
-    "iconUrl": "https://animezid.cam/uploads/custom-logo.png",
+    "iconUrl": "https://animezid.org/uploads/custom-logo.png",
     "apiVersion": 1,
     "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-    "fileSize": 0,
+    "fileSize": 44680,
     "status": 1,
     "language": "ar",
     "authors": [
@@ -37,7 +37,7 @@
       "Movie",
       "OVA"
     ],
-    "version": 4,
+    "version": 6,
     "internalName": "Animezid",
     "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/Animezid.cs3",
     "name": "Animezid (انمي زد)",
