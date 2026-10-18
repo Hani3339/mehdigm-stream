@@ -27,6 +27,7 @@ class AnimezidPlugin : Plugin() {
         registerExtractorAPI(AnimezidPlayMateExtractor())
         registerExtractorAPI(AnimezidByseExtractor())
         registerExtractorAPI(AnimezidMp4UploadExtractor())
+        registerExtractorAPI(AnimezidSaveFilesExtractor())
 
         // DoodStream (playmogo.com) is covered by Cloudstream's built-in
         // extractors via loadExtractor().
