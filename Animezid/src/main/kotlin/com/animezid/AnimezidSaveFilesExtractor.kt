@@ -65,7 +65,7 @@ class AnimezidSaveFilesExtractor : ExtractorApi() {
         }
         if (dlText.isBlank()) return
 
-        val streamUrl = Regex("""sources:\s*\[(?:{\s*file\s*:)?\s*['"]([^'"]+)['"]""")
+        val streamUrl = Regex("""sources:\s*\[(?:\{\s*file\s*:)?\s*['"]([^'"]+)['"]""")
             .find(dlText)?.groupValues?.get(1)
             ?: Regex("""file:\s*["']([^"']+\.m3u8[^"']*)["']""")
                 .find(dlText)?.groupValues?.get(1)
