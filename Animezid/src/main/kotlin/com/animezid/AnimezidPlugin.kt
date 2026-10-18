@@ -17,10 +17,13 @@ class AnimezidPlugin : Plugin() {
         registerExtractorAPI(AnimezidUqloadExtractor())
         registerExtractorAPI(AnimezidUqloadToExtractor())
         registerExtractorAPI(AnimezidStreamWishExtractor())
+        registerExtractorAPI(AnimezidStreamRubyExtractor())
+        registerExtractorAPI(AnimezidStreamRubyComExtractor())
 
         // Best-effort hosts
         registerExtractorAPI(AnimezidMegaMaxExtractor())
         registerExtractorAPI(AnimezidVidTubeExtractor())
+        registerExtractorAPI(AnimezidAbyssExtractor())
 
         // PlayMate (playmate.to) and DoodStream (playmogo.com) are covered by
         // Cloudstream's built-in extractors via loadExtractor().
