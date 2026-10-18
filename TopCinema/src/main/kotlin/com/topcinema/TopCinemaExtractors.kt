@@ -479,3 +479,115 @@ class TCByse : ExtractorApi() {
         )
     }
 }
+
+/**
+ * LuluStream host used by this site (`luluvdo.com`).
+ *
+ * Two site specific traps:
+ *  - the embed page answers `Video embed restricted for this domain` for any foreign
+ *    referer, so it has to be requested bare or with itself as the referer;
+ *  - the player script is p.a.c.k.e.r obfuscated, which the built-in LuluStream
+ *    extractor never unpacks — the media url only appears after [JsUnpacker].
+ *
+ * Every master playlist found is expanded through `M3u8Helper` so each advertised
+ * quality is emitted separately.
+ */
+class TCLuluStream : ExtractorApi() {
+    override var name = "LuluStream"
+    override var mainUrl = "https://luluvdo.com"
+    override val requiresReferer = true
+
+    override suspend fun getUrl(
+        url: String,
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val page = fetchPage(url) ?: run {
+            Log.w(name, "blocked for $url (direct and via proxy)")
+            return
+        }
+
+        val unpacked = try {
+            JsUnpacker(page).unpack() ?: page
+        } catch (t: Throwable) {
+            page
+        }
+        val haystack = if (unpacked === page) page else "$page\n$unpacked"
+
+        val links = LinkedHashSet<String>()
+        for (p in MEDIA_PATTERNS) {
+            p.findAll(haystack).forEach { m ->
+                val candidate = m.groupValues.drop(1).firstOrNull { it.isNotBlank() && it.contains("://") }
+                    ?: m.value
+                if (candidate.contains("://") && MEDIA_URL.containsMatchIn(candidate)) {
+                    links.add(candidate)
+                }
+            }
+            if (links.isNotEmpty()) break
+        }
+        if (links.isEmpty()) {
+            Log.w(name, "no media url found for $url")
+            return
+        }
+
+        val headers = mapOf(
+            "User-Agent" to TC_UA,
+            "Referer" to "$mainUrl/",
+            "Origin" to mainUrl
+        )
+        for (link in links) {
+            val isM3u8 = link.contains(".m3u8", true) || link.contains("master.txt", true)
+            if (isM3u8) {
+                val variants = try {
+                    M3u8Helper.generateM3u8(name, link, "$mainUrl/", headers = headers)
+                } catch (_: Throwable) {
+                    emptyList()
+                }
+                if (variants.isNotEmpty()) {
+                    variants.forEach(callback)
+                    continue
+                }
+            }
+            callback(
+                newExtractorLink(
+                    source = name,
+                    name = name,
+                    url = link,
+                    type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                ) {
+                    this.referer = "$mainUrl/"
+                    this.quality = Qualities.Unknown.value
+                    this.headers = headers
+                }
+            )
+        }
+    }
+
+    private suspend fun fetchPage(url: String): String? {
+        val direct = try {
+            app.get(url, referer = url, headers = TC_HTML_HEADERS).text
+        } catch (t: Throwable) {
+            Log.w(name, "fetch failed for $url: $t")
+            null
+        }
+        if (direct != null && luluUsable(direct)) return direct
+        return TCProxyPool.fetch(url, TC_HTML_HEADERS + mapOf("Referer" to url))
+    }
+
+    private fun luluUsable(page: String): Boolean =
+        tcUsablePage(page) && !page.contains("Video embed restricted", true)
+
+    companion object {
+        private val MEDIA_URL = Regex(
+            """(?i)\.(?:m3u8|mpd|mp4|mkv|mov|flv)(?:[?#]|$)|master\.(?:txt|m3u8)(?:[?#]|$)"""
+        )
+
+        private val MEDIA_PATTERNS = listOf(
+            Regex("""https?://[^"'\\\s]+/hls\d*/[^"'\\\s]+/master\.(?:txt|m3u8)[^"'\\\s]*"""),
+            Regex("""https?://[^"'\\\s]+?/master\.(?:m3u8|txt)[^"'\\\s]*"""),
+            Regex("""https?://[^"'\\\s]+\.m3u8[^"'\\\s]*"""),
+            Regex("""https?://[^"'\\\s]+\.mp4[^"'\\\s]*""")
+        )
+    }
+}

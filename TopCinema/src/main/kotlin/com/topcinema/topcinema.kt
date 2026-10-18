@@ -303,6 +303,7 @@ class TopCinema : MainAPI() {
             p.contains("updown") -> TCUpDown()
             p.contains("filelions") || p.contains("vidhide") -> TCEarnVids()
             p.contains("byse") -> TCByse()
+            p.contains("lulu") -> TCLuluStream()
             else -> null
         }
         return if (custom != null) {
