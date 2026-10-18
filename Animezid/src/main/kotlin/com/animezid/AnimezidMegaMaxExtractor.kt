@@ -10,16 +10,17 @@ import java.net.URLDecoder
 /**
  * MegaMax (megamax.me) embed host used by Animezid.
  *
- * The `/iframe/<hash>` page is only a protected player. The real value is the
- * download page which lists every quality as an "attachment", and each
- * attachment resolves to a set of mirrors (drivers). One of those drivers is
- * Streamtape, so for every quality we surface its Streamtape link and let
- * CloudStream's built-in Streamtape extractor turn it into a playable source.
+ * The `/iframe/<hash>` page is only a protected video player. The real value is
+ * the download page which lists every quality as an "attachment", and each
+ * attachment resolves to a set of mirrors (drivers). For the drivers we support
+ * we surface the mirror link and let the matching extractor turn it into a
+ * playable source: Streamtape via CloudStream's built-in, Byse via
+ * [AnimezidByseExtractor], LuluStream via CloudStream's built-in.
  *
  * Flow:
  *   GET  /download/<hash>            -> props.attachments[] (hashId, label, resolution)
  *   POST /download/<hash> {attach}   -> props.download.data.mirrors[] (driver, link)
- *   pick driver == "streamtape"      -> https://streamtape.com/v/<id>/
+ *   supported drivers                -> see [SUPPORTED_DRIVERS]
  */
 class AnimezidMegaMaxExtractor : ExtractorApi() {
     override var name = "MegaMax"
@@ -109,17 +110,16 @@ class AnimezidMegaMaxExtractor : ExtractorApi() {
 
             for (j in 0 until mirrors.length()) {
                 val mirror = mirrors.optJSONObject(j) ?: continue
-                val driver = mirror.optString("driver")
-                val isStreamtape = driver.equals("streamtape", ignoreCase = true)
-                val isByse = driver.equals("byse", ignoreCase = true)
-                if (!isStreamtape && !isByse) continue
+                val driver = mirror.optString("driver").lowercase()
+                val driverLabel = SUPPORTED_DRIVERS[driver] ?: continue
                 val raw = mirror.optString("link")
                 if (raw.isBlank()) continue
                 val streamUrl = if (raw.startsWith("//")) "https:$raw" else raw
-                val driverLabel = if (isByse) "Byse" else "Streamtape"
-                // Byse resolves the concrete quality itself and reports it to us;
-                // Streamtape returns an unqualified link so we tag the attachment's.
-                val displayName = if (isByse) "$name $driverLabel" else "$name $driverLabel $label"
+                // Byse/LuluStream resolve the concrete quality themselves and report
+                // it back; Streamtape returns an unqualified link so we tag the
+                // attachment's resolution.
+                val selfQualified = driver == "byse" || driver == "lulustream"
+                val displayName = if (selfQualified) "$name $driverLabel" else "$name $driverLabel $label"
 
                 val resolved = mutableListOf<ExtractorLink>()
                 try {
@@ -164,5 +164,13 @@ class AnimezidMegaMaxExtractor : ExtractorApi() {
             height >= 240 -> Qualities.P240.value
             else -> Qualities.P144.value
         }
+    }
+
+    companion object {
+        private val SUPPORTED_DRIVERS = mapOf(
+            "streamtape" to "Streamtape",
+            "byse" to "Byse",
+            "lulustream" to "LuluStream",
+        )
     }
 }
