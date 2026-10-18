@@ -14,8 +14,8 @@ import java.net.URLDecoder
  * the download page which lists every quality as an "attachment", and each
  * attachment resolves to a set of mirrors (drivers). For the drivers we support
  * we surface the mirror link and let the matching extractor turn it into a
- * playable source: Streamtape/LuluStream/Voe via CloudStream's built-ins, Byse
- * via [AnimezidByseExtractor], Mp4Upload via [AnimezidMp4UploadExtractor],
+ * playable source: Streamtape/LuluStream/Voe/MixDrop via CloudStream's built-ins,
+ * Byse via [AnimezidByseExtractor], Mp4Upload via [AnimezidMp4UploadExtractor],
  * SaveFiles via [AnimezidSaveFilesExtractor].
  *
  * Flow:
@@ -175,6 +175,7 @@ class AnimezidMegaMaxExtractor : ExtractorApi() {
             "mp4upload" to "Mp4Upload",
             "savefiles" to "SaveFiles",
             "voe" to "Voe",
+            "mixdrop" to "MixDrop",
         )
 
         private val SELF_QUALIFIED_DRIVERS = setOf("byse", "lulustream", "voe")
