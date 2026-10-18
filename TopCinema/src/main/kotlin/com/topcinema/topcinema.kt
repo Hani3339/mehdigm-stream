@@ -302,6 +302,7 @@ class TopCinema : MainAPI() {
             p.contains("okstream") -> TCOKStream()
             p.contains("updown") -> TCUpDown()
             p.contains("filelions") || p.contains("vidhide") -> TCEarnVids()
+            p.contains("byse") -> TCByse()
             else -> null
         }
         return if (custom != null) {

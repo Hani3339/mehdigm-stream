@@ -352,7 +352,7 @@
     "iconUrl": "https://web2.topcinema.io/wp-content/uploads/2023/05/cropped-icon-192x192.png",
     "apiVersion": 1,
     "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-    "fileSize": 38553,
+    "fileSize": 44517,
     "status": 1,
     "language": "ar",
     "authors": [
@@ -363,7 +363,7 @@
       "Movie",
       "Anime"
     ],
-    "version": 2,
+    "version": 3,
     "internalName": "TopCinema",
     "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/TopCinema.cs3",
     "name": "توب سينما (TopCinema)",

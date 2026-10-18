@@ -16,5 +16,6 @@ class TopCinemaPlugin : Plugin() {
         registerExtractorAPI(TCOKStream())
         registerExtractorAPI(TCUpDown())
         registerExtractorAPI(TCEarnVids())
+        registerExtractorAPI(TCByse())
     }
 }

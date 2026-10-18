@@ -1,8 +1,10 @@
 package com.topcinema
 
+import android.util.Base64
 import android.util.Log
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.utils.M3u8Helper
 import com.lagradost.cloudstream3.extractors.DoodLaExtractor
 import com.lagradost.cloudstream3.extractors.StreamTape
 import com.lagradost.cloudstream3.utils.ExtractorApi
@@ -13,10 +15,16 @@ import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import org.json.JSONArray
+import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.Proxy
+import java.net.URI
 import java.net.URL
+import javax.crypto.Cipher
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.SecretKeySpec
 
 private const val TC_UA =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -301,4 +309,173 @@ class TCUpDown : TopCinemaBaseExtractor() {
 class TCEarnVids : TopCinemaBaseExtractor() {
     override var name = "Filelions"
     override var mainUrl = "https://earnvids.xyz"
+}
+
+
+/**
+ * Byse host used by this site (`byseqekaho.com`), same family as `byse.sx`.
+ *
+ * `GET <origin>/api/videos/<code>` returns a `playback` object whose `iv`/`payload`
+ * are AES-256-GCM encrypted. The 32 byte key is rebuilt client side from two of the
+ * `key_parts` chosen by `version`, the 1-based parts `[version, 31 - version]`
+ * (base64url decoded and concatenated). The plaintext carries `sources` — a tokenised
+ * `.m3u8` per quality — which are expanded through `M3u8Helper` so every advertised
+ * quality is emitted.
+ */
+class TCByse : ExtractorApi() {
+    override var name = "Byse"
+    override var mainUrl = "https://byseqekaho.com"
+    override val requiresReferer = true
+
+    override suspend fun getUrl(
+        url: String,
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val origin = originOf(url) ?: mainUrl
+        val code = extractCode(url)
+        if (code.isBlank()) return
+
+        val body = try {
+            app.get(
+                "$origin/api/videos/$code",
+                headers = API_HEADERS,
+                referer = referer ?: "$origin/"
+            ).text
+        } catch (t: Throwable) {
+            Log.w(name, "api fetch failed for $code: $t")
+            return
+        }
+
+        val playback = try {
+            JSONObject(body).optJSONObject("playback")
+        } catch (t: Throwable) {
+            Log.w(name, "invalid api json for $code: $t")
+            null
+        } ?: return
+
+        val plain = try {
+            decryptPlayback(playback)
+        } catch (t: Throwable) {
+            Log.w(name, "decrypt failed for $code: $t")
+            return
+        }
+
+        val sources = plain.optJSONArray("sources") ?: return
+        val headers = mapOf(
+            "User-Agent" to TC_UA,
+            "Referer" to "$origin/",
+            "Origin" to origin
+        )
+        for (i in 0 until sources.length()) {
+            val src = sources.optJSONObject(i) ?: continue
+            val file = src.optString("url").ifBlank { src.optString("file") }.trim()
+            if (file.isBlank()) continue
+            val height = src.optInt("height", 0).takeIf { it > 0 }
+            val label = src.optString("label").ifBlank { src.optString("quality") }.trim()
+            emitSource(file, label, height, origin, headers, callback)
+        }
+    }
+
+    private suspend fun emitSource(
+        file: String,
+        label: String,
+        height: Int?,
+        origin: String,
+        headers: Map<String, String>,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        if (file.contains(".m3u8")) {
+            val variants = try {
+                M3u8Helper.generateM3u8(name, file, "$origin/", quality = height, headers = headers)
+            } catch (_: Throwable) {
+                emptyList()
+            }
+            if (variants.isNotEmpty()) {
+                variants.forEach(callback)
+                return
+            }
+        }
+        callback(
+            ExtractorLink(
+                source = name,
+                name = label.ifBlank { name },
+                url = file,
+                referer = "$origin/",
+                quality = height ?: Qualities.Unknown.value,
+                headers = headers,
+                type = if (file.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+            )
+        )
+    }
+
+    private fun decryptPlayback(playback: JSONObject): JSONObject {
+        val keyParts = playback.optJSONArray("key_parts")
+            ?: throw IllegalStateException("missing key_parts")
+        val version = when (val raw = playback.opt("version")) {
+            is Number -> raw.toInt()
+            is String -> raw.toIntOrNull() ?: 1
+            else -> 1
+        }
+        val key = buildKey(keyParts, version)
+        val iv = b64url(playback.getString("iv"))
+        val payload = b64url(playback.getString("payload"))
+
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, iv))
+        return JSONObject(String(cipher.doFinal(payload), Charsets.UTF_8))
+    }
+
+    /** Mirrors the site's key derivation: version n maps to 1-based parts [n, 31 - n]. */
+    private fun buildKey(parts: JSONArray, version: Int): ByteArray {
+        val all = (0 until parts.length()).map { parts.optString(it) }.filter { it.isNotEmpty() }
+        val indices = keyPartIndices(version, all.size)
+        val selected = if (indices.isEmpty()) all else indices.map { all[it - 1] }
+        val out = java.io.ByteArrayOutputStream()
+        selected.forEach { out.write(b64url(it)) }
+        return out.toByteArray()
+    }
+
+    private fun keyPartIndices(version: Int, count: Int): List<Int> {
+        if (version < 1 || version > 30) return emptyList()
+        val a = version
+        val b = 31 - version
+        if (a < 1 || b < 1 || a > count || b > count) return emptyList()
+        return listOf(a, b)
+    }
+
+    private fun b64url(input: String): ByteArray {
+        var s = input.trim().replace('-', '+').replace('_', '/')
+        val pad = (4 - s.length % 4) % 4
+        if (pad != 0) s += "=".repeat(pad)
+        return Base64.decode(s, Base64.DEFAULT)
+    }
+
+    private fun extractCode(url: String): String {
+        val path = try {
+            URI(url).path.orEmpty()
+        } catch (_: Throwable) {
+            url.substringAfter("//").substringAfter('/')
+        }
+        return path.trimEnd('/').substringAfterLast('/')
+            .removeSuffix(".html")
+            .substringBefore('?')
+            .substringBefore('.')
+    }
+
+    private fun originOf(url: String): String? = try {
+        val u = URI(url)
+        if (u.host.isNullOrBlank()) null else "${u.scheme}://${u.host}"
+    } catch (_: Throwable) {
+        null
+    }
+
+    companion object {
+        private val API_HEADERS = mapOf(
+            "User-Agent" to TC_UA,
+            "Accept" to "application/json, text/plain, */*",
+            "Accept-Language" to "en-US,en;q=0.9"
+        )
+    }
 }
