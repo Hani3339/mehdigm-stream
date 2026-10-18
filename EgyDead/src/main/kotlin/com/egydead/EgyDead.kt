@@ -34,10 +34,12 @@ import java.net.URL
  * under `/serie/`, `/season/`, `/episode/`. Detail pages hide the players behind a
  * `POST View=1` form. The single "MegaMax" server is a rotating file-host domain
  * (`https://<random>.top/iframe/<hash>`) whose real sources are exposed through an
- * Inertia partial reload (`X-Inertia-Partial-Data: streams`). Those sources are plain
- * embeds of well-known hosts (uqload, vidmoly, streamwish, mixdrop, doodstream,
- * vidara, byse, vidhide, voe, streamruby) and are resolved by CloudStream's
- * [loadExtractor] / our [EgyDeadStreamRuby].
+ * Inertia partial reload (`X-Inertia-Partial-Data: streams`); `<random>.top/download/<hash>`
+ * exposes the download mirrors through `props.attachments` + `props.download`. Those
+ * sources are embeds of well-known hosts (uqload, vidmoly, streamwish/hgcloud, mixdrop,
+ * doodstream, vidara, byse, vidhide/earnvids, voe, streamruby) resolved by CloudStream's
+ * [loadExtractor] and the extractors in this plugin ([EgyDeadPackerExtractor] family,
+ * [EgyDeadUqload], [EgyDeadByse]).
  */
 class EgyDead : MainAPI() {
     companion object {
