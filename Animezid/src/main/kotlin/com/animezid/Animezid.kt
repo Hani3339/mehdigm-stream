@@ -96,13 +96,52 @@ class Animezid : MainAPI() {
             img.attr("src").ifBlank { img.attr("data-fallback") }
         })?.ifBlank { null }?.let { fixUrl(it) }
 
+        val cardText = this.outerHtml() + " " + title
+
+        val qualityText = Regex("""az-badge--quality">([^<]+)""")
+            .find(cardText)?.groupValues?.get(1)?.trim()
+        val ratingStr = Regex("""az-badge--rating[^>]*>.*?([0-9]+(?:\.[0-9]+)?)""")
+            .find(cardText)?.groupValues?.get(1)
+        val ribbon = Regex("""az-badge--ribbon[^>]*>\s*<span[^>]*>([^<]+)</span>""")
+            .find(cardText)?.groupValues?.get(1)
+
         val isSeries = absHref.contains("/series/")
         val type = typeFromText(title, default = if (isSeries) TvType.Anime else TvType.Anime)
 
+        val dubStatusSet = when {
+            ribbon?.contains("مدبلج") == true -> setOf(DubStatus.Dubbed)
+            ribbon?.contains("مترجم") == true -> setOf(DubStatus.Subbed)
+            title.contains("مدبلج") || title.contains("مدبلجة") -> setOf(DubStatus.Dubbed)
+            title.contains("مترجم") || title.contains("مترجمة") -> setOf(DubStatus.Subbed)
+            else -> null
+        }
+
+        val searchQuality = when (qualityText) {
+            "4K", "UHD" -> SearchQuality.UHD
+            "FHD", "HD", "1080p" -> SearchQuality.HD
+            "WEB-DL", "WEBRip", "WEB" -> SearchQuality.WebRip
+            "BluRay", "BD" -> SearchQuality.BlueRay
+            "HDRip", "HDTV" -> SearchQuality.HDR
+            "DVDRip", "DVD" -> SearchQuality.DVD
+            "CAM", "TS" -> SearchQuality.Cam
+            else -> null
+        }
+
+        val score = ratingStr?.toDoubleOrNull()?.let { Score.from10(it) }
+
         return if (type == TvType.Movie || type == TvType.AnimeMovie) {
-            newMovieSearchResponse(title, absHref, type) { this.posterUrl = poster }
+            newMovieSearchResponse(title, absHref, type) {
+                this.posterUrl = poster
+                searchQuality?.let { this.quality = it }
+                score?.let { this.score = it }
+            }
         } else {
-            newAnimeSearchResponse(title, absHref, type) { this.posterUrl = poster }
+            newAnimeSearchResponse(title, absHref, type) {
+                this.posterUrl = poster
+                searchQuality?.let { this.quality = it }
+                score?.let { this.score = it }
+                dubStatusSet?.let { this.dubStatus = it.toMutableSet() }
+            }
         }
     }
 
