@@ -109,10 +109,17 @@ class AnimezidMegaMaxExtractor : ExtractorApi() {
 
             for (j in 0 until mirrors.length()) {
                 val mirror = mirrors.optJSONObject(j) ?: continue
-                if (!mirror.optString("driver").equals("streamtape", ignoreCase = true)) continue
+                val driver = mirror.optString("driver")
+                val isStreamtape = driver.equals("streamtape", ignoreCase = true)
+                val isByse = driver.equals("byse", ignoreCase = true)
+                if (!isStreamtape && !isByse) continue
                 val raw = mirror.optString("link")
                 if (raw.isBlank()) continue
                 val streamUrl = if (raw.startsWith("//")) "https:$raw" else raw
+                val driverLabel = if (isByse) "Byse" else "Streamtape"
+                // Byse resolves the concrete quality itself and reports it to us;
+                // Streamtape returns an unqualified link so we tag the attachment's.
+                val displayName = if (isByse) "$name $driverLabel" else "$name $driverLabel $label"
 
                 val resolved = mutableListOf<ExtractorLink>()
                 try {
@@ -125,13 +132,13 @@ class AnimezidMegaMaxExtractor : ExtractorApi() {
                     callback.invoke(
                         newExtractorLink(
                             source = name,
-                            name = "$name Streamtape $label".trim(),
+                            name = displayName.trim(),
                             url = link.url,
                             type = link.type
                         ) {
                             this.referer = link.referer
                             this.headers = link.headers
-                            this.quality = quality
+                            this.quality = if (link.quality != Qualities.Unknown.value) link.quality else quality
                         }
                     )
                 }

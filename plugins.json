@@ -23,7 +23,7 @@
     "iconUrl": "https://animezid.org/uploads/custom-logo.png",
     "apiVersion": 1,
     "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-    "fileSize": 64026,
+    "fileSize": 74600,
     "status": 1,
     "language": "ar",
     "authors": [
@@ -37,7 +37,7 @@
       "Movie",
       "OVA"
     ],
-    "version": 13,
+    "version": 14,
     "internalName": "Animezid",
     "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/Animezid.cs3",
     "name": "Animezid (انمي زد)",
