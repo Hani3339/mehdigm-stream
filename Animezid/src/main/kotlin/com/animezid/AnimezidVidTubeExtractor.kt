@@ -6,11 +6,13 @@ import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.*
 
 /**
- * VidTube (vidtube.one, an XVideoSharing/XFileSharing host) embed used by Animezid.
+ * VidTube (vidtube.one) embed host used by Animezid.
  *
- * The embed (`/e/<code>.html`) contains a JWPlayer config. The `file` URL is a
- * raw CDN link that must be normalised into a playable URL (see [fixMp4Link]),
- * otherwise the server 403s. Ported from the working docchipl extractor.
+ * It is an XVideoSharing/XFileSharing platform (same engine as StreamRuby):
+ * the `/e/<code>.html` page is only a click-to-play shell, the real player is
+ * returned by `POST /dl` (op=embed&file_code=..&auto=1). The response holds a
+ * packed jwplayer config whose first `file:"..."` is either an HLS master
+ * playlist (hls2) or a raw mp4 that needs normalising (see [fixMp4Link]).
  */
 class AnimezidVidTubeExtractor : ExtractorApi() {
     override var name = "VidTube"
@@ -26,80 +28,99 @@ class AnimezidVidTubeExtractor : ExtractorApi() {
         val embedUrl = url.trim()
         if (embedUrl.isBlank()) return
 
-        val page = try {
-            app.get(
-                embedUrl,
-                headers = mapOf("User-Agent" to USER_AGENT),
-                referer = "$mainUrl/"
+        val origin = when {
+            embedUrl.startsWith("http") ->
+                embedUrl.substringBefore("://") + "://" + embedUrl.substringAfter("://").substringBefore("/")
+            else -> mainUrl
+        }
+
+        var fileCode = embedUrl.substringBefore('?').substringBefore('#')
+            .trimEnd('/').substringAfterLast('/').removeSuffix(".html")
+        if (fileCode.contains("-")) fileCode = fileCode.substringAfterLast('-')
+        fileCode = fileCode.trim()
+        if (fileCode.isBlank()) return
+
+        val playerHtml = try {
+            app.post(
+                "$origin/dl",
+                data = mapOf(
+                    "op" to "embed",
+                    "file_code" to fileCode,
+                    "auto" to "1",
+                    "referer" to (referer ?: "$origin/"),
+                ),
+                headers = mapOf("User-Agent" to USER_AGENT, "Referer" to embedUrl, "Origin" to origin),
+                referer = embedUrl
             ).text
         } catch (_: Exception) {
             return
         }
-        if (page.isBlank()) return
+        if (playerHtml.isBlank()) return
 
-        val data = if (Regex("""eval\(function\(p,a,c,k,e""").containsMatchIn(page)) {
-            JsUnpacker(page).unpack() ?: page
-        } else {
-            page
+        val data = try {
+            JsUnpacker(playerHtml).unpack() ?: playerHtml
+        } catch (_: Exception) {
+            playerHtml
         }
 
-        val sourceRegex = Regex("""\{[^{}]*?file\s*:\s*"([^"]+)"[^{}]*?\}""", RegexOption.DOT_MATCHES_ALL)
-        val labelRegex = Regex("""label\s*:\s*"([^"]+)"""", RegexOption.IGNORE_CASE)
+        val files = Regex("""file\s*:\s*"([^"]+)"""").findAll(data)
+            .map { it.groupValues[1] }
+            .filter { it.isNotBlank() && !it.startsWith("/dl") }
+            .toList()
+        if (files.isEmpty()) return
 
-        var found = false
-        for (m in sourceRegex.findAll(data)) {
-            val raw = m.groupValues[1].trim()
-            if (raw.isBlank()) continue
-            val label = labelRegex.find(m.value)?.groupValues?.get(1)
+        val linkHeaders = mapOf("User-Agent" to USER_AGENT, "Referer" to "$origin/", "Origin" to origin)
 
-            val streamUrl = fixMp4Link(raw)
-            if (streamUrl.isBlank()) continue
+        for (raw in files) {
+            val absolute = if (raw.startsWith("http")) raw else if (raw.startsWith("//")) "https:$raw" else "$origin${if (raw.startsWith("/")) raw else "/$raw"}"
 
-            found = true
-            callback.invoke(
-                newExtractorLink(
-                    source = name,
-                    name = name,
-                    url = streamUrl,
-                    type = if (streamUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                ) {
-                    this.referer = "$mainUrl/"
-                    this.quality = getQualityFromName(label)
-                    this.headers = mapOf("User-Agent" to USER_AGENT)
+            if (absolute.contains(".m3u8")) {
+                val fixed = fixQuery(absolute)
+                val generated = try {
+                    M3u8Helper.generateM3u8(name, fixed, "$origin/", headers = linkHeaders)
+                } catch (_: Throwable) {
+                    emptyList()
                 }
-            )
-        }
-
-        if (found) return
-
-        // Fallback: plain URL scrape (in case the page exposes the media directly).
-        val fallback = listOf(
-            Regex("""file\s*:\s*"([^"]+\.m3u8[^"]*)"""").find(data)?.groupValues?.get(1),
-            Regex("""https?://[^"'<>\s]+\.m3u8[^"'<>\s]*""").find(data)?.value,
-            Regex("""sources\s*:\s*\[\s*\{\s*file\s*:\s*"(https?://[^"]+)"""", RegexOption.DOT_MATCHES_ALL)
-                .find(data)?.groupValues?.get(1)
-        ).firstOrNull { !it.isNullOrBlank() } ?: return
-
-        callback.invoke(
-            newExtractorLink(
-                source = name,
-                name = name,
-                url = fallback,
-                type = if (fallback.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-            ) {
-                this.referer = "$mainUrl/"
-                this.quality = Qualities.Unknown.value
-                this.headers = mapOf("User-Agent" to USER_AGENT)
+                if (generated.isNotEmpty()) {
+                    generated.forEach(callback)
+                } else {
+                    callback.invoke(m3u8Link(fixed, linkHeaders))
+                }
+            } else {
+                callback.invoke(videoLink(fixMp4Link(absolute), linkHeaders))
             }
-        )
+        }
+    }
+
+    private suspend fun m3u8Link(url: String, headers: Map<String, String>) = newExtractorLink(
+        source = name,
+        name = name,
+        url = url,
+        type = ExtractorLinkType.M3U8
+    ) {
+        this.referer = "$mainUrl/"
+        this.quality = Qualities.Unknown.value
+        this.headers = headers
+    }
+
+    private suspend fun videoLink(url: String, headers: Map<String, String>) = newExtractorLink(
+        source = name,
+        name = name,
+        url = url,
+        type = ExtractorLinkType.VIDEO
+    ) {
+        this.referer = "$mainUrl/"
+        this.quality = Qualities.Unknown.value
+        this.headers = headers
     }
 
     /**
      * The raw XVideoSharing `file` URL carries its auth params as keyless query
-     * entries (`?=t&=s&=e&=f`). This rebuilds the query in the order the player
-     * expects, appends `i`/`sp`, rewrites the `/.mp4` extension and injects `/v/`.
+     * entries (`?=t&=s&=e&=f`). The CDN only accepts them renamed and ordered as
+     * `t/s/e/f`, followed by the other params plus `i`/`sp`. Without this the
+     * media server returns 403.
      */
-    private fun fixMp4Link(link: String): String {
+    private fun fixQuery(link: String): String {
         val paramOrder = listOf("t", "s", "e", "f")
         val params = Regex("""[?&]([^=]*)=([^&]*)""").findAll(link)
             .map { it.groupValues[1] to it.groupValues[2] }
@@ -116,7 +137,6 @@ class AnimezidVidTubeExtractor : ExtractorApi() {
         }
 
         extra["i"] = "0.0"
-        extra["sp"] = "30000"
 
         val baseUrl = link.substringBefore("?")
         var fixed = baseUrl + "?" + paramOrder
@@ -125,6 +145,13 @@ class AnimezidVidTubeExtractor : ExtractorApi() {
         if (extra.isNotEmpty()) {
             fixed += "&" + extra.entries.joinToString("&") { "${it.key}=${it.value}" }
         }
+        return fixed
+    }
+
+    /** [fixQuery] plus the mp4-only extension rewrite and `/v/` path injection. */
+    private fun fixMp4Link(link: String): String {
+        var fixed = fixQuery(link)
+        if (!fixed.contains("sp=")) fixed += "&sp=30000"
 
         val marker = "/.mp4"
         val extIndex = fixed.indexOf(marker)
