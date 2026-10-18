@@ -22,8 +22,17 @@ import javax.crypto.spec.SecretKeySpec
  *   counter = first 16 bytes of the key
  *   cipher  = AES-256-CTR
  *
- * The plaintext is JSON of the form `{"mp4":{"sources":[{label,url,path,...}]}}` and each
- * entry is a direct MP4 (url + "/" + path).
+ * The plaintext is JSON `{"mp4":{"sources":[{label,res_id,size,codec,sub}],"domains":[...]}}`.
+ *
+ * Video is served in plaintext by `https://<domain>/sora/<size>/<token>` (HTTP Range
+ * supported, `content-range: bytes a-b/<size>`). The token is:
+ *
+ *   key     = MD5(digit-bytes of size) as lowercase hex  (32 ASCII bytes)  [see buildToken]
+ *   counter = first 16 bytes of the key
+ *   plain   = "/mp4/<md5_id>/<res_id>/<size>/<chunkSize>/<part>"
+ *   token   = base64(base64(AES-CTR(key, counter, plain)).trimEnd('=')).trimEnd('=')
+ *
+ * Using chunkSize = size with part = 0 makes the URL stream the whole file.
  */
 class AnimezidAbyssExtractor : ExtractorApi() {
     override var name = "Abyss"
@@ -68,7 +77,7 @@ class AnimezidAbyssExtractor : ExtractorApi() {
         val userId = root.optString("user_id")
         val md5Id = root.optString("md5_id")
         val media = root.optString("media")
-        if (media.isBlank() || slug.isBlank()) return
+        if (media.isBlank() || slug.isBlank() || md5Id.isBlank()) return
 
         val plain = decryptMedia(userId, slug, md5Id, media) ?: return
         val json = try {
@@ -84,21 +93,32 @@ class AnimezidAbyssExtractor : ExtractorApi() {
         while (keys.hasNext()) {
             val container = json.optJSONObject(keys.next()) ?: continue
             val sources = container.optJSONArray("sources") ?: continue
+            val domains = container.optJSONArray("domains")?.let { arr ->
+                (0 until arr.length()).mapNotNull { arr.optString(it).takeIf { d -> d.isNotBlank() } }
+            } ?: emptyList()
+            if (domains.isEmpty()) continue
+
             for (i in 0 until sources.length()) {
                 val src = sources.optJSONObject(i) ?: continue
                 val label = src.optString("label")
-                val base = src.optString("url").trim().trimEnd('/')
-                val path = src.optString("path").trim().trimStart('/')
-                val full = when {
-                    base.isBlank() -> continue
-                    path.isBlank() -> base
-                    else -> "$base/$path"
-                }
+                val size = src.optLong("size", 0L)
+                val resId = src.optLong("res_id", 0L)
+                if (size <= 0L || resId <= 0L) continue
+
+                val sizeStr = size.toString()
+                val sub = src.optString("sub")
+                val domain = domains.firstOrNull { it.contains(sub) }
+                    ?: domains[(size % domains.size).toInt()]
+
+                val token = buildToken(md5Id, resId.toString(), sizeStr, sizeStr, 0)
+                    ?: continue
+                val streamUrl = "https://$domain/sora/$sizeStr/$token"
+
                 callback.invoke(
                     newExtractorLink(
                         source = name,
                         name = name,
-                        url = full,
+                        url = streamUrl,
                         type = ExtractorLinkType.VIDEO
                     ) {
                         this.referer = linkReferer
@@ -110,6 +130,42 @@ class AnimezidAbyssExtractor : ExtractorApi() {
         }
     }
 
+    private fun buildToken(
+        md5Id: String,
+        resId: String,
+        size: String,
+        chunkSize: String,
+        part: Int
+    ): String? {
+        return try {
+            val key = md5Hex(digitBytes(size)).toByteArray(Charsets.US_ASCII)
+            if (key.size < 16) return null
+            val counter = key.copyOfRange(0, 16)
+            val plain = "/mp4/$md5Id/$resId/$size/$chunkSize/$part"
+            val cipher = Cipher.getInstance("AES/CTR/NoPadding")
+            cipher.init(
+                Cipher.ENCRYPT_MODE,
+                SecretKeySpec(key, "AES"),
+                IvParameterSpec(counter)
+            )
+            val ct = cipher.doFinal(plain.toByteArray(Charsets.UTF_8))
+            val inner = Base64.encodeToString(ct, Base64.NO_WRAP or Base64.NO_PADDING)
+            Base64.encodeToString(inner.toByteArray(Charsets.US_ASCII), Base64.NO_WRAP or Base64.NO_PADDING)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /**
+     * The player feeds the numeric size into CryptoJS MD5, which stringifies it and then
+     * treats the resulting string as a byte array. Each character is coerced to a number,
+     * so digits become their numeric value (non-digits become 0).
+     */
+    private fun digitBytes(size: String): ByteArray = ByteArray(size.length) { i ->
+        val c = size[i]
+        if (c in '0'..'9') (c - '0').toByte() else 0
+    }
+
     private fun decryptMedia(
         userId: String,
         slug: String,
@@ -117,7 +173,8 @@ class AnimezidAbyssExtractor : ExtractorApi() {
         media: String
     ): String? {
         return try {
-            val keyBytes = md5Hex("$userId:$slug:$md5Id").toByteArray(Charsets.US_ASCII)
+            val keyBytes = md5Hex("$userId:$slug:$md5Id".toByteArray(Charsets.UTF_8))
+                .toByteArray(Charsets.US_ASCII)
             if (keyBytes.size < 16) return null
             val counter = keyBytes.copyOfRange(0, 16)
             val data = ByteArray(media.length) { media[it].code.toByte() }
@@ -133,8 +190,8 @@ class AnimezidAbyssExtractor : ExtractorApi() {
         }
     }
 
-    private fun md5Hex(input: String): String {
-        val digest = MessageDigest.getInstance("MD5").digest(input.toByteArray(Charsets.UTF_8))
+    private fun md5Hex(input: ByteArray): String {
+        val digest = MessageDigest.getInstance("MD5").digest(input)
         val sb = StringBuilder(digest.size * 2)
         for (b in digest) {
             val v = b.toInt() and 0xff
