@@ -14,9 +14,9 @@ import java.net.URLDecoder
  * the download page which lists every quality as an "attachment", and each
  * attachment resolves to a set of mirrors (drivers). For the drivers we support
  * we surface the mirror link and let the matching extractor turn it into a
- * playable source: Streamtape/LuluStream via CloudStream's built-in, Byse via
- * [AnimezidByseExtractor], Mp4Upload via [AnimezidMp4UploadExtractor], SaveFiles
- * via [AnimezidSaveFilesExtractor].
+ * playable source: Streamtape/LuluStream/Voe via CloudStream's built-ins, Byse
+ * via [AnimezidByseExtractor], Mp4Upload via [AnimezidMp4UploadExtractor],
+ * SaveFiles via [AnimezidSaveFilesExtractor].
  *
  * Flow:
  *   GET  /download/<hash>            -> props.attachments[] (hashId, label, resolution)
@@ -116,10 +116,10 @@ class AnimezidMegaMaxExtractor : ExtractorApi() {
                 val raw = mirror.optString("link")
                 if (raw.isBlank()) continue
                 val streamUrl = if (raw.startsWith("//")) "https:$raw" else raw
-                // Byse/LuluStream resolve the concrete quality themselves and report
-                // it back; Streamtape returns an unqualified link so we tag the
-                // attachment's resolution.
-                val selfQualified = driver == "byse" || driver == "lulustream"
+                // Byse/LuluStream/Voe resolve their quality ladder themselves and
+                // report it back; Streamtape/Mp4Upload return an unqualified link so
+                // we tag the attachment's resolution.
+                val selfQualified = driver in SELF_QUALIFIED_DRIVERS
                 val displayName = if (selfQualified) "$name $driverLabel" else "$name $driverLabel $label"
 
                 val resolved = mutableListOf<ExtractorLink>()
@@ -174,6 +174,9 @@ class AnimezidMegaMaxExtractor : ExtractorApi() {
             "lulustream" to "LuluStream",
             "mp4upload" to "Mp4Upload",
             "savefiles" to "SaveFiles",
+            "voe" to "Voe",
         )
+
+        private val SELF_QUALIFIED_DRIVERS = setOf("byse", "lulustream", "voe")
     }
 }
