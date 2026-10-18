@@ -18,9 +18,7 @@ import com.lagradost.cloudstream3.newMovieLoadResponse
 import com.lagradost.cloudstream3.newMovieSearchResponse
 import com.lagradost.cloudstream3.newTvSeriesLoadResponse
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.loadExtractor
-import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
@@ -45,12 +43,13 @@ class EgyDead : MainAPI() {
     companion object {
         private const val TAG = "EgyDead"
         private const val IFRAME_HOST = "files/mirror/video"
+        private const val DOWNLOAD_COMPONENT = "files/mirror/download"
 
         /** Hosts handled by CloudStream built-ins (or our own extractor). */
         private val EXTRACTOR_HOSTS = listOf(
             "uqload", "vidmoly", "streamwish", "streamhg", "mixdrop", "dood",
-            "vidara", "byse", "vidhide", "earnvids", "voe", "streamruby",
-            "stmruby", "ok.ru", "voe.sx"
+            "vidara", "byse", "vidhide", "earnvids", "voe", "streamruby", "stmruby",
+            "vibuxer", "rubyvidhub", "morencius", "callistanise", "byseraguci", "ok.ru"
         )
 
         private val SEASON_WORDS = listOf(
@@ -544,55 +543,39 @@ class EgyDead : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         emit: (ExtractorLink) -> Unit
     ): Boolean {
-        // The EgyDead player is a rotating file-host; its real sources must be resolved
-        // through the Inertia payload. Known extractor hosts are handed straight over.
-        if (!isExtractorHost(server)) {
-            val mirrors = resolveMirrors(server)
-            if (mirrors.isNotEmpty()) {
-                var found = false
-                for (mirror in mirrors) {
-                    found = resolveOne(mirror, server, subtitleCallback, emit) || found
-                }
-                return found
+        // EgyDead's own "MegaMax"-style player rotates domains and hides its real sources
+        // behind Inertia payloads. Two endpoints exist:
+        //   /iframe/<hash>   -> streaming mirrors (props.streams)
+        //   /download/<hash> -> download mirrors  (props.attachments -> props.download)
+        // Everything else is a plain file host handed to loadExtractor.
+        val path = server.substringAfter("://").substringAfter("/", "")
+        val mirrors = when {
+            path.startsWith("iframe/") -> resolveStreamMirrors(server)
+            path.startsWith("download/") -> resolveDownloadMirrors(server)
+            !isExtractorHost(server) -> resolveStreamMirrors(server)
+            else -> emptyList()
+        }
+        if (mirrors.isNotEmpty()) {
+            var found = false
+            for (mirror in mirrors) {
+                found = resolveOne(mirror, server, subtitleCallback, emit) || found
             }
+            if (found) return true
         }
         return resolveOne(server, referer, subtitleCallback, emit)
     }
 
-    /**
-     * Resolves a single embed URL: the CloudStream built-ins first, then the external
-     * EarnVids/StreamHG extractor as a fallback. This mirrors the proven re-3arabi
-     * approach and fixes the hosts whose own JS loader defeats the built-in extractors.
-     */
+    /** Hands a single embed URL to CloudStream's built-ins and our own extractors. */
     private suspend fun resolveOne(
         url: String,
         referer: String,
         subtitleCallback: (SubtitleFile) -> Unit,
         emit: (ExtractorLink) -> Unit
-    ): Boolean {
-        var found = false
-        try {
-            if (loadExtractor(url, referer, subtitleCallback, emit)) found = true
-        } catch (e: Throwable) {
-            Log.i(TAG, "extractor failed $url -> $e")
-        }
-        if (!found) {
-            val direct = try {
-                ExternalEarnVidsExtractor.extract(url, mainUrl)
-            } catch (e: Throwable) {
-                Log.i(TAG, "external extractor failed $url -> $e")
-                null
-            }
-            if (!direct.isNullOrBlank()) {
-                emit(
-                    newExtractorLink(name, "EarnVids/StreamHG", direct, ExtractorLinkType.M3U8) {
-                        this.referer = mainUrl
-                    }
-                )
-                found = true
-            }
-        }
-        return found
+    ): Boolean = try {
+        loadExtractor(url, referer, subtitleCallback, emit)
+    } catch (e: Throwable) {
+        Log.i(TAG, "extractor failed $url -> $e")
+        false
     }
 
     private fun isExtractorHost(url: String): Boolean {
@@ -604,10 +587,9 @@ class EgyDead : MainAPI() {
      * Resolves `https://<host>/iframe/<hash>` into the list of real embed URLs by reading
      * the Inertia page version and requesting the lazy `streams` prop.
      */
-    private suspend fun resolveMirrors(iframeUrl: String): List<String> {
+    private suspend fun resolveStreamMirrors(iframeUrl: String): List<String> {
         val page = try {
-            val res = app.get(iframeUrl, headers = buildHeaders(mainUrl))
-            res.text
+            app.get(iframeUrl, headers = buildHeaders(mainUrl), timeout = 30).text
         } catch (e: Throwable) {
             return emptyList()
         }
@@ -625,7 +607,8 @@ class EgyDead : MainAPI() {
                     "X-Requested-With" to "XMLHttpRequest",
                     "Accept" to "text/html, application/xhtml+xml"
                 ),
-                referer = iframeUrl
+                referer = iframeUrl,
+                timeout = 30
             ).text
         } catch (e: Throwable) {
             return emptyList()
@@ -646,5 +629,71 @@ class EgyDead : MainAPI() {
         } catch (e: Throwable) {
             emptyList()
         }
+    }
+
+    /**
+     * Resolves `https://<host>/download/<hash>` into the list of real download mirror
+     * URLs. Each quality is an "attachment"; POSTing its id returns the mirror list.
+     * The site is a Laravel + Inertia app, so the request carries the XSRF token and
+     * Inertia version harvested from the first GET.
+     */
+    private suspend fun resolveDownloadMirrors(downloadUrl: String): List<String> {
+        val first = try {
+            app.get(downloadUrl, headers = buildHeaders(mainUrl), timeout = 30)
+        } catch (e: Throwable) {
+            return emptyList()
+        }
+        val root = try {
+            JSONObject(first.document.selectFirst("script[data-page=app]")?.data() ?: return emptyList())
+        } catch (e: Throwable) {
+            return emptyList()
+        }
+        val attachments = root.optJSONObject("props")?.optJSONArray("attachments") ?: return emptyList()
+        if (attachments.length() == 0) return emptyList()
+        val version = root.optString("version")
+
+        val xsrf = first.cookies["XSRF-TOKEN"]?.let { raw ->
+            if (raw.contains('%')) runCatching { java.net.URLDecoder.decode(raw, "UTF-8") }.getOrDefault(raw) else raw
+        }
+        val cookieHeader = first.cookies.entries.filter { it.value.isNotBlank() }
+            .joinToString("; ") { "${it.key}=${it.value}" }
+
+        val out = LinkedHashSet<String>()
+        for (i in 0 until attachments.length()) {
+            val attId = attachments.optJSONObject(i)?.optString("hashId")?.takeIf { it.isNotBlank() } ?: continue
+            val headers = mutableMapOf(
+                "User-Agent" to USER_AGENT,
+                "Accept" to "text/html, application/xhtml+xml",
+                "Content-Type" to "application/json",
+                "X-Requested-With" to "XMLHttpRequest",
+                "X-Inertia" to "true",
+                "X-Inertia-Partial-Component" to DOWNLOAD_COMPONENT,
+                "X-Inertia-Partial-Data" to "download"
+            )
+            if (version.isNotBlank()) headers["X-Inertia-Version"] = version
+            if (!xsrf.isNullOrBlank()) headers["X-XSRF-TOKEN"] = xsrf
+            if (cookieHeader.isNotBlank()) headers["Cookie"] = cookieHeader
+
+            val mirrors = try {
+                val resp = app.post(
+                    downloadUrl,
+                    headers = headers,
+                    json = mapOf("attach" to attId),
+                    referer = downloadUrl,
+                    timeout = 30
+                )
+                JSONObject(resp.text).optJSONObject("props")?.optJSONObject("download")
+                    ?.optJSONObject("data")?.optJSONArray("mirrors")
+            } catch (e: Throwable) {
+                null
+            } ?: continue
+
+            for (j in 0 until mirrors.length()) {
+                var link = mirrors.optJSONObject(j)?.optString("link")?.trim().orEmpty()
+                if (link.startsWith("//")) link = "https:$link"
+                if (link.startsWith("http")) out.add(link)
+            }
+        }
+        return out.toList()
     }
 }
