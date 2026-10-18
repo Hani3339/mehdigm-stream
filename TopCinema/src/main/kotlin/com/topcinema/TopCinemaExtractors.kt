@@ -531,8 +531,12 @@ class TCLuluStream : ExtractorApi() {
             return
         }
 
+        // the CDN answers 403 unless Accept-Language is present; ExoPlayer sends the
+        // headers below verbatim, so the same map is used for parsing and playback
         val headers = mapOf(
             "User-Agent" to TC_UA,
+            "Accept" to "*/*",
+            "Accept-Language" to "en-US,en;q=0.9",
             "Referer" to "$mainUrl/",
             "Origin" to mainUrl
         )
