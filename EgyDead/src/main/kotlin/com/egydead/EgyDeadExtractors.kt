@@ -82,14 +82,7 @@ open class EgyDeadPackerExtractor : ExtractorApi() {
             Log.i(TAG, "unpack failed $pageUrl -> $e")
             null
         }) ?: text
-        val stream = pickStream(decoded, pageUrl) ?: pickStream(text, pageUrl)
-        Log.i(
-            TAG,
-            "getUrl $name $url -> ${stream ?: "NULL"} len=${text.length} " +
-                "eval=${text.contains("eval(function")} file=${FILE_RE.containsMatchIn(text)} " +
-                "hls=${HLS_RE.containsMatchIn(text)} cf=${text.contains("Just a moment", true)}"
-        )
-        if (stream == null) return
+        val stream = pickStream(decoded, pageUrl) ?: pickStream(text, pageUrl) ?: return
 
         callback.invoke(
             newExtractorLink(name, name, stream, ExtractorLinkType.M3U8) {

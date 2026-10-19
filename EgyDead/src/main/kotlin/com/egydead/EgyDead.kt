@@ -592,7 +592,6 @@ class EgyDead : MainAPI() {
         val own = ownExtractors.firstOrNull {
             lowered.contains(it.mainUrl.substringAfter("://").trimEnd('/').lowercase())
         }
-        Log.i(TAG, "resolveOne $url own=${own?.name ?: "builtin"}")
         if (own != null) {
             var emitted = false
             try {
@@ -603,7 +602,6 @@ class EgyDead : MainAPI() {
             } catch (e: Throwable) {
                 Log.i(TAG, "own extractor failed $url -> $e")
             }
-            Log.i(TAG, "resolveOne $url own=${own.name} emitted=$emitted")
             if (emitted) return true
         }
         return try {
@@ -633,7 +631,6 @@ class EgyDead : MainAPI() {
         // `files\/mirror\/video`; normalise the slashes before matching.
         val normalized = page.replace("\\/", "/")
         if (!normalized.contains("data-page=\"app\"") || !normalized.contains(IFRAME_HOST)) {
-            Log.i(TAG, "streams: not an inertia page $iframeUrl len=${page.length}")
             return emptyList()
         }
         val version = Regex("\"version\":\"([^\"]+)\"").find(page)?.groupValues?.get(1)
@@ -667,11 +664,8 @@ class EgyDead : MainAPI() {
                     if (link.startsWith("http")) out.add(link)
                 }
             }
-            val distinct = out.distinct()
-            Log.i(TAG, "streams: ${distinct.size} mirrors")
-            distinct
+            out.distinct()
         } catch (e: Throwable) {
-            Log.i(TAG, "streams: parse failed $iframeUrl -> $e")
             emptyList()
         }
     }
