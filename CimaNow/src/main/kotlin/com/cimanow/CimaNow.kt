@@ -347,7 +347,8 @@ class CimaNow : MainAPI() {
             "ul#watch li a[href], li[aria-label='quality'] a[href], " +
                 "ul#download li[aria-label='download'] a[href], li[aria-label='download'] a[href], " +
                 "a[href*=cimanowtv], a[href*=filespayouts], a[href*=worldcdn], " +
-                "a[href*=mediafire], a[href*=mega.nz]"
+                "a[href*=mediafire], a[href*=mega.nz], a[href*=forafile], a[href*=upns], " +
+                "a[href*=bysetayico], a[href*=streamhls]"
         ).forEach { a ->
             val href = a.attr("href").trim()
             if (!href.startsWith("http") || isTrailer(href)) return@forEach
