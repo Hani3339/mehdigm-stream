@@ -270,10 +270,107 @@ class TCVidTube : TopCinemaBaseExtractor() {
     }
 }
 
-/** StreamWish mirror used by the site. */
+/**
+ * StreamWish mirror used by the site.
+ *
+ * The embed exposes `var links={"hls4":..,"hls3":..,"hls2":..}`. `hls4` is a
+ * host-relative relay (`/stream/...`) bound to no ASN; `hls3`/`hls2` are CDN
+ * masters whose token is signed for the caller's ASN, so some nodes answer
+ * `403 Website Access Blocked` while others play — the exact reason one
+ * StreamWish source failed while another worked.
+ *
+ * The player's own preference `links.hls4 || links.hls3 || links.hls2` is
+ * mirrored, every candidate is probed once and only the ones that really
+ * answer a playlist are emitted (all are kept when the probe itself fails so
+ * playback is never lost).
+ */
 class TCStreamWish : TopCinemaBaseExtractor() {
     override var mainUrl = "https://streamwish.fun"
     override var name = "StreamWish"
+
+    override suspend fun getUrl(
+        url: String,
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val page = fetchPage(url, referer) ?: run {
+            Log.w(name, "no usable page for $url")
+            return
+        }
+        val unpacked = try {
+            JsUnpacker(page).unpack() ?: page
+        } catch (_: Throwable) {
+            page
+        }
+        val haystack = if (unpacked === page) page else "$page\n$unpacked"
+
+        val candidates = parseLinks(haystack)
+        if (candidates.isEmpty()) {
+            emit(page, subtitleCallback, callback)
+            return
+        }
+
+        val reachable = candidates.filter { isReachable(it) }
+        for (media in reachable.ifEmpty { candidates }) {
+            val isM3u8 = media.contains(".m3u8", true) || media.contains("master.txt", true)
+            callback(
+                newExtractorLink(
+                    source = name,
+                    name = name,
+                    url = media,
+                    type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                ) {
+                    this.referer = mediaReferer
+                    this.quality = Qualities.Unknown.value
+                    this.headers = mapOf(
+                        "User-Agent" to TC_UA,
+                        "Referer" to mediaReferer
+                    )
+                }
+            )
+        }
+    }
+
+    /** Mirrors the player's `links.hls4 || links.hls3 || links.hls2` preference. */
+    private fun parseLinks(text: String): List<String> {
+        val json = Regex("""links\s*=\s*(\{[^}]*\})""")
+            .find(text)?.groupValues?.get(1) ?: return emptyList()
+        val obj = try {
+            JSONObject(json)
+        } catch (_: Throwable) {
+            return emptyList()
+        }
+        return LINK_KEYS
+            .mapNotNull { key -> obj.optString(key).takeIf { it.isNotBlank() } }
+            .map { absolutize(it) }
+            .distinct()
+    }
+
+    private fun absolutize(link: String): String = when {
+        link.startsWith("http") -> link
+        link.startsWith("//") -> "https:$link"
+        link.startsWith("/") -> "$mainUrl$link"
+        else -> "$mainUrl/$link"
+    }
+
+    private suspend fun isReachable(media: String): Boolean {
+        val isPlaylist = media.contains(".m3u8", true) || media.contains("master.txt", true)
+        if (!isPlaylist) return true
+        return try {
+            app.get(
+                media,
+                referer = mediaReferer,
+                headers = mapOf("User-Agent" to TC_UA, "Referer" to mediaReferer)
+            ).isSuccessful
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    companion object {
+        private val LINK_KEYS = listOf("hls4", "hls3", "hls2")
+    }
 }
 
 /** DoodCloud custom domain used by the site. */
