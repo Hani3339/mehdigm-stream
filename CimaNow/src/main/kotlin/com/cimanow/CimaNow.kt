@@ -376,17 +376,52 @@ class CimaNow : MainAPI() {
      * the gate's own JavaScript, so instead of re-implementing it we let a WebView run the gate
      * and capture the tokenized URL it lands on.
      */
-    private suspend fun resolveWatchToken(shineUrl: String): String? = runCatching {
-        // IMPORTANT: userAgent must stay null (WebView's own UA) and useOkhttp=false, otherwise
-        // the gate's Cloudflare returns an error page (see WebViewResolver docs).
-        val resolver = WebViewResolver(
-            interceptUrl = Regex("""cimanow\.cc/.*watching/"""),
-            userAgent = null,
-            useOkhttp = false,
-            timeout = 90_000L
-        )
-        resolver.resolveUsingWebView(shineUrl, referer = "$mainUrl/").first?.url?.toString()
-    }.getOrNull()
+    private suspend fun resolveWatchToken(shineUrl: String): String? {
+        var token: String? = null
+        // Read the `#downloadbtn` href once the gate's 10s countdown finishes; the href is the
+        // tokenized `cimanow.cc/<slug>/watching/?token=...` URL.
+        val pollScript = """
+            (function(){
+              function grab(){
+                var a=document.getElementById('downloadbtn');
+                if(a && a.href && a.href.indexOf('watching')>=0){ return a.href; }
+                var links=document.querySelectorAll('a[href*="watching"], a[href*="token="]');
+                for(var i=0;i<links.length;i++){ if(links[i].href) return links[i].href; }
+                return '';
+              }
+              var n=0; var iv=setInterval(function(){
+                n++; var u=grab();
+                if(u){ clearInterval(iv); if(window.__cnTokenCb) window.__cnTokenCb(u); }
+                if(n>15) clearInterval(iv);
+              },1000);
+            })();
+        """.trimIndent()
+        runCatching {
+            WebViewResolver(
+                interceptUrl = Regex("""cimanow\.cc/.*watching/"""),
+                userAgent = null,
+                useOkhttp = false,
+                script = pollScript,
+                scriptCallback = { raw ->
+                    val u = raw?.trim()?.trim('"')?.replace("\\/", "/")
+                    if (!u.isNullOrBlank() && u.contains("watching", true) && u.startsWith("http")) {
+                        token = u
+                    }
+                },
+                timeout = 45_000L
+            ).resolveUsingWebView(shineUrl, referer = "$mainUrl/")
+        }
+        if (!token.isNullOrBlank()) return token
+        // Fallback: native navigation interception.
+        return runCatching {
+            WebViewResolver(
+                interceptUrl = Regex("""cimanow\.cc/.*watching/"""),
+                userAgent = null,
+                useOkhttp = false,
+                timeout = 45_000L
+            ).resolveUsingWebView(shineUrl, referer = "$mainUrl/").first?.url?.toString()
+        }.getOrNull()
+    }
 
     private val watchProfiles = listOf(
         mapOf(
