@@ -17,6 +17,7 @@ import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newMovieLoadResponse
 import com.lagradost.cloudstream3.newMovieSearchResponse
 import com.lagradost.cloudstream3.newTvSeriesLoadResponse
+import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
 import kotlinx.coroutines.sync.Mutex
@@ -567,17 +568,48 @@ class EgyDead : MainAPI() {
         return resolveOne(server, referer, subtitleCallback, emit)
     }
 
-    /** Hands a single embed URL to CloudStream's built-ins and our own extractors. */
+    /**
+     * Our own host extractors. [loadExtractor] only ever calls the *first* extractor whose
+     * `mainUrl` matches, and for hosts we share with a built-in (`vidmoly.biz`, `uqload.vc`,
+     * ...) that ordering is not guaranteed, so a stale built-in can win and emit nothing.
+     * Dispatching to our own extractor first removes that dependency entirely.
+     */
+    private val ownExtractors: List<ExtractorApi> = listOf(
+        EgyDeadStreamWish(), EgyDeadStreamWishSite(), EgyDeadHgCloud(), EgyDeadHgLink(),
+        EgyDeadEarnVids(), EgyDeadVidHide(), EgyDeadVidHideAlt(),
+        EgyDeadStreamRubyCom(), EgyDeadStreamRubyNet(), EgyDeadStreamRubyVip(),
+        EgyDeadVidmoly(), EgyDeadUqload(), EgyDeadVidara(), EgyDeadByse()
+    )
+
+    /** Hands a single embed URL to our own extractors, then CloudStream's built-ins. */
     private suspend fun resolveOne(
         url: String,
         referer: String,
         subtitleCallback: (SubtitleFile) -> Unit,
         emit: (ExtractorLink) -> Unit
-    ): Boolean = try {
-        loadExtractor(url, referer, subtitleCallback, emit)
-    } catch (e: Throwable) {
-        Log.i(TAG, "extractor failed $url -> $e")
-        false
+    ): Boolean {
+        val lowered = url.lowercase()
+        val own = ownExtractors.firstOrNull {
+            lowered.contains(it.mainUrl.substringAfter("://").trimEnd('/').lowercase())
+        }
+        if (own != null) {
+            var emitted = false
+            try {
+                own.getUrl(url, referer, subtitleCallback) { link ->
+                    emitted = true
+                    emit(link)
+                }
+            } catch (e: Throwable) {
+                Log.i(TAG, "own extractor failed $url -> $e")
+            }
+            if (emitted) return true
+        }
+        return try {
+            loadExtractor(url, referer, subtitleCallback, emit)
+        } catch (e: Throwable) {
+            Log.i(TAG, "extractor failed $url -> $e")
+            false
+        }
     }
 
     private fun isExtractorHost(url: String): Boolean {

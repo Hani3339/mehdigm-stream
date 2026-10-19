@@ -74,7 +74,14 @@ open class EgyDeadPackerExtractor : ExtractorApi() {
         }
         if (text.isNullOrBlank()) return
 
-        val decoded = JsUnpacker(text).unpack() ?: text
+        // JsUnpacker throws ("Unknown p.a.c.k.e.r. encoding") when the declared word
+        // count does not match, so never let a bad packer abort an otherwise plain page.
+        val decoded = (try {
+            JsUnpacker(text).unpack()
+        } catch (e: Throwable) {
+            Log.i(TAG, "unpack failed $pageUrl -> $e")
+            null
+        }) ?: text
         val stream = pickStream(decoded, pageUrl) ?: pickStream(text, pageUrl) ?: return
 
         callback.invoke(
