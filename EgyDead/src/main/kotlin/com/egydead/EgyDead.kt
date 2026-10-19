@@ -629,7 +629,13 @@ class EgyDead : MainAPI() {
         } catch (e: Throwable) {
             return emptyList()
         }
-        if (!page.contains("data-page=\"app\"") || !page.contains(IFRAME_HOST)) return emptyList()
+        // The Inertia payload is JSON-escaped, so the component appears as
+        // `files\/mirror\/video`; normalise the slashes before matching.
+        val normalized = page.replace("\\/", "/")
+        if (!normalized.contains("data-page=\"app\"") || !normalized.contains(IFRAME_HOST)) {
+            Log.i(TAG, "streams: not an inertia page $iframeUrl len=${page.length}")
+            return emptyList()
+        }
         val version = Regex("\"version\":\"([^\"]+)\"").find(page)?.groupValues?.get(1)
             ?: return emptyList()
         val body = try {
@@ -661,8 +667,11 @@ class EgyDead : MainAPI() {
                     if (link.startsWith("http")) out.add(link)
                 }
             }
-            out.distinct()
+            val distinct = out.distinct()
+            Log.i(TAG, "streams: ${distinct.size} mirrors")
+            distinct
         } catch (e: Throwable) {
+            Log.i(TAG, "streams: parse failed $iframeUrl -> $e")
             emptyList()
         }
     }
