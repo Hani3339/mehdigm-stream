@@ -13,6 +13,10 @@ import com.lagradost.cloudstream3.utils.newExtractorLink
 internal const val CN_UA =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
+internal const val CN_MOBILE_UA =
+    "Mozilla/5.0 (Linux; Android 14; M2006C3MG) AppleWebKit/537.36 (KHTML, like Gecko) " +
+        "Chrome/150.0.7871.63 Mobile Safari/537.36"
+
 internal val CN_HEADERS = mapOf(
     "User-Agent" to CN_UA,
     "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",

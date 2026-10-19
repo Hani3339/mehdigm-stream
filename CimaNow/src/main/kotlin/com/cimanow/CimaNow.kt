@@ -286,7 +286,12 @@ class CimaNow : MainAPI() {
         val downloads = LinkedHashMap<String, String>()
 
         val raw = fetchWatch(watchUrl, data)
-        println("[CimaNow] watch raw len=${raw?.length} encrypted=${raw?.contains("data-Ab8VaR3")}")
+        val title = Regex("""<title[^>]*>(.*?)</title>""", RegexOption.DOT_MATCHES_ALL)
+            .find(raw ?: "")?.groupValues?.get(1)?.replace(Regex("""\s+"""), " ")?.trim()
+        println(
+            "[CimaNow] watch raw len=${raw?.length} enc=${raw?.contains("data-Ab8VaR3")} " +
+                "dl=${raw?.contains("aria-label=\"quality\"")} vault=${raw?.contains("_getCoreToken")} title=$title"
+        )
         val watchHtml = raw?.let { decryptWatch(it) }
         println("[CimaNow] watch html len=${watchHtml?.length}")
 
@@ -303,7 +308,11 @@ class CimaNow : MainAPI() {
         }
 
         println("[CimaNow] players=${players.size} downloads=${downloads.size}")
-        if (players.isEmpty() && downloads.isEmpty()) return false
+        if (players.isEmpty() && downloads.isEmpty()) {
+            val snippet = (watchHtml ?: "").replace(Regex("""\s+"""), " ").take(500)
+            println("[CimaNow] empty! snippet=$snippet")
+            return false
+        }
 
         val lock = Any()
         var found = false
@@ -339,10 +348,33 @@ class CimaNow : MainAPI() {
         return found
     }
 
+    private val watchProfiles = listOf(
+        mapOf(
+            "User-Agent" to CN_MOBILE_UA,
+            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language" to "en-US,en;q=0.9,ar;q=0.8",
+            "Upgrade-Insecure-Requests" to "1",
+            "Sec-Fetch-Site" to "same-origin",
+            "Sec-Fetch-Mode" to "navigate",
+            "Sec-Fetch-Dest" to "document"
+        ),
+        CN_HEADERS,
+        mapOf("User-Agent" to "Mozilla/5.0")
+    )
+
     private suspend fun fetchWatch(url: String, referer: String): String? {
-        runCatching { app.get(url, headers = CN_HEADERS, referer = referer).text }
-            .getOrNull()?.let { if (it.isNotBlank()) return it }
-        return runCatching { app.get(url, referer = referer).text }.getOrNull()
+        var fallback: String? = null
+        for (profile in watchProfiles) {
+            val body = runCatching { app.get(url, headers = profile, referer = referer).text }.getOrNull()
+            if (body.isNullOrBlank()) continue
+            if (fallback == null) fallback = body
+            if (body.contains("data-Ab8VaR3") || body.contains("aria-label=\"quality\"") ||
+                body.contains("\"quality\"") || body.contains("_getCoreToken")
+            ) {
+                return body
+            }
+        }
+        return fallback
     }
 
     /**
@@ -399,6 +431,7 @@ class CimaNow : MainAPI() {
                 val index = li.attr("data-index").trim()
                 if (id.isBlank() || index.isBlank()) null else id to index
             }.distinctBy { it.second }
+        println("[CimaNow] coreToken=${token.take(8)}.. tabs=${tabs.size}")
         if (tabs.isEmpty()) return
 
         val responses = coroutineScope {
@@ -415,6 +448,7 @@ class CimaNow : MainAPI() {
                 if (src.startsWith("http") && !isTrailer(src)) players.add(src)
             }
         }
+        println("[CimaNow] after core.php players=${players.size}")
     }
 
     private fun decodeJetload(href: String): String? {
