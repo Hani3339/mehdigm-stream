@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQuLPPUaQuuMZ7EKxywIyWZ8O6vej4dcfL-9pR0-4JccA&s=10" alt="mehdigm-stream" width="96" />
+  <img src="https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQuLPPUaQuuMZ7EKxywIyWZ8O6vej4dcfL-9pR0-4JccA&s=10" alt="الوجهة العربية (Mehdi GM)" width="96" />
 </p>
 
-<h1 align="center">📺 mehdigm-stream</h1>
+<h1 align="center">📺 الوجهة العربية (Mehdi GM)</h1>
 
 <p align="center">
   <b>مستودع الإضافات العربية لتطبيق CloudStream3</b>
@@ -79,7 +79,7 @@ https://raw.githubusercontent.com/mehdigm4life/mehdigm-stream/main/Mehdi.json
 
 ## ✨ لمحة سريعة
 
-**mehdigm-stream** هو مستودع إضافات عربي متكامل لتطبيق **[CloudStream3](https://github.com/recloudstream/cloudstream)** على أندرويد و Android TV. يوفّر مجموعة من الإضافات التي تجلب المحتوى من **أشهر مواقع مشاهدة الأفلام والمسلسلات العربية**، وتعرضه لك داخل تطبيق واحد أنيق — سريع، بدون إعلانات، وبواجهة عربية بالكامل.
+**الوجهة العربية (Mehdi GM)** هو مستودع إضافات عربي متكامل لتطبيق **[CloudStream3](https://github.com/recloudstream/cloudstream)** على أندرويد و Android TV. يوفّر مجموعة من الإضافات التي تجلب المحتوى من **أشهر مواقع مشاهدة الأفلام والمسلسلات العربية**، وتعرضه لك داخل تطبيق واحد أنيق — سريع، بدون إعلانات، وبواجهة عربية بالكامل.
 
 لا نستضيف أي محتوى؛ نحن نُوفّر فقط **الجسر** بينك وبين المحتوى المتاح أصلاً على الإنترنت.
 
@@ -187,7 +187,7 @@ https://raw.githubusercontent.com/mehdigm4life/mehdigm-stream/main/Mehdi.json
 ---
 
 <p align="center">
-  <b>mehdigm-stream</b> — ليس مجرد مستودع إضافات، بل واجهة السينما العربية بأبهى حلّة.
+  <b>الوجهة العربية (Mehdi GM)</b> — ليس مجرد مستودع إضافات، بل واجهة السينما العربية بأبهى حلّة.
   <br>
   مشروع مفتوح المصدر صُنع بشغف ❤️ ليبقى الخيار الأول لمجتمع البث العربي.
 </p>
