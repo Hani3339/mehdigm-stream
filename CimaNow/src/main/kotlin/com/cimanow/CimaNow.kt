@@ -295,9 +295,7 @@ class CimaNow : MainAPI() {
             println("[CimaNow] tokenUrl=$tokenUrl")
             if (!tokenUrl.isNullOrBlank()) {
                 watchUrl = tokenUrl
-                raw = runCatching {
-                    app.get(tokenUrl, headers = CN_HEADERS, referer = "$mainUrl/").text
-                }.getOrNull()
+                raw = fetchTokenized(tokenUrl)
             }
         }
         if (raw.isNullOrBlank()) {
@@ -400,6 +398,21 @@ class CimaNow : MainAPI() {
         CN_HEADERS,
         mapOf("User-Agent" to "Mozilla/5.0")
     )
+
+    private suspend fun fetchTokenized(url: String): String? {
+        var fallback: String? = null
+        for (profile in watchProfiles) {
+            val body = runCatching { app.get(url, headers = profile, referer = "$mainUrl/").text }.getOrNull()
+            if (body.isNullOrBlank()) continue
+            if (fallback == null) fallback = body
+            if (body.contains("data-Ab8VaR3") || body.contains("aria-label=\"quality\"") ||
+                body.contains("_getCoreToken")
+            ) {
+                return body
+            }
+        }
+        return fallback
+    }
 
     private suspend fun fetchWatch(url: String, referer: String): String? {
         var fallback: String? = null
