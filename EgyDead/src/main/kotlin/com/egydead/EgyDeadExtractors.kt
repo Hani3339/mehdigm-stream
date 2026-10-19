@@ -4,7 +4,6 @@ import android.util.Base64
 import android.util.Log
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.extractors.Uqload
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -37,9 +36,8 @@ import kotlin.math.roundToInt
  *     p.a.c.k.e.r-obfuscated jwplayer setup exposing `hls4 || hls3 || hls2`.
  *  2. StreamRuby (`stmruby.com`, `streamruby.net`, `rubyvidhub.com`): the same
  *     packer but with a plain `file: ".../master.m3u8"`.
- *  3. `uqload.vc` and `byseraguci.com`: mirrors of hosts whose built-in
- *     extractors already implement the full handshake, so thin subclasses just
- *     re-declare [mainUrl] and reuse that proven logic.
+ *  3. `uqload.vc` and `byseraguci.com`: hosts whose streams sit behind a handshake the
+ *     built-ins do not (or no longer) implement, so they get a dedicated resolver here.
  */
 
 /**
@@ -66,30 +64,43 @@ open class EgyDeadPackerExtractor : ExtractorApi() {
         val code = codeOf(url)
         if (code.isBlank()) return
 
-        var pageUrl = url
-        var text = fetch(url)
-        if (text != null && !text.contains("eval(function") && !bounceHost.isNullOrBlank()) {
-            pageUrl = "${bounceHost!!.trimEnd('/')}/e/$code"
-            text = fetch(pageUrl)
+        // Try the embed URL itself first; if it does not expose a stream (either it is
+        // just a JS loader or an anti-bot page), fall back to the bounce host. The old
+        // code only bounced when the page had *no* packer at all, which silently dropped
+        // hosts whose loader embeds an unrelated `eval(function` stub.
+        val candidates = LinkedHashSet<String>()
+        candidates.add(url)
+        if (!bounceHost.isNullOrBlank()) {
+            candidates.add("${bounceHost!!.trimEnd('/')}/e/$code")
         }
-        if (text.isNullOrBlank()) return
 
-        // JsUnpacker throws ("Unknown p.a.c.k.e.r. encoding") when the declared word
-        // count does not match, so never let a bad packer abort an otherwise plain page.
+        for (pageUrl in candidates) {
+            val text = fetch(pageUrl) ?: continue
+            val stream = pickStreamFrom(text, pageUrl) ?: continue
+
+            callback.invoke(
+                newExtractorLink(name, name, stream, ExtractorLinkType.M3U8) {
+                    this.referer = "$pageUrl/"
+                    this.quality = Qualities.Unknown.value
+                }
+            )
+            return
+        }
+    }
+
+    /**
+     * Unpacks the p.a.c.k.e.r payload when present and looks for a stream on both the
+     * decoded and the raw text. [JsUnpacker] throws ("Unknown p.a.c.k.e.r. encoding") when
+     * the declared word count does not match, so a bad packer never aborts a plain page.
+     */
+    private fun pickStreamFrom(text: String, pageUrl: String): String? {
         val decoded = (try {
             JsUnpacker(text).unpack()
         } catch (e: Throwable) {
             Log.i(TAG, "unpack failed $pageUrl -> $e")
             null
         }) ?: text
-        val stream = pickStream(decoded, pageUrl) ?: pickStream(text, pageUrl) ?: return
-
-        callback.invoke(
-            newExtractorLink(name, name, stream, ExtractorLinkType.M3U8) {
-                this.referer = "$pageUrl/"
-                this.quality = Qualities.Unknown.value
-            }
-        )
+        return pickStream(decoded, pageUrl) ?: pickStream(text, pageUrl)
     }
 
     protected suspend fun fetch(target: String): String? = try {
@@ -124,7 +135,7 @@ open class EgyDeadPackerExtractor : ExtractorApi() {
      * is missing the absolute `hls2` is used. Falls back to a plain `file:` m3u8
      * (StreamRuby).
      */
-    private fun pickStream(text: String, pageUrl: String): String? {
+    protected open fun pickStream(text: String, pageUrl: String): String? {
         val candidates = linkedMapOf<Int, String>()
         HLS_RE.findAll(text).forEach { m ->
             m.groupValues[1].toIntOrNull()?.let { candidates.putIfAbsent(it, m.groupValues[2]) }
@@ -132,6 +143,7 @@ open class EgyDeadPackerExtractor : ExtractorApi() {
         val picked = (listOf(4, 2, 3, 1).firstOrNull { candidates.containsKey(it) }
             ?: candidates.keys.maxOrNull())?.let { candidates[it] }
             ?: FILE_RE.find(text)?.groupValues?.get(1)
+            ?: SOURCES_RE.find(text)?.groupValues?.get(1)
         return picked?.let { absolute(it, pageUrl) }
     }
 
@@ -158,6 +170,7 @@ open class EgyDeadPackerExtractor : ExtractorApi() {
 
         val HLS_RE = Regex("""hls(\d+)"\s*:\s*"([^"]+)"""")
         val FILE_RE = Regex("""file\s*:\s*["']([^"']+\.m3u8[^"']*)["']""")
+        val SOURCES_RE = Regex("""sources\s*:\s*\[\s*["']([^"']+\.m3u8[^"']*)["']""")
     }
 }
 
@@ -235,9 +248,19 @@ class EgyDeadVidmoly : EgyDeadPackerExtractor() {
 
 // ---------------------------------------------------------------- Reuse built-ins
 
-/** `uqload.vc` — the driver the EgyDead player returns (built-ins only ship other TLDs). */
-class EgyDeadUqload : Uqload() {
+/**
+ * `uqload.vc` — the driver the EgyDead player returns. uqload exposes its stream as a
+ * plain `sources: ["…/file.m3u8"]` array (sometimes packer-wrapped), which the built-in
+ * regex (`sources:.*"(.*?)"`) can miss. Resolve it here; the built-in still runs as a
+ * fallback through `loadExtractor` if this emits nothing.
+ */
+class EgyDeadUqload : EgyDeadPackerExtractor() {
+    override var name = "Uqload"
     override var mainUrl = "https://uqload.vc"
+
+    override fun pickStream(text: String, pageUrl: String): String? =
+        super.pickStream(text, pageUrl)
+            ?: Regex("""https?://[^"'\s\\]+\.m3u8[^"'\s\\]*""").find(text)?.value
 }
 
 // ---------------------------------------------------------------------- Vidara
