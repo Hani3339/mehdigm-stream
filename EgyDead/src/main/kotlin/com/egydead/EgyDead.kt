@@ -592,6 +592,7 @@ class EgyDead : MainAPI() {
         val own = ownExtractors.firstOrNull {
             lowered.contains(it.mainUrl.substringAfter("://").trimEnd('/').lowercase())
         }
+        Log.i(TAG, "resolveOne $url own=${own?.name ?: "builtin"}")
         if (own != null) {
             var emitted = false
             try {
@@ -602,6 +603,7 @@ class EgyDead : MainAPI() {
             } catch (e: Throwable) {
                 Log.i(TAG, "own extractor failed $url -> $e")
             }
+            Log.i(TAG, "resolveOne $url own=${own.name} emitted=$emitted")
             if (emitted) return true
         }
         return try {

@@ -82,7 +82,14 @@ open class EgyDeadPackerExtractor : ExtractorApi() {
             Log.i(TAG, "unpack failed $pageUrl -> $e")
             null
         }) ?: text
-        val stream = pickStream(decoded, pageUrl) ?: pickStream(text, pageUrl) ?: return
+        val stream = pickStream(decoded, pageUrl) ?: pickStream(text, pageUrl)
+        Log.i(
+            TAG,
+            "getUrl $name $url -> ${stream ?: "NULL"} len=${text.length} " +
+                "eval=${text.contains("eval(function")} file=${FILE_RE.containsMatchIn(text)} " +
+                "hls=${HLS_RE.containsMatchIn(text)} cf=${text.contains("Just a moment", true)}"
+        )
+        if (stream == null) return
 
         callback.invoke(
             newExtractorLink(name, name, stream, ExtractorLinkType.M3U8) {
@@ -97,9 +104,14 @@ open class EgyDeadPackerExtractor : ExtractorApi() {
             target,
             headers = mapOf(
                 "User-Agent" to USER_AGENT,
-                "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+                "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language" to "en-US,en;q=0.9",
+                "Sec-Fetch-Dest" to "iframe",
+                "Sec-Fetch-Mode" to "navigate",
+                "Sec-Fetch-Site" to "cross-site"
             ),
-            referer = refererHeader(target)
+            referer = refererHeader(target),
+            timeout = 30
         ).text
     } catch (e: Throwable) {
         Log.i(TAG, "fetch failed $target -> $e")
