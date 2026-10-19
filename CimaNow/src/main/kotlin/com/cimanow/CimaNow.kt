@@ -30,6 +30,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withTimeoutOrNull
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URLDecoder
@@ -53,6 +54,8 @@ import java.net.URLEncoder
 class CimaNow : MainAPI() {
     companion object {
         private const val SOURCE_TIMEOUT_MS = 20_000L
+        private const val CN_RC4_KEY = "588330764i"
+        private const val CN_TW = 71
     }
 
     override var name = "سيما ناو (CimaNow)"
@@ -277,14 +280,21 @@ class CimaNow : MainAPI() {
     ): Boolean {
         val postDoc = runCatching { app.get(data, headers = CN_HEADERS).document }.getOrNull()
         val watchUrl = postDoc?.let { watchUrlFromDoc(it) } ?: watchingUrl(data)
+        println("[CimaNow] watchUrl=$watchUrl")
 
         val players = LinkedHashSet<String>()
         val downloads = LinkedHashMap<String, String>()
 
-        val watchDoc = runCatching {
-            app.get(watchUrl, headers = CN_HEADERS, referer = data).document
-        }.getOrNull()
-        if (watchDoc != null) collectSources(watchDoc, watchUrl, players, downloads)
+        val raw = fetchWatch(watchUrl, data)
+        println("[CimaNow] watch raw len=${raw?.length} encrypted=${raw?.contains("data-Ab8VaR3")}")
+        val watchHtml = raw?.let { decryptWatch(it) }
+        println("[CimaNow] watch html len=${watchHtml?.length}")
+
+        if (!watchHtml.isNullOrBlank()) {
+            val watchDoc = Jsoup.parse(watchHtml, watchUrl)
+            collectSources(watchDoc, watchUrl, players, downloads)
+            collectServerEmbeds(watchHtml, watchDoc, watchUrl, players)
+        }
 
         // The watch page is sometimes gated and only serves the trailer; the post page may still
         // expose the same mirrors for a few hosts.
@@ -292,6 +302,7 @@ class CimaNow : MainAPI() {
             postDoc?.let { collectSources(it, data, players, downloads) }
         }
 
+        println("[CimaNow] players=${players.size} downloads=${downloads.size}")
         if (players.isEmpty() && downloads.isEmpty()) return false
 
         val lock = Any()
@@ -328,6 +339,95 @@ class CimaNow : MainAPI() {
         return found
     }
 
+    private suspend fun fetchWatch(url: String, referer: String): String? {
+        runCatching { app.get(url, headers = CN_HEADERS, referer = referer).text }
+            .getOrNull()?.let { if (it.isNotBlank()) return it }
+        return runCatching { app.get(url, referer = referer).text }.getOrNull()
+    }
+
+    /**
+     * The `/watching/` page ships as an RC4-obfuscated blob: the payload lives in
+     * `data-Ab8VaR3`, is reversed, base64 decoded and then XOR-decoded with a static
+     * RC4 keystream (key `588330764i`, index offset 71). The plaintext is UTF-8 with a
+     * fixed 34-character prefix that is stripped.
+     */
+    private fun decryptWatch(html: String): String {
+        if (!html.contains("data-Ab8VaR3")) return html
+        val attr = Regex("""data-Ab8VaR3=["']([^"']+)["']""").find(html)?.groupValues?.get(1)
+            ?: return html
+        val data = runCatching { Base64.decode(attr.reversed(), Base64.DEFAULT) }.getOrNull()
+            ?: return html
+
+        val key = CN_RC4_KEY.toByteArray(Charsets.US_ASCII)
+        val s = IntArray(256) { it }
+        var j = 0
+        for (i in 0 until 256) {
+            j = (j + s[i] + (key[i % key.size].toInt() and 0xFF)) and 0xFF
+            val t = s[i]; s[i] = s[j]; s[j] = t
+        }
+        var i = 0
+        j = 0
+        val out = ByteArray(data.size)
+        for (y in data.indices) {
+            i = (i + 1) and 0xFF
+            j = (j + s[i]) and 0xFF
+            val t = s[i]; s[i] = s[j]; s[j] = t
+            val k = s[(s[i] + s[j]) and 0xFF]
+            out[y] = ((data[y].toInt() and 0xFF) xor (k xor ((i + CN_TW) and 0xFF))).toByte()
+        }
+        val text = String(out, Charsets.UTF_8)
+        return if (text.length > 34) text.substring(34) else text
+    }
+
+    private fun coreToken(html: String): String? {
+        val b64 = Regex("""window\.atob\(["']([^"']+)["']\)""").find(html)?.groupValues?.get(1)
+            ?: return null
+        return runCatching { String(Base64.decode(b64, Base64.DEFAULT)) }.getOrNull()
+    }
+
+    /** Calls `core.php?action=switch` for every server tab to expose all player embeds. */
+    private suspend fun collectServerEmbeds(
+        html: String,
+        doc: Document,
+        referer: String,
+        players: MutableSet<String>
+    ) {
+        val token = coreToken(html) ?: return
+        val tabs = doc.select("#watch li[data-id][data-index], ul#watch li[data-id][data-index]")
+            .mapNotNull { li ->
+                val id = li.attr("data-id").trim()
+                val index = li.attr("data-index").trim()
+                if (id.isBlank() || index.isBlank()) null else id to index
+            }.distinctBy { it.second }
+        if (tabs.isEmpty()) return
+
+        val responses = coroutineScope {
+            tabs.map { (id, index) ->
+                async(Dispatchers.IO) {
+                    val url = "$mainUrl/wp-content/themes/Cima%20Now%20New/core.php" +
+                        "?token=$token&action=switch&index=$index&id=$id"
+                    runCatching { app.get(url, referer = referer, headers = CN_HEADERS).text }.getOrNull()
+                }
+            }.awaitAll()
+        }
+        responses.forEach { resp ->
+            Regex("""src=["']([^"']+)["']""").find(resp ?: "")?.groupValues?.get(1)?.let { src ->
+                if (src.startsWith("http") && !isTrailer(src)) players.add(src)
+            }
+        }
+    }
+
+    private fun decodeJetload(href: String): String? {
+        if (!href.contains("jetload", true)) return null
+        val m = Regex("""[?&]link=([^&]+)""").find(href) ?: return null
+        val raw = runCatching { URLDecoder.decode(m.groupValues[1], "UTF-8") }.getOrDefault(m.groupValues[1])
+        for (flags in listOf(Base64.URL_SAFE, Base64.DEFAULT)) {
+            val v = runCatching { String(Base64.decode(raw, flags)) }.getOrNull()
+            if (v != null && v.startsWith("http")) return v.trim()
+        }
+        return null
+    }
+
     private fun collectSources(
         doc: Document,
         referer: String,
@@ -355,7 +455,12 @@ class CimaNow : MainAPI() {
             val href = a.attr("href").trim()
             if (!href.startsWith("http") || isTrailer(href)) return@forEach
             val label = a.selectFirst("p")?.text()?.trim().orEmpty().ifBlank { a.text().trim() }
-            if (isDownload(href)) downloads[href] = label else if (!players.contains(href)) players.add(href)
+            val direct = decodeJetload(href)
+            when {
+                direct != null -> downloads[direct] = label
+                isDownload(href) -> downloads[href] = label
+                !players.contains(href) -> players.add(href)
+            }
         }
         doc.select(
             "a[href*=cimanowtv], a[href*=filespayouts], a[href*=worldcdn], " +
