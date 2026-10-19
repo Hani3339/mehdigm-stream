@@ -25,7 +25,7 @@ import java.net.URLEncoder
 class CartoonAnime : MainAPI() {
     override var lang = "ar"
     override var mainUrl = "https://apps-anime.com"
-    override var name = "مسلسلات كرتون وأنمي"
+    override var name = "مسلسلات كرتون وأنمي (CartoonAnime)"
 
     override val usesWebView = false
     override val hasMainPage = true

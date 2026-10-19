@@ -93,7 +93,7 @@ class CimaCloud : MainAPI() {
 
     override var lang = "ar"
     override var mainUrl = DEFAULT_API
-    override var name = "CimaCloud"
+    override var name = "سيما كلاود (CimaCloud)"
     override val usesWebView = false
     override val hasMainPage = true
     override val hasQuickSearch = true

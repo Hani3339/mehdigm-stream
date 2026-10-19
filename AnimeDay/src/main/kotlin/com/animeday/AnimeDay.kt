@@ -63,7 +63,7 @@ class AnimeDay : MainAPI() {
 
     override var lang = "ar"
     override var mainUrl = DEFAULT_API
-    override var name = "AnimeDay"
+    override var name = "أنمي داي (AnimeDay)"
     override val usesWebView = false
     override val hasMainPage = true
     override val hasQuickSearch = true

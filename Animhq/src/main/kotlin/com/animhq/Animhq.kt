@@ -34,7 +34,7 @@ import java.net.URLEncoder
 class Animhq : MainAPI() {
     override var lang = "ar"
     override var mainUrl = "https://animhq.com"
-    override var name = "Animhq"
+    override var name = "أنمي إتش كيو (Animhq)"
     override val usesWebView = false
     override val hasMainPage = true
     override val hasQuickSearch = true

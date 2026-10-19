@@ -62,7 +62,7 @@ class StarDima : MainAPI() {
         private const val EPISODE_URL = "https://stardima.app/api/episodes/"
     }
 
-    override var name = "StarDima"
+    override var name = "ستارديما (StarDima)"
     override var lang = "ar"
     override var mainUrl = "https://stardima.app"
 

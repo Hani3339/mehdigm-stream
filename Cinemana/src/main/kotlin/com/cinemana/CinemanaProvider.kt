@@ -22,7 +22,7 @@ import com.lagradost.cloudstream3.utils.getQualityFromName
 
 
 class Cinemana(val context: Context) : MainAPI() {
-    override var name = "Shabakaty Cinemana (\uD83C\uDDEE\uD83C\uDDF6)"
+    override var name = "سينمانا (Cinemana)"
     override var mainUrl = "https://cinemana.shabakaty.cc"
     override var lang = "ar"
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)

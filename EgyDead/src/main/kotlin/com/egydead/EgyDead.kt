@@ -145,7 +145,7 @@ class EgyDead : MainAPI() {
         return res.document
     }
 
-    override var name = "EgyDead"
+    override var name = "إيجي ديد (EgyDead)"
     override var mainUrl = "https://tv10.egydead.live"
     override var lang = "ar"
 

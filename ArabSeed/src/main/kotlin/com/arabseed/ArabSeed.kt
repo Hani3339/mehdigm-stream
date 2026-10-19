@@ -27,7 +27,7 @@ import org.json.JSONObject
 class ArabSeed : MainAPI() {
     override var lang = "ar"
     override var mainUrl = "https://m.arabseed.show"
-    override var name = "ArabSeed"
+    override var name = "عرب سيد (ArabSeed)"
     override val usesWebView = false
     override val hasMainPage = true
     override val hasQuickSearch = true

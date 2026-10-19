@@ -80,7 +80,7 @@ class Egywatch : MainAPI() {
         private const val SOURCE_TIMEOUT_MS = 12_000L
     }
 
-    override var name = "Egywatch"
+    override var name = "إيجي واتش (Egywatch)"
     override var mainUrl = "https://gateway.egywatch.live"
     override var lang = "ar"
 

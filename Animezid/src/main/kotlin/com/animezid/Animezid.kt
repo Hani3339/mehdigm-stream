@@ -14,7 +14,7 @@ import java.net.URLEncoder
 
 class Animezid : MainAPI() {
     override var mainUrl = "https://animezid.org"
-    override var name = "Animezid"
+    override var name = "انمي زد (Animezid)"
     override val hasMainPage = true
     override var lang = "ar"
     override val hasDownloadSupport = true

@@ -81,7 +81,7 @@ class DramaWorld : MainAPI() {
         )
     }
 
-    override var name = "DramaWorld"
+    override var name = "عالم الدراما (DramaWorld)"
     override var lang = "ar"
     override var mainUrl = MAIN_HOST
 

@@ -29,7 +29,7 @@ import java.net.URLEncoder
 
 class AnimeSlayer : MainAPI() {
     override var mainUrl = "https://anslayer.com"
-    override var name = "AnimeSlayer"
+    override var name = "أنمي سلاير (AnimeSlayer)"
     override val hasMainPage = true
     override var lang = "ar"
     override val hasDownloadSupport = true
