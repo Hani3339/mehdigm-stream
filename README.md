@@ -28,10 +28,17 @@
 
 **لا تحتاج لنسخ أي رابط طويل — فقط اكتب أحد الكودين داخل التطبيق**
 
-<p>
-  <img src="https://img.shields.io/badge/Shortcode%201-mehdigm-1e90ff?style=for-the-badge" alt="Shortcode 1">
-  <img src="https://img.shields.io/badge/Shortcode%202-mehdiarab-8e44ad?style=for-the-badge" alt="Shortcode 2">
-</p>
+**🏆 الكود الرئيسي**
+
+```bash
+mehdigm
+```
+
+**🔁 الكود الاحتياطي**
+
+```bash
+mehdiarab
+```
 
 | 🏆 الكود الرئيسي | 🔁 الكود الاحتياطي |
 |:---:|:---:|
