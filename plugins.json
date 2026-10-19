@@ -1,25 +1,5 @@
 [
   {
-    "iconUrl": "https://animhq.com/wp-content/uploads/2023/06/cropped-fav-01.png",
-    "apiVersion": 1,
-    "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-    "fileSize": 22725,
-    "status": 1,
-    "language": "ar",
-    "authors": [
-      "mehdigm4life"
-    ],
-    "tvTypes": [
-      "Anime",
-      "Movie"
-    ],
-    "version": 3,
-    "internalName": "Animhq",
-    "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/Animhq.cs3",
-    "name": "أنمي إتش كيو (Animhq)",
-    "description": "شاهد الأنمي مترجم — بوسترات ورئيسية عبر api، تشغيل مباشر للحلقات المجانية."
-  },
-  {
     "iconUrl": "https://animezid.org/uploads/custom-logo.png",
     "apiVersion": 1,
     "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
@@ -42,47 +22,6 @@
     "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/Animezid.cs3",
     "name": "انمي زد (Animezid)",
     "description": "موقع انمي زد — مشاهدة وتحميل أفلام ومسلسلات الأنمي والكرتون المدبلج والمترجم."
-  },
-  {
-    "iconUrl": "https://m.arabseed.show/favicon.ico",
-    "apiVersion": 1,
-    "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-    "fileSize": 35311,
-    "status": 1,
-    "language": "ar",
-    "authors": [
-      "mehdigm4life"
-    ],
-    "tvTypes": [
-      "TvSeries",
-      "Movie",
-      "Anime"
-    ],
-    "version": 2,
-    "internalName": "ArabSeed",
-    "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/ArabSeed.cs3",
-    "name": "عرب سيد (ArabSeed)",
-    "description": "مشاهدة وتحميل الأفلام والمسلسلات العربية والأجنبية والمترجمة."
-  },
-  {
-    "iconUrl": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcTZlAGH56cEnNEL93W3QqZWpUe8XR8i90olTA&s",
-    "apiVersion": 1,
-    "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-    "fileSize": 48334,
-    "status": 1,
-    "language": "ar",
-    "authors": [
-      "mehdigm4life"
-    ],
-    "tvTypes": [
-      "TvSeries",
-      "Movie"
-    ],
-    "version": 5,
-    "internalName": "Cinemana",
-    "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/Cinemana.cs3",
-    "name": "سينمانا (Cinemana)",
-    "description": "سينمانا — لا يعمل خارج العراق أو على أي شبكة غير Earthlink."
   },
   {
     "iconUrl": "https://static.faselhdcdn.com/wp-content/uploads/2022/06/logo-1.png",
