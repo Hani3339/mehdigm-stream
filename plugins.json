@@ -307,5 +307,26 @@
     "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/TopCinema.cs3",
     "name": "توب سينما (TopCinema)",
     "description": "توب سينما — مشاهدة وتحميل الأفلام والمسلسلات الأجنبية والآسيوية والأنمي."
+  },
+  {
+    "iconUrl": "https://cimanow.cc/wp-content/uploads/2017/05/cropped-Favicon-192x192.gif",
+    "apiVersion": 1,
+    "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
+    "fileSize": 32598,
+    "status": 1,
+    "language": "ar",
+    "authors": [
+      "mehdigm4life"
+    ],
+    "tvTypes": [
+      "Movie",
+      "TvSeries",
+      "Anime"
+    ],
+    "version": 1,
+    "internalName": "CimaNow",
+    "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/CimaNow.cs3",
+    "name": "سيما ناو (CimaNow)",
+    "description": "سيما ناو CimaNow — أفلام ومسلسلات وحلقات مترجمة."
   }
 ]
