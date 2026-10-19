@@ -9,7 +9,7 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
 class TopCinema : MainAPI() {
-    override var mainUrl = "https://web2.topcinema.io"
+    override var mainUrl = "https://topcinema.film"
     override var name = "توب سينما (TopCinema)"
     override var lang = "ar"
     override val hasMainPage = true
