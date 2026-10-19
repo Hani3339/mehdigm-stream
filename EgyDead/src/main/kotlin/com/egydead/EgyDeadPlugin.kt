@@ -21,8 +21,9 @@ class EgyDeadPlugin : Plugin() {
         registerExtractorAPI(EgyDeadStreamRubyNet())
         registerExtractorAPI(EgyDeadStreamRubyVip())
 
-        // Built-in mirrors with new/rotated TLDs.
+        // Hosts whose built-ins are stale (new API shape / mirror domain).
         registerExtractorAPI(EgyDeadUqload())
+        registerExtractorAPI(EgyDeadVidara())
         registerExtractorAPI(EgyDeadByse())
 
         registerMainAPI(EgyDead())
