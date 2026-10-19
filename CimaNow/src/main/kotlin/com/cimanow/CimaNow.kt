@@ -576,6 +576,7 @@ class CimaNow : MainAPI() {
             val custom: ExtractorApi? = when {
                 embed.contains("cnvids.com") -> CimaNowCnvids()
                 embed.contains("fr.cimanow.cc") -> CimaNowFr()
+                embed.contains("cimanowtv.com") -> CimaNowCimaNow()
                 else -> null
             }
             if (custom != null) {

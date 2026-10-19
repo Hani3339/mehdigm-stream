@@ -65,30 +65,53 @@ abstract class CimaNowBaseExtractor : ExtractorApi() {
             }
         }
 
-        val found = LinkedHashSet<String>()
-        for (p in MEDIA_PATTERNS) {
-            p.findAll(haystack).forEach { m ->
-                val candidate = m.groupValues.drop(1)
-                    .firstOrNull { it.isNotBlank() && it.contains("://") }
-                    ?: m.value
-                if (candidate.contains("://") && MEDIA_URL.containsMatchIn(candidate)) {
-                    found.add(candidate)
-                }
+        val resolved = LinkedHashMap<String, Int?>()
+
+        // playerjs `"file": [...]` / `"file": "https://...,https://"` lists (often relative).
+        val jsonFile = Regex(""""file"\s*:\s*(\[[^\]]*\]|"[^"]*")""", RegexOption.DOT_MATCHES_ALL)
+            .find(haystack)?.groupValues?.get(1)
+        if (jsonFile != null) {
+            val entries: List<String> = if (jsonFile.trimStart().startsWith("[")) {
+                Regex(""""([^"]+)"""").findAll(jsonFile).map { it.groupValues[1] }.toList()
+            } else {
+                listOf(jsonFile.trim().trim('"'))
             }
-            if (found.isNotEmpty()) break
+            for (entry in entries.flatMap { it.split(",") }) {
+                val quality = Regex("""\[(\d{3,4})p\]""").find(entry)?.groupValues?.get(1)?.toIntOrNull()
+                val path = entry.replace(Regex("""^\s*\[\d{3,4}p\]\s*"""), "").trim()
+                if (path.isBlank()) continue
+                val media = absolutize(path, referer)
+                if (MEDIA_URL.containsMatchIn(media)) resolved[media] = quality
+            }
         }
 
-        for (media in found) {
+        if (resolved.isEmpty()) {
+            val found = LinkedHashSet<String>()
+            for (p in MEDIA_PATTERNS) {
+                p.findAll(haystack).forEach { m ->
+                    val candidate = m.groupValues.drop(1)
+                        .firstOrNull { it.isNotBlank() && it.contains("://") }
+                        ?: m.value
+                    if (candidate.contains("://") && MEDIA_URL.containsMatchIn(candidate)) {
+                        found.add(candidate)
+                    }
+                }
+                if (found.isNotEmpty()) break
+            }
+            found.forEach { resolved[it] = null }
+        }
+
+        for ((media, quality) in resolved) {
             val isM3u8 = media.contains(".m3u8", true) || media.contains("master.txt", true)
             callback(
                 newExtractorLink(
                     source = name,
-                    name = name,
+                    name = if (quality != null) "$name ${quality}p" else name,
                     url = media,
                     type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                 ) {
                     this.referer = referer
-                    this.quality = Qualities.Unknown.value
+                    this.quality = quality ?: Qualities.Unknown.value
                     this.headers = mapOf(
                         "User-Agent" to CN_UA,
                         "Referer" to referer
@@ -97,6 +120,18 @@ abstract class CimaNowBaseExtractor : ExtractorApi() {
             )
         }
     }
+
+    private fun absolutize(path: String, base: String): String = when {
+        path.startsWith("http") -> path
+        path.startsWith("//") -> "https:$path"
+        path.startsWith("/") -> origin(base) + path
+        else -> origin(base) + "/" + path
+    }
+
+    private fun origin(url: String): String =
+        runCatching { java.net.URI(url) }
+            .map { "${it.scheme}://${it.host}" }
+            .getOrElse { mainUrl }
 
     companion object {
         private val MEDIA_URL = Regex(
