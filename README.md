@@ -5,7 +5,7 @@
 <h3 align="center">الوجهة العربية (Mehdi GM)</h3>
 
 <p align="center">
-  <b>مستودع الإضافات العربية لتطبيق CloudStream3</b>
+  <b>مستودع الإضافات العربية لتطبيق CloudStream</b>
   <br><br>
   <img src="https://img.shields.io/badge/platform-Android%20%7C%20Android%20TV-black?style=flat-square" alt="Platform">
 </p>
@@ -52,11 +52,11 @@ mehdiarab
 
 #### 📲 المتطلبات
 
-- تطبيق **CloudStream3** (من [الرابط الرسمي](https://github.com/recloudstream/cloudstream/releases))
+- تطبيق **CloudStream** (من [الرابط الرسمي](https://github.com/recloudstream/cloudstream/releases))
 
 #### ⏱️ طريقة الإضافة خلال 30 ثانية
 
-1. افتح تطبيق **CloudStream3**
+1. افتح تطبيق **CloudStream**
 2. انتقل إلى: **⚙️ الإعدادات ← الإضافات (Extensions)**
 3. اضغط زر **إضافة مستودع (Add Repository)**
 4. اكتب الكود المختصر كما هو، مثال:
@@ -79,7 +79,7 @@ https://raw.githubusercontent.com/mehdigm4life/mehdigm-stream/main/Mehdi.json
 
 ## ✨ لمحة سريعة
 
-**الوجهة العربية (Mehdi GM)** هو مستودع إضافات عربي متكامل لتطبيق **[CloudStream3](https://github.com/recloudstream/cloudstream)** على أندرويد و Android TV. يوفّر مجموعة من الإضافات التي تجلب المحتوى من **أشهر مواقع مشاهدة الأفلام والمسلسلات العربية**، وتعرضه لك داخل تطبيق واحد أنيق — سريع، بدون إعلانات، وبواجهة عربية بالكامل.
+**الوجهة العربية (Mehdi GM)** هو مستودع إضافات عربي متكامل لتطبيق **[CloudStream](https://github.com/recloudstream/cloudstream)** على أندرويد و Android TV. يوفّر مجموعة من الإضافات التي تجلب المحتوى من **أشهر مواقع مشاهدة الأفلام والمسلسلات العربية**، وتعرضه لك داخل تطبيق واحد أنيق — سريع، بدون إعلانات، وبواجهة عربية بالكامل.
 
 لا نستضيف أي محتوى؛ نحن نُوفّر فقط **الجسر** بينك وبين المحتوى المتاح أصلاً على الإنترنت.
 
