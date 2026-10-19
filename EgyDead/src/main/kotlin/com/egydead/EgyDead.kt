@@ -19,7 +19,9 @@ import com.lagradost.cloudstream3.newMovieSearchResponse
 import com.lagradost.cloudstream3.newTvSeriesLoadResponse
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
+import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
@@ -552,18 +554,37 @@ class EgyDead : MainAPI() {
         //   /download/<hash> -> download mirrors  (props.attachments -> props.download)
         // Everything else is a plain file host handed to loadExtractor.
         val path = server.substringAfter("://").substringAfter("/", "")
-        val mirrors = when {
-            path.startsWith("iframe/") -> resolveStreamMirrors(server)
-            path.startsWith("download/") -> resolveDownloadMirrors(server)
-            !isExtractorHost(server) -> resolveStreamMirrors(server)
-            else -> emptyList()
-        }
-        if (mirrors.isNotEmpty()) {
-            var found = false
-            for (mirror in mirrors) {
-                found = resolveOne(mirror, server, subtitleCallback, emit) || found
+        if (path.startsWith("download/")) {
+            val mirrors = resolveDownloadMirrors(server)
+            if (mirrors.isNotEmpty()) {
+                var found = false
+                for (mirror in mirrors) {
+                    found = resolveOne(mirror, server, subtitleCallback, emit) || found
+                }
+                if (found) return true
             }
-            if (found) return true
+        } else if (path.startsWith("iframe/") || !isExtractorHost(server)) {
+            val mirrors = resolveStreamMirrors(server)
+            if (mirrors.isNotEmpty()) {
+                var found = false
+                // Re-label each resolved link with the driver name the player shows
+                // (`streamhg`, `earnvids`, …) and the quality group it came from.
+                for (mirror in mirrors) {
+                    val links = mutableListOf<ExtractorLink>()
+                    val ok = resolveOne(mirror.url, server, subtitleCallback) { links.add(it) }
+                    if (ok) found = true
+                    for (link in links) {
+                        emit(
+                            newExtractorLink(mirror.driver, mirror.driver, link.url, link.type) {
+                                this.referer = link.referer
+                                this.quality = mirror.quality
+                                this.headers = link.headers
+                            }
+                        )
+                    }
+                }
+                if (found) return true
+            }
         }
         return resolveOne(server, referer, subtitleCallback, emit)
     }
@@ -621,7 +642,7 @@ class EgyDead : MainAPI() {
      * Resolves `https://<host>/iframe/<hash>` into the list of real embed URLs by reading
      * the Inertia page version and requesting the lazy `streams` prop.
      */
-    private suspend fun resolveStreamMirrors(iframeUrl: String): List<String> {
+    private suspend fun resolveStreamMirrors(iframeUrl: String): List<StreamMirror> {
         val page = try {
             app.get(iframeUrl, headers = buildHeaders(mainUrl), timeout = 30).text
         } catch (e: Throwable) {
@@ -655,18 +676,44 @@ class EgyDead : MainAPI() {
         return try {
             val streams = JSONObject(body).getJSONObject("props").getJSONObject("streams")
             val data = streams.optJSONArray("data") ?: return emptyList()
-            val out = mutableListOf<String>()
+            val out = mutableListOf<StreamMirror>()
+            val seen = mutableSetOf<String>()
             for (i in 0 until data.length()) {
-                val mirrors = data.getJSONObject(i).optJSONArray("mirrors") ?: continue
+                val group = data.getJSONObject(i)
+                val quality = qualityFromLabel(
+                    group.optString("quality").ifBlank { group.optString("label") }
+                )
+                val mirrors = group.optJSONArray("mirrors") ?: continue
                 for (j in 0 until mirrors.length()) {
-                    var link = mirrors.getJSONObject(j).optString("link").trim()
+                    val mirror = mirrors.getJSONObject(j)
+                    var link = mirror.optString("link").trim()
                     if (link.startsWith("//")) link = "https:$link"
-                    if (link.startsWith("http")) out.add(link)
+                    if (!link.startsWith("http")) continue
+                    val driver = mirror.optString("driver").trim().ifBlank { "Source" }
+                    if (seen.add("$driver|$link")) out.add(StreamMirror(link, driver, quality))
                 }
             }
-            out.distinct()
+            out
         } catch (e: Throwable) {
             emptyList()
+        }
+    }
+
+    /** A single watch mirror plus the player's driver label and quality group. */
+    private data class StreamMirror(val url: String, val driver: String, val quality: Int)
+
+    private fun qualityFromLabel(label: String): Int {
+        val height = Regex("""(\d{3,4})""").find(label)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+        return when {
+            height >= 2160 -> Qualities.P2160.value
+            height >= 1440 -> Qualities.P1440.value
+            height >= 1080 -> Qualities.P1080.value
+            height >= 720 -> Qualities.P720.value
+            height >= 480 -> Qualities.P480.value
+            height >= 360 -> Qualities.P360.value
+            height >= 240 -> Qualities.P240.value
+            height >= 144 -> Qualities.P144.value
+            else -> Qualities.Unknown.value
         }
     }
 
