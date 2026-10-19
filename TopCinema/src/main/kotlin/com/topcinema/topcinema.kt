@@ -9,14 +9,31 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
 class TopCinema : MainAPI() {
-    override var mainUrl = "https://web2.topcinema.io"
+    // The entry domain 301-redirects to the current live domain; we resolve it at
+    // runtime exactly like a browser would, instead of hardcoding the new domain.
+    private val redirectUrl = "https://web2.topcinema.io"
+    override var mainUrl = redirectUrl
     override var name = "توب سينما (TopCinema)"
     override var lang = "ar"
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime)
     override val hasDownloadSupport = true
 
-    private val ajaxBase = "$mainUrl/wp-content/themes/movies2023/Ajaxat"
+    private var baseResolved = false
+
+    /** Follows the browser-style redirect once and pins [mainUrl] to the live domain. */
+    private suspend fun resolveBase() {
+        if (baseResolved) return
+        baseResolved = true
+        try {
+            val finalUrl = app.get(mainUrl).url
+            Regex("^(https?://[^/]+)").find(finalUrl)?.value?.let { mainUrl = it }
+        } catch (_: Throwable) {
+            // keep the redirecting domain as a fallback
+        }
+    }
+
+    private fun ajaxBase() = "$mainUrl/wp-content/themes/movies2023/Ajaxat"
 
     override val mainPage = mainPageOf(
         "$mainUrl/recent/" to "المضاف حديثاً",
@@ -76,7 +93,9 @@ class TopCinema : MainAPI() {
     // ------------------------------------------------------------------ paging
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val url = if (page <= 1) request.data else "${request.data}page/$page/"
+        resolveBase()
+        val target = request.data.replace(redirectUrl, mainUrl)
+        val url = if (page <= 1) target else "${target}page/$page/"
         val response = app.get(url, referer = mainUrl)
         if (!response.isSuccessful) return newHomePageResponse(request.name, emptyList(), false)
         val items = cards(response.document)
@@ -84,8 +103,9 @@ class TopCinema : MainAPI() {
     }
 
     override suspend fun search(query: String, page: Int): SearchResponseList? {
+        resolveBase()
         val doc = app.post(
-            "$ajaxBase/Searching.php",
+            "${ajaxBase()}/Searching.php",
             data = mapOf("search" to query, "type" to "all"),
             headers = mapOf("X-Requested-With" to "XMLHttpRequest"),
             referer = mainUrl
@@ -156,6 +176,7 @@ class TopCinema : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse {
+        resolveBase()
         val doc = app.get(url, referer = mainUrl).document
         val showUrl = resolveShowUrl(doc, url)
         val showDoc = if (showUrl != url) try {
@@ -270,7 +291,7 @@ class TopCinema : MainAPI() {
     private suspend fun embedUrl(id: String, index: String, referer: String): String? {
         val body = try {
             app.post(
-                "$ajaxBase/Single/Server.php",
+                "${ajaxBase()}/Single/Server.php",
                 data = mapOf("id" to id, "i" to index),
                 headers = mapOf(
                     "X-Requested-With" to "XMLHttpRequest",
@@ -342,6 +363,7 @@ class TopCinema : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        resolveBase()
         var found = false
 
         val watchUrl = if (data.endsWith("/")) "${data}watch/" else "$data/watch/"
