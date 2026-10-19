@@ -2,7 +2,7 @@
   <img src="https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQuLPPUaQuuMZ7EKxywIyWZ8O6vej4dcfL-9pR0-4JccA&s=10" alt="الوجهة العربية (Mehdi GM)" width="96" />
 </p>
 
-<h1 align="center">📺 الوجهة العربية (Mehdi GM)</h1>
+<h3 align="center">الوجهة العربية (Mehdi GM)</h3>
 
 <p align="center">
   <b>مستودع الإضافات العربية لتطبيق CloudStream3</b>
