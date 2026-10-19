@@ -21,7 +21,9 @@ class EgyDeadPlugin : Plugin() {
         registerExtractorAPI(EgyDeadStreamRubyNet())
         registerExtractorAPI(EgyDeadStreamRubyVip())
 
-        // Hosts whose built-ins are stale (new API shape / mirror domain).
+        // Hosts whose built-ins are stale (new API shape / mirror domain) or that
+        // must be guaranteed regardless of built-in changes.
+        registerExtractorAPI(EgyDeadVidmoly())
         registerExtractorAPI(EgyDeadUqload())
         registerExtractorAPI(EgyDeadVidara())
         registerExtractorAPI(EgyDeadByse())

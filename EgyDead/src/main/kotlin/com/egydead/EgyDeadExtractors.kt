@@ -209,6 +209,18 @@ class EgyDeadStreamRubyVip : EgyDeadPackerExtractor() {
     override var mainUrl = "https://rubyvidhub.com"
 }
 
+// -------------------------------------------------------------------- Vidmoly
+
+/**
+ * `vidmoly.biz` — the embed page ships `sources: [{ file: '…/master.m3u8?…' }]`
+ * inside a script. Handled by the shared packer/`file:` resolver so it does not
+ * depend on the built-in `Vidmoly` extractor staying in sync.
+ */
+class EgyDeadVidmoly : EgyDeadPackerExtractor() {
+    override var name = "Vidmoly"
+    override var mainUrl = "https://vidmoly.biz"
+}
+
 // ---------------------------------------------------------------- Reuse built-ins
 
 /** `uqload.vc` — the driver the EgyDead player returns (built-ins only ship other TLDs). */
