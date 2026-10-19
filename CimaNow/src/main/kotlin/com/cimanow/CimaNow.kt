@@ -377,10 +377,13 @@ class CimaNow : MainAPI() {
      * and capture the tokenized URL it lands on.
      */
     private suspend fun resolveWatchToken(shineUrl: String): String? = runCatching {
+        // IMPORTANT: userAgent must stay null (WebView's own UA) and useOkhttp=false, otherwise
+        // the gate's Cloudflare returns an error page (see WebViewResolver docs).
         val resolver = WebViewResolver(
             interceptUrl = Regex("""cimanow\.cc/.*watching/"""),
+            userAgent = null,
             useOkhttp = false,
-            timeout = 60_000L
+            timeout = 90_000L
         )
         resolver.resolveUsingWebView(shineUrl, referer = "$mainUrl/").first?.url?.toString()
     }.getOrNull()
