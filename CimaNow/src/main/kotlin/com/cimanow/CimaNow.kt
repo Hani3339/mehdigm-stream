@@ -336,24 +336,40 @@ class CimaNow : MainAPI() {
     ) {
         doc.select("iframe[src], iframe[data-src]").forEach { frame ->
             val src = frame.attr("src").ifBlank { frame.attr("data-src") }.trim()
-            if (src.startsWith("http") && !isTrailer(src)) players.add(src)
+            if (src.startsWith("http") && !isTrailer(src) && !players.contains(src)) players.add(src)
         }
         doc.select("[data-embed]").forEach { el ->
             val src = Regex("""src\s*=\s*['"]([^'"]+)['"]""").find(el.attr("data-embed"))
                 ?.groupValues?.get(1)?.trim()
-            if (!src.isNullOrBlank() && src.startsWith("http") && !isTrailer(src)) players.add(src)
+            if (!src.isNullOrBlank() && src.startsWith("http") && !isTrailer(src) && !players.contains(src)) players.add(src)
+        }
+        // From HAR decoded page we see #watch li[data-index] and also direct links
+        doc.select("#watch li, ul#watch li, .servers li").forEach { li ->
+            val a = li.selectFirst("a[href]") ?: return@forEach
+            val href = a.attr("href").trim()
+            if (!href.startsWith("http") || isTrailer(href)) return@forEach
+            val label = a.selectFirst("p")?.text()?.trim().orEmpty().ifBlank { a.text().trim() }
+            if (isDownload(href)) downloads[href] = label else if (!players.contains(href)) players.add(href)
+        }
+        doc.select("li[aria-label='quality'] a[href], li[aria-label=download] a[href], .btns a[href]").forEach { a ->
+            val href = a.attr("href").trim()
+            if (!href.startsWith("http") || isTrailer(href)) return@forEach
+            val label = a.selectFirst("p")?.text()?.trim().orEmpty().ifBlank { a.text().trim() }
+            if (isDownload(href)) downloads[href] = label else if (!players.contains(href)) players.add(href)
         }
         doc.select(
-            "ul#watch li a[href], li[aria-label='quality'] a[href], " +
-                "ul#download li[aria-label='download'] a[href], li[aria-label='download'] a[href], " +
-                "a[href*=cimanowtv], a[href*=filespayouts], a[href*=worldcdn], " +
+            "a[href*=cimanowtv], a[href*=filespayouts], a[href*=worldcdn], " +
                 "a[href*=mediafire], a[href*=mega.nz], a[href*=forafile], a[href*=upns], " +
-                "a[href*=bysetayico], a[href*=streamhls]"
+                "a[href*=bysetayico], a[href*=streamhls], a[href*=jetload], a[href*=frdl], a[href*=vk.com]"
         ).forEach { a ->
             val href = a.attr("href").trim()
             if (!href.startsWith("http") || isTrailer(href)) return@forEach
             val label = a.selectFirst("p")?.text()?.trim().orEmpty().ifBlank { a.text().trim() }
-            if (isDownload(href)) downloads[href] = label else players.add(href)
+            if (isDownload(href) || label.contains("جيجا") || label.contains("ميجا")) {
+                downloads[href] = label
+            } else {
+                if (!players.contains(href)) players.add(href)
+            }
         }
     }
 
