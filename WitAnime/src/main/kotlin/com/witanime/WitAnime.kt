@@ -210,30 +210,63 @@ class WitAnime : MainAPI() {
         val cookies = page.cookies
 
         val sourcesUrl = "$watchUrl/sources"
-        val sourceHeaders = apiRequestHeaders(csrf, watchUrl)
+
+        // The site's front-end issues a bare `fetch(sourcesUrl,{method:'POST',
+        // headers:{Accept, X-CSRF-TOKEN}})` with no body. Some HTTP stacks/WAFs
+        // behave differently, so try the faithful shape first, then progressively
+        // more browser-like shapes, and fall back to GET.
+        val minimalHeaders = mapOf(
+            "Accept" to "application/json",
+            "X-CSRF-TOKEN" to csrf,
+        )
+        val fullHeaders = apiRequestHeaders(csrf, watchUrl)
 
         var body: String? = null
+
+        fun accept(tag: String, code: Int, text: String) {
+            println("[WitAnime] sources $tag code=$code body=${text.take(300)}")
+            if (body == null && code in 200..299 && text.trimStart().startsWith("{")) body = text
+        }
+
         try {
-            val resp = app.post(
+            val r = app.post(sourcesUrl, headers = minimalHeaders, cookies = cookies)
+            accept("POST-min", r.code, r.text)
+        } catch (e: Exception) {
+            println("[WitAnime] sources POST-min failed: ${e.message}")
+        }
+        if (body == null) try {
+            val r = app.post(
                 sourcesUrl,
-                headers = sourceHeaders,
+                headers = minimalHeaders,
                 cookies = cookies,
                 json = emptyMap<String, String>()
             )
-            println("[WitAnime] sources POST code=${resp.code} body=${resp.text.take(300)}")
-            if (resp.code in 200..299) body = resp.text
+            accept("POST-min-json", r.code, r.text)
         } catch (e: Exception) {
-            println("[WitAnime] sources POST failed: ${e.message}")
+            println("[WitAnime] sources POST-min-json failed: ${e.message}")
         }
-        if (body == null) {
-            // Some deployments expose the manifest as GET instead of POST.
-            try {
-                val resp = app.get(sourcesUrl, headers = sourceHeaders, cookies = cookies)
-                println("[WitAnime] sources GET code=${resp.code} body=${resp.text.take(300)}")
-                if (resp.code in 200..299) body = resp.text
-            } catch (e: Exception) {
-                println("[WitAnime] sources GET failed: ${e.message}")
-            }
+        if (body == null) try {
+            val r = app.post(sourcesUrl, headers = fullHeaders, cookies = cookies)
+            accept("POST-full", r.code, r.text)
+        } catch (e: Exception) {
+            println("[WitAnime] sources POST-full failed: ${e.message}")
+        }
+        if (body == null) try {
+            val r = app.post(
+                sourcesUrl,
+                headers = fullHeaders,
+                cookies = cookies,
+                json = emptyMap<String, String>()
+            )
+            accept("POST-full-json", r.code, r.text)
+        } catch (e: Exception) {
+            println("[WitAnime] sources POST-full-json failed: ${e.message}")
+        }
+        if (body == null) try {
+            val r = app.get(sourcesUrl, headers = fullHeaders, cookies = cookies)
+            accept("GET", r.code, r.text)
+        } catch (e: Exception) {
+            println("[WitAnime] sources GET failed: ${e.message}")
         }
         if (body == null) return false
         val finalBody = body
