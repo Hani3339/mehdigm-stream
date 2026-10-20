@@ -22,7 +22,6 @@ import com.lagradost.cloudstream3.newMovieLoadResponse
 import com.lagradost.cloudstream3.newMovieSearchResponse
 import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.INFER_TYPE
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
@@ -282,7 +281,10 @@ class WitAnime(private val context: android.content.Context) : MainAPI() {
             }
         }
 
-        // Downloads are surfaced as extra links as a best-effort fallback.
+        // Downloads are surfaced as extra links. The download gate 302s to the
+        // real file host, which we then feed through the extractor pipeline —
+        // never emit the gate URL itself (it is not playable, which is what
+        // made every download "link" fail with ERROR_CODE_IO_BAD_HTTP_STATUS).
         val downloads = root.optJSONObject("downloads")
         if (downloads != null && !found) {
             for (quality in downloads.keys()) {
@@ -290,17 +292,27 @@ class WitAnime(private val context: android.content.Context) : MainAPI() {
                 for (i in 0 until list.length()) {
                     val entry = list.optJSONObject(i) ?: continue
                     val token = entry.optString("token").ifBlank { continue }
+                    val label = entry.optString("label").ifBlank { null }
                     val qualityValue = parseQuality(quality)
-                    val resolved = resolveDownload(token, watchUrl, cookies)
-                    if (resolved != null) {
+                    val host = resolveDownload(token, watchUrl, cookies) ?: continue
+                    val display = if (label == null) "$name تحميل $quality" else "$name تحميل $quality - $label"
+                    val resolved = mutableListOf<ExtractorLink>()
+                    try {
+                        loadExtractor(host, watchUrl, subtitleCallback) { resolved.add(it) }
+                    } catch (e: Exception) {
+                        println("[WitAnime] download loadExtractor($host) failed: ${e.message}")
+                    }
+                    if (resolved.isEmpty()) continue
+                    resolved.forEach { link ->
                         callback.invoke(
                             newExtractorLink(
                                 source = this.name,
-                                name = "${this.name} تحميل $quality",
-                                url = resolved,
-                                type = INFER_TYPE
+                                name = display,
+                                url = link.url,
+                                type = link.type
                             ) {
-                                this.referer = watchUrl
+                                this.referer = link.referer
+                                this.headers = link.headers
                                 this.quality = qualityValue
                             }
                         )
@@ -401,6 +413,13 @@ class WitAnime(private val context: android.content.Context) : MainAPI() {
         diagStreamSource(token, watchUrl, cookies)
 
         candidates.forEach { candidate ->
+            // MEGA serves an AES-encrypted blob / HTML embed that ExoPlayer cannot
+            // play from a plain URL, and no extractor matches it, so skip it rather
+            // than emit a link that always fails.
+            if (candidate.contains("mega.nz") || candidate.contains("mega.co.nz")) {
+                println("[WitAnime] skipping MEGA candidate $candidate")
+                return@forEach
+            }
             try {
                 loadExtractor(candidate, candidate, subtitleCallback) { resolved.add(it) }
             } catch (e: Exception) {
@@ -417,8 +436,8 @@ class WitAnime(private val context: android.content.Context) : MainAPI() {
                     type = link.type
                 ) {
                     // Prefer the embed's referer (required by mp4upload/videa/4shared),
-                    // fall back to the candidate embed URL.
-                    this.referer = link.referer ?: candidateReferer(link)
+                    // fall back to the WitAnime watch page.
+                    this.referer = link.referer ?: watchUrl
                     this.headers = link.headers
                     this.quality = qualityValue
                 }
@@ -427,26 +446,36 @@ class WitAnime(private val context: android.content.Context) : MainAPI() {
         return resolved.isNotEmpty()
     }
 
-    private fun candidateReferer(link: ExtractorLink): String {
-        val url = link.url
-        return when {
-            url.contains("mp4upload.com") -> "https://www.mp4upload.com/"
-            url.contains("videa.hu") -> "https://videa.hu/"
-            url.contains("4shared.com") -> "https://www.4shared.com/"
-            url.contains("hgcloud.to") || url.contains("hgcloud") -> "https://hgcloud.to/"
-            url.contains("streamtape") -> "https://streamtape.com/"
-            url.contains("dood") -> "https://dood.to/"
-            url.contains("mixdrop") -> "https://mixdrop.co/"
-            else -> "https://witanime.site/"
-        }
-    }
-
+    /**
+     * Resolves `GET /watch/download-gate/<token>` to the real file-host URL.
+     * The gate is a same-origin 302; read its `Location` without following so the
+     * host can be fed to `loadExtractor`. Returns `null` (never the gate URL)
+     * when it cannot be resolved.
+     */
     private suspend fun resolveDownload(
         token: String,
         watchUrl: String,
         cookies: Map<String, String>
     ): String? {
-        return "$mainUrl/watch/download-gate/$token"
+        val gate = "$mainUrl/watch/download-gate/$token"
+        return try {
+            val r = app.get(
+                gate,
+                headers = mapOf(
+                    "User-Agent" to browserUa,
+                    "Referer" to watchUrl,
+                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                ),
+                cookies = cookies,
+                allowRedirects = false,
+                interceptor = cfInterceptor
+            )
+            val loc = r.headers["Location"] ?: r.headers["location"]
+            if (!loc.isNullOrBlank()) loc else null
+        } catch (e: Exception) {
+            println("[WitAnime] download-gate $token failed: ${e.message}")
+            null
+        }
     }
 
     private fun parseQuality(raw: String?): Int = when (raw?.trim()?.uppercase()) {
