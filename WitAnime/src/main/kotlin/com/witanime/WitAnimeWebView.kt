@@ -49,7 +49,7 @@ object WitAnimeWebView {
         watchUrl: String,
         cookies: Map<String, String>,
         userAgent: String,
-        timeoutMs: Long = 35_000L
+        timeoutMs: Long = 55_000L
     ): Result = withContext(Dispatchers.Main) {
         suspendCancellableCoroutine { cont ->
             var finished = false
@@ -148,7 +148,12 @@ object WitAnimeWebView {
                 }
             }, BRIDGE)
 
-            view.webChromeClient = WebChromeClient()
+            view.webChromeClient = object : WebChromeClient() {
+                override fun onConsoleMessage(msg: android.webkit.ConsoleMessage?): Boolean {
+                    println("[WitAnime][WebView][console] ${msg?.message()}")
+                    return true
+                }
+            }
 
             val injectedJs = """
                 (function() {
@@ -204,21 +209,48 @@ object WitAnimeWebView {
                     }
 
                     var tries = 0;
+                    var announced = false;
                     var iv = setInterval(function() {
                         tries++;
-                        if (document.querySelector('meta[name=csrf-token]') && tries > 6) {
+                        if (!announced) {
+                            announced = true;
+                            log('title="' + document.title + '" url=' + location.href);
+                        }
+                        var csrf = document.querySelector('meta[name=csrf-token]');
+                        if (csrf && tries > 6) {
                             clearInterval(iv);
                             run();
                         }
-                        if (tries > 80) { clearInterval(iv); fail('csrf not found'); }
+                        if (tries === 20 || tries === 40 || tries === 60) {
+                            log('waiting t=' + tries + ' title="' + document.title + '" csrf=' + (!!csrf));
+                        }
+                        if (tries > 100) { clearInterval(iv); fail('csrf not found: title=' + document.title); }
                     }, 500);
                 })();
             """.trimIndent()
 
             view.webViewClient = object : WebViewClient() {
+                override fun onPageStarted(v: WebView?, url: String?, favicon: Bitmap?) {
+                    super.onPageStarted(v, url, favicon)
+                    println("[WitAnime][WebView] onPageStarted $url")
+                    runCatching { v?.evaluateJavascript(injectedJs, null) }
+                }
+
                 override fun onPageFinished(v: WebView?, url: String?) {
                     super.onPageFinished(v, url)
+                    println("[WitAnime][WebView] onPageFinished $url")
                     runCatching { v?.evaluateJavascript(injectedJs, null) }
+                }
+
+                override fun onReceivedError(
+                    v: WebView?,
+                    request: WebResourceRequest?,
+                    error: android.webkit.WebResourceError?
+                ) {
+                    super.onReceivedError(v, request, error)
+                    if (request?.isForMainFrame == true) {
+                        println("[WitAnime][WebView] onReceivedError ${error?.description} ${request.url}")
+                    }
                 }
 
                 override fun shouldInterceptRequest(
