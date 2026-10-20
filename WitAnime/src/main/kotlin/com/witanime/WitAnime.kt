@@ -20,11 +20,13 @@ import com.lagradost.cloudstream3.newEpisode
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newMovieLoadResponse
 import com.lagradost.cloudstream3.newMovieSearchResponse
+import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.INFER_TYPE
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import okhttp3.Interceptor
 import org.json.JSONObject
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
@@ -63,6 +65,11 @@ class WitAnime : MainAPI() {
     private val pageHeaders = mapOf(
         "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     )
+
+    // Solves the Cloudflare challenge in a hidden WebView and reuses the cleared
+    // cookies. Must be used sequentially (shared WebView cookie store).
+    private val cloudflareKiller by lazy { CloudflareKiller() }
+    private val cfInterceptor: Interceptor get() = cloudflareKiller
 
     private val browserUa =
         "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 " +
@@ -193,7 +200,8 @@ class WitAnime : MainAPI() {
                 headers = pageHeaders + mapOf(
                     "User-Agent" to browserUa,
                     "Accept-Language" to "ar,en-US;q=0.9,en;q=0.8",
-                )
+                ),
+                interceptor = cfInterceptor
             )
         } catch (e: Exception) {
             println("[WitAnime] watch page GET failed: ${e.message}")
@@ -212,9 +220,7 @@ class WitAnime : MainAPI() {
         val sourcesUrl = "$watchUrl/sources"
 
         // The site's front-end issues a bare `fetch(sourcesUrl,{method:'POST',
-        // headers:{Accept, X-CSRF-TOKEN}})` with no body. Some HTTP stacks/WAFs
-        // behave differently, so try the faithful shape first, then progressively
-        // more browser-like shapes, and fall back to GET.
+        // headers:{Accept, X-CSRF-TOKEN}})` with no body.
         val minimalHeaders = mapOf(
             "Accept" to "application/json",
             "X-CSRF-TOKEN" to csrf,
@@ -229,7 +235,12 @@ class WitAnime : MainAPI() {
         }
 
         try {
-            val r = app.post(sourcesUrl, headers = minimalHeaders, cookies = cookies)
+            val r = app.post(
+                sourcesUrl,
+                headers = minimalHeaders,
+                cookies = cookies,
+                interceptor = cfInterceptor
+            )
             accept("POST-min", r.code, r.text)
         } catch (e: Exception) {
             println("[WitAnime] sources POST-min failed: ${e.message}")
@@ -237,33 +248,21 @@ class WitAnime : MainAPI() {
         if (body == null) try {
             val r = app.post(
                 sourcesUrl,
-                headers = minimalHeaders,
+                headers = fullHeaders,
                 cookies = cookies,
-                json = emptyMap<String, String>()
+                interceptor = cfInterceptor
             )
-            accept("POST-min-json", r.code, r.text)
-        } catch (e: Exception) {
-            println("[WitAnime] sources POST-min-json failed: ${e.message}")
-        }
-        if (body == null) try {
-            val r = app.post(sourcesUrl, headers = fullHeaders, cookies = cookies)
             accept("POST-full", r.code, r.text)
         } catch (e: Exception) {
             println("[WitAnime] sources POST-full failed: ${e.message}")
         }
         if (body == null) try {
-            val r = app.post(
+            val r = app.get(
                 sourcesUrl,
                 headers = fullHeaders,
                 cookies = cookies,
-                json = emptyMap<String, String>()
+                interceptor = cfInterceptor
             )
-            accept("POST-full-json", r.code, r.text)
-        } catch (e: Exception) {
-            println("[WitAnime] sources POST-full-json failed: ${e.message}")
-        }
-        if (body == null) try {
-            val r = app.get(sourcesUrl, headers = fullHeaders, cookies = cookies)
             accept("GET", r.code, r.text)
         } catch (e: Exception) {
             println("[WitAnime] sources GET failed: ${e.message}")
@@ -343,7 +342,7 @@ class WitAnime : MainAPI() {
                 "$mainUrl/watch/stream-source/$token",
                 headers = apiRequestHeaders(csrf, watchUrl),
                 cookies = cookies,
-                json = emptyMap<String, String>()
+                interceptor = cfInterceptor
             )
             println("[WitAnime] stream-source $token code=${resp.code} body=${resp.text.take(200)}")
         } catch (e: Exception) {
@@ -359,7 +358,13 @@ class WitAnime : MainAPI() {
         // iframes, direct media) through the extractor pipeline.
         val candidates = linkedSetOf<String>()
         try {
-            val gateResp = app.get(gate, headers = pageHeaders, cookies = cookies, referer = watchUrl)
+            val gateResp = app.get(
+                gate,
+                headers = pageHeaders,
+                cookies = cookies,
+                referer = watchUrl,
+                interceptor = cfInterceptor
+            )
             println("[WitAnime] gate code=${gateResp.code} final=${gateResp.url} len=${gateResp.text.length}")
             val finalUrl = gateResp.url
             if (finalUrl.isNotBlank() && finalUrl != gate) candidates.add(finalUrl)
@@ -413,7 +418,7 @@ class WitAnime : MainAPI() {
                 "$mainUrl/watch/download-source/$token",
                 headers = apiRequestHeaders(csrf, watchUrl),
                 cookies = cookies,
-                json = emptyMap<String, String>()
+                interceptor = cfInterceptor
             )
         } catch (_: Exception) {
         }
