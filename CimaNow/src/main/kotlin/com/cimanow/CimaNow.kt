@@ -395,19 +395,18 @@ class CimaNow : MainAPI() {
             .getOrNull()
 
         return try {
-            // Step 1: loadon page -> href.li -> redirectingfree -> blog-post.html
+            // `loadon` -> `https://href.li/?https://rm.freex2line.online/redirectingfree/`.
+            // `href.li` is a plain redirector that 403s non-browser clients, so unwrap it and go
+            // straight to the real target.
             val loadon = fetch(shineUrl, "$mainUrl/") ?: return null
             val next1 = extractRedirect(loadon) ?: run {
                 println("[CimaNow] gate: no redirect in loadon (len=${loadon.length})")
                 return null
             }
-            val href = if (next1.contains("href.li")) next1 else "https://href.li/?$next1"
-            val hrefPage = fetch(href, "$mainUrl/") ?: return null
-            val next2 = extractRedirect(hrefPage) ?: next1
-            val redirectFree = if (next2.contains("href.li")) (extractRedirect(next2) ?: next2) else next2
-            val redirectPage = fetch(redirectFree, null) ?: return null
+            val redirectFree = unwrapHrefLi(next1)
+            val redirectPage = fetch(redirectFree, "$mainUrl/") ?: return null
             val next3 = extractRedirect(redirectPage)
-            val blogUrl = (next3 ?: redirectFree).trimEnd('/') + "/"
+            val blogUrl = unwrapHrefLi(next3 ?: redirectFree).trimEnd('/') + "/"
             val blogBase = blogUrl.substringBeforeLast("/") // .../example.com/2020/02
             val blog = fetch(blogUrl, redirectFree) ?: return null
             val gate = solveGateToken(blog) ?: run {
@@ -484,6 +483,14 @@ class CimaNow : MainAPI() {
         Regex("""location\.(?:href|replace)\s*=\s*['"]([^'"]+)['"]""").find(html)?.groupValues?.get(1)
             ?: Regex("""url=([^"' >]+)""").find(html)?.groupValues?.get(1)
             ?: Regex("""content="0;\s*url=([^"]+)""", RegexOption.IGNORE_CASE).find(html)?.groupValues?.get(1)
+
+    /** `https://href.li/?<target>` -> `<target>`; anything else is returned as-is. */
+    private fun unwrapHrefLi(url: String): String {
+        val idx = url.indexOf("href.li/?")
+        if (idx < 0) return url
+        val target = url.substring(idx + "href.li/?".length)
+        return if (target.startsWith("http")) target else url
+    }
 
     private val watchProfiles = listOf(
         mapOf(
