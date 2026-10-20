@@ -528,45 +528,60 @@ class CimaNow : MainAPI() {
 
     /** Reproduces the gate's HMAC token from the decoded `blog-post.html` payload. */
     private fun solveGateToken(blog: String): GateToken? {
-        println(
-            "[CimaNow] gate blog: tkfetpf=${blog.contains("TKFetpf")} cfg=${blog.contains("_0x_cfg")} " +
-                "v_41e5=${blog.contains("v_41e5")} ctx=${blog.contains("ctx_")} " +
-                "getlink=${blog.contains("get-link")} len=${blog.length}"
-        )
-        // The payload is split into base64 chunks inside `window["TKFetpf"] = [ "...", ... ]`.
-        val arrMatch = Regex("""window\[["']TKFetpf["']\]\s*=\s*\[(.*?)\];""", RegexOption.DOT_MATCHES_ALL)
-            .find(blog)
-        if (arrMatch == null) {
-            println("[CimaNow] gate blog: no TKFetpf array; head=${blog.take(400).replace("\n", " ")}")
+        println("[CimaNow] gate blog: ctx=${blog.contains("ctx_")} map=${blog.contains("map_")} len=${blog.length}")
+        // The gate page may either expose the config directly (randomized `ctx_XXXX`/`map_XXXX`
+        // names + a random base64-chunk array) or hide it behind a `TKFetpf` XOR layer. Try the
+        // direct parse first, then fall back to decoding the chunk array.
+        parseGateConfig(blog)?.let { return it }
+        val payload = extractPayload(blog) ?: run {
+            println("[CimaNow] gate blog: no payload array; head=${blog.take(400).replace("\n", " ")}")
             return null
         }
-        val chunks = Regex(""""([^"]*)"""").findAll(arrMatch.groupValues[1]).map { it.groupValues[1] }.toList()
-        if (chunks.isEmpty()) return null
-        val payload = decodeBase64(chunks.joinToString("")) ?: return null
-        println("[CimaNow] gate payload len=${payload.size} head=${String(payload.copyOfRange(0, minOf(40, payload.size)), Charsets.ISO_8859_1)}")
-        // The gate XORs the payload with a key derived from DOM measurements; on this fixed
-        // layout it is constant ("21686"). Try a small range as a safety net.
-        val page = gateDecodePayload(payload)
-        if (page == null) {
+        println("[CimaNow] gate payload len=${payload.size}")
+        val page = gateDecodePayload(payload) ?: run {
             println("[CimaNow] gate: no key decoded payload head=${String(payload.copyOfRange(0, minOf(120, payload.size)), Charsets.ISO_8859_1)}")
             return null
         }
         println("[CimaNow] gate decoded page head=${page.take(400).replace("\n", " ")}")
-        val requestId = findJsonish(page, "v_41e5") ?: Regex("""request_id['"]?\s*[:=]\s*['"]([0-9a-f]{16,})['"]""")
-            .find(page)?.groupValues?.get(1)
-        val ch = findJsonish(page, "v_9e00")
-        val ke = findJsonish(page, "v_a0e5")
-        val se = findJsonish(page, "v_de1d")
-        if (requestId.isNullOrBlank() || ch.isNullOrBlank() || ke.isNullOrBlank() || se.isNullOrBlank()) {
-            return null
-        }
+        return parseGateConfig(page)
+    }
+
+    /**
+     * Parses `window['ctx_XXXX'] = { v_a: '..', ... }` using the `window.map_YYYY =
+     * { ch:'v_a', ri:'v_b', ke:'v_c', se:'v_d' }` indirection (names are randomized per request).
+     */
+    private fun parseGateConfig(page: String): GateToken? {
+        val mapMatch = Regex("""\{[^{}]*\b(ch|ri|ke|se)\s*:[^{}]*\}""").findAll(page)
+            .firstOrNull { it.value.contains("ch") && it.value.contains("ri") && it.value.contains("ke") }
+            ?: return null
+        val map = mapMatch.value
+        fun ref(key: String): String? =
+            Regex("""['"]?""" + key + """['"]?\s*:\s*['"](v_[0-9a-f]+)['"]""").find(map)?.groupValues?.get(1)
+        val chRef = ref("ch") ?: return null
+        val riRef = ref("ri") ?: return null
+        val keRef = ref("ke") ?: return null
+        val seRef = ref("se") ?: return null
+        val ch = findJsonish(page, chRef) ?: return null
+        val requestId = findJsonish(page, riRef) ?: return null
+        val ke = findJsonish(page, keRef) ?: return null
+        val se = findJsonish(page, seRef) ?: return null
         val keyBytes = xorRepeating(decodeBase64(ke) ?: return null, se.toByteArray(Charsets.ISO_8859_1))
         val key = String(keyBytes, Charsets.ISO_8859_1)
         val msg = (requestId + ch + CN_GATE_FP).toByteArray(Charsets.ISO_8859_1)
         val mac = javax.crypto.Mac.getInstance("HmacSHA256")
         mac.init(javax.crypto.spec.SecretKeySpec(key.toByteArray(Charsets.ISO_8859_1), "HmacSHA256"))
         val hmacToken = encodeBase64(mac.doFinal(msg)) ?: return null
+        println("[CimaNow] gate config: requestId=$requestId ch=$ch")
         return GateToken(requestId, ch, hmacToken)
+    }
+
+    /** Finds the random `window["NAME"] = [ "base64", ... ]` chunk array and joins it. */
+    private fun extractPayload(blog: String): ByteArray? {
+        val arrMatch = Regex("""window\[["'][A-Za-z0-9_]+["']\]\s*=\s*\[(.*?)\];""", RegexOption.DOT_MATCHES_ALL)
+            .find(blog) ?: return null
+        val chunks = Regex(""""([^"]*)"""").findAll(arrMatch.groupValues[1]).map { it.groupValues[1] }.toList()
+        if (chunks.isEmpty()) return null
+        return decodeBase64(chunks.joinToString(""))
     }
 
     private fun gateDecodePayload(payload: ByteArray): String? {
