@@ -61,10 +61,6 @@ class WitAnime(private val context: android.content.Context) : MainAPI() {
         TvType.Cartoon,
     )
 
-    private val pageHeaders = mapOf(
-        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    )
-
     // Solves the Cloudflare challenge in a hidden WebView and reuses the cleared
     // cookies. Must be used sequentially (shared WebView cookie store).
     private val cloudflareKiller by lazy { CloudflareKiller() }
@@ -73,6 +69,16 @@ class WitAnime(private val context: android.content.Context) : MainAPI() {
     private val browserUa =
         "Mozilla/5.0 (Linux; Android 14; M2006C3MG Build/UQ1A.240205.004) " +
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.7871.63 Mobile Safari/537.36"
+
+    private val pageHeaders = mapOf(
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language" to "en-US,en;q=0.9,ar-MA;q=0.8,ar;q=0.7",
+        "User-Agent" to browserUa,
+        "Sec-Fetch-Site" to "none",
+        "Sec-Fetch-Mode" to "navigate",
+        "Sec-Fetch-Dest" to "document",
+        "Upgrade-Insecure-Requests" to "1",
+    )
 
     private val xRequestedWith = "mark.via.gp"
 
@@ -99,7 +105,7 @@ class WitAnime(private val context: android.content.Context) : MainAPI() {
             "schedule" -> "$mainUrl/schedule"
             else -> mainUrl
         }
-        val document = app.get(url, headers = pageHeaders).document
+        val document = app.get(url, headers = pageHeaders, interceptor = cfInterceptor).document
         val items = document.parseCards()
         return newHomePageResponse(request, items, hasNext = items.isNotEmpty() && request.data != "schedule")
     }
@@ -110,13 +116,14 @@ class WitAnime(private val context: android.content.Context) : MainAPI() {
         val document = app.get(
             "$mainUrl/search",
             headers = pageHeaders,
-            params = mapOf("q" to query)
+            params = mapOf("q" to query),
+            interceptor = cfInterceptor
         ).document
         return document.parseCards()
     }
 
     override suspend fun load(url: String): LoadResponse {
-        val document = app.get(url, headers = pageHeaders).document
+        val document = app.get(url, headers = pageHeaders, interceptor = cfInterceptor).document
         val isMovie = url.contains("/movie/")
 
         val title = document.selectFirst("h1")?.text()?.trim()
@@ -325,33 +332,6 @@ class WitAnime(private val context: android.content.Context) : MainAPI() {
         return found
     }
 
-    private suspend fun diagStreamSource(
-        token: String,
-        watchUrl: String,
-        cookies: Map<String, String>
-    ) {
-        try {
-            val r = app.post(
-                "$mainUrl/watch/stream-source/$token",
-                headers = mapOf(
-                    "Accept" to "application/json",
-                    "X-Requested-With" to xRequestedWith,
-                    "User-Agent" to browserUa,
-                    "Referer" to watchUrl,
-                    "Origin" to mainUrl,
-                    "Sec-Fetch-Site" to "same-origin",
-                    "Sec-Fetch-Mode" to "cors",
-                    "Sec-Fetch-Dest" to "empty",
-                ),
-                cookies = cookies,
-                interceptor = cfInterceptor
-            )
-            println("[WitAnime] stream-source $token code=${r.code}")
-        } catch (e: Exception) {
-            println("[WitAnime] stream-source $token failed: ${e.message}")
-        }
-    }
-
     private suspend fun emitStream(
         token: String,
         quality: String,
@@ -375,42 +355,40 @@ class WitAnime(private val context: android.content.Context) : MainAPI() {
             println("[WitAnime] webGate $token -> $webGate")
             candidates.add(webGate)
         }
-        // The gate is a same-origin 302 whose `Location` is the real embed host
-        // (mega.nz/embed, mp4upload.com/embed, videa.hu/player, 4shared, ...).
-        // Read it without following so we can hand the exact URL to the extractor.
-        try {
-            val r = app.get(
-                gate,
-                headers = mapOf(
-                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-                    "X-Requested-With" to xRequestedWith,
-                    "User-Agent" to browserUa,
-                    "Referer" to watchUrl,
-                    "Accept-Language" to "en-US,en;q=0.9,ar-MA;q=0.8,ar;q=0.7",
-                    "Sec-Fetch-Site" to "same-origin",
-                    "Sec-Fetch-Mode" to "navigate",
-                    "Sec-Fetch-User" to "?1",
-                    "Sec-Fetch-Dest" to "iframe",
-                    "Upgrade-Insecure-Requests" to "1",
-                ),
-                cookies = cookies,
-                allowRedirects = false,
-                interceptor = cfInterceptor
-            )
-            val loc = r.headers["Location"] ?: r.headers["location"]
-            println("[WitAnime] gateHTTP $token code=${r.code} location=$loc")
-            if (!loc.isNullOrBlank()) candidates.add(loc)
-            if (r.url.isNotBlank() && r.url != gate) candidates.add(r.url)
-            Regex("""https?://[^"'\\\s]+\.(?:m3u8|mp4)[^"'\\\s]*""")
-                .findAll(r.text).forEach { candidates.add(it.value) }
-        } catch (e: Exception) {
-            println("[WitAnime] gateHTTP $token failed: ${e.message}")
+        // Only hit the site over OkHttp when the browser could not resolve the
+        // gate — extra requests to /watch/stream-gate worsen the site's 429 rate
+        // limiting, which is exactly what breaks this provider.
+        if (webGate.isNullOrBlank()) {
+            try {
+                val r = app.get(
+                    gate,
+                    headers = mapOf(
+                        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                        "X-Requested-With" to xRequestedWith,
+                        "User-Agent" to browserUa,
+                        "Referer" to watchUrl,
+                        "Accept-Language" to "en-US,en;q=0.9,ar-MA;q=0.8,ar;q=0.7",
+                        "Sec-Fetch-Site" to "same-origin",
+                        "Sec-Fetch-Mode" to "navigate",
+                        "Sec-Fetch-User" to "?1",
+                        "Sec-Fetch-Dest" to "iframe",
+                        "Upgrade-Insecure-Requests" to "1",
+                    ),
+                    cookies = cookies,
+                    allowRedirects = false,
+                    interceptor = cfInterceptor
+                )
+                val loc = r.headers["Location"] ?: r.headers["location"]
+                println("[WitAnime] gateHTTP $token code=${r.code} location=$loc")
+                if (!loc.isNullOrBlank()) candidates.add(loc)
+                if (r.url.isNotBlank() && r.url != gate) candidates.add(r.url)
+                Regex("""https?://[^"'\\\s]+\.(?:m3u8|mp4)[^"'\\\s]*""")
+                    .findAll(r.text).forEach { candidates.add(it.value) }
+            } catch (e: Exception) {
+                println("[WitAnime] gateHTTP $token failed: ${e.message}")
+            }
         }
         if (candidates.isEmpty()) candidates.add(gate)
-
-        // Best-effort: the page fires this after the gate 302 (it primes the
-        // session for the embed). Not required for extraction.
-        diagStreamSource(token, watchUrl, cookies)
 
         candidates.forEach { candidate ->
             // MEGA serves an AES-encrypted blob / HTML embed that ExoPlayer cannot

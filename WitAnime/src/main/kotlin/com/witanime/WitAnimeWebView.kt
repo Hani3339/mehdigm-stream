@@ -49,7 +49,7 @@ object WitAnimeWebView {
         watchUrl: String,
         cookies: Map<String, String>,
         userAgent: String,
-        timeoutMs: Long = 55_000L
+        timeoutMs: Long = 120_000L
     ): Result = withContext(Dispatchers.Main) {
         suspendCancellableCoroutine { cont ->
             var finished = false
@@ -157,6 +157,8 @@ object WitAnimeWebView {
 
             val injectedJs = """
                 (function() {
+                    if (window.__witanimeRunning) return;
+                    window.__witanimeRunning = true;
                     var B = $BRIDGE;
                     function log(m){ try { B.onProgress(String(m)); } catch(e){} }
                     function report(o){ B.onResult(JSON.stringify(o)); }
@@ -187,47 +189,59 @@ object WitAnimeWebView {
                             if (r.status < 200 || r.status >= 300) { fail('HTTP ' + r.status + ' ' + t.slice(0, 200)); return; }
                             var data = JSON.parse(t);
 
-                            // Report the sources immediately so loadLinks() never times
-                            // out waiting on gate resolution. Gates are streamed in a
-                            // separate message (onGates) as they resolve.
+                            // Report the sources immediately. Gates are resolved by
+                            // the Kotlin side (reading the 302 Location) so we do not
+                            // spend extra requests here, which only worsens the site's
+                            // aggressive rate limiting.
                             data.gates = {};
                             report(data);
-
-                            var tokens = [];
-                            Object.keys(data.players || {}).forEach(function(q){
-                                (data.players[q] || []).forEach(function(e){ if (e && e.token) tokens.push(e.token); });
-                            });
-                            Object.keys(data.downloads || {}).forEach(function(q){
-                                (data.downloads[q] || []).forEach(function(e){ if (e && e.token) tokens.push(e.token); });
-                            });
-                            tokens = tokens.filter(function(v, i, a){ return a.indexOf(v) === i; });
-                            log('resolving ' + tokens.length + ' gates');
-                            for (var i = 0; i < tokens.length; i++) {
-                                var tok = tokens[i];
-                                try {
-                                    await fetch('/watch/stream-gate/' + tok, { redirect: 'follow' });
-                                } catch (e) { log('gate ' + tok.slice(0,6) + ' failed: ' + e); }
-                            }
                         } catch (e) { fail(e && e.message ? e.message : 'unknown'); }
                     }
 
                     var tries = 0;
                     var announced = false;
+                    var reloadKey = '__witanimeReloads::' + location.pathname;
+                    var reloads = 0;
+                    try { reloads = parseInt(sessionStorage.getItem(reloadKey) || '0') || 0; } catch (e) {}
+                    var reloadPending = false;
                     var iv = setInterval(function() {
                         tries++;
                         if (!announced) {
                             announced = true;
                             log('title="' + document.title + '" url=' + location.href);
                         }
+                        var title = document.title || '';
+                        // The site answers bursts of requests with a 429 page
+                        // ("طلبات كثيرة جدًا" = too many requests). It has no CSRF
+                        // meta and no player, so reload after a backoff instead of
+                        // giving up. The count lives in sessionStorage so it
+                        // survives the reload (a page-local counter would reset).
+                        var rateLimited = /كثيرة|too many|429/i.test(title) ||
+                            (!document.querySelector('meta[name=csrf-token]') && /WitAnime/.test(title) && tries > 8);
+                        if (rateLimited && !reloadPending && reloads < 4) {
+                            reloadPending = true;
+                            reloads++;
+                            try { sessionStorage.setItem(reloadKey, String(reloads)); } catch (e) {}
+                            var wait = 4000 * reloads;
+                            log('rate-limited (title="' + title + '"), reload #' + reloads + ' in ' + wait + 'ms');
+                            setTimeout(function() {
+                                reloadPending = false;
+                                location.reload();
+                            }, wait);
+                            return;
+                        }
+                        if (document.querySelector('meta[name=csrf-token]')) {
+                            try { sessionStorage.removeItem(reloadKey); } catch (e) {}
+                        }
                         var csrf = document.querySelector('meta[name=csrf-token]');
-                        if (csrf && tries > 6) {
+                        if (csrf && tries > 4) {
                             clearInterval(iv);
                             run();
                         }
                         if (tries === 20 || tries === 40 || tries === 60) {
-                            log('waiting t=' + tries + ' title="' + document.title + '" csrf=' + (!!csrf));
+                            log('waiting t=' + tries + ' title="' + title + '" csrf=' + (!!csrf));
                         }
-                        if (tries > 100) { clearInterval(iv); fail('csrf not found: title=' + document.title); }
+                        if (tries > 100) { clearInterval(iv); fail('csrf not found: title=' + title); }
                     }, 500);
                 })();
             """.trimIndent()
