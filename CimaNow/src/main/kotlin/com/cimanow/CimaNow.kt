@@ -382,25 +382,39 @@ class CimaNow : MainAPI() {
      * HMAC key, then a POST to `get-link.php` returns the tokenized URL.
      */
     private suspend fun resolveWatchToken(shineUrl: String): String? {
-        return runCatching {
-            val gateHeaders = mapOf(
-                "User-Agent" to CN_MOBILE_UA,
-                "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language" to "ar,en;q=0.9"
-            )
+        val gateHeaders = mapOf(
+            "User-Agent" to CN_MOBILE_UA,
+            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language" to "ar,en;q=0.9"
+        )
+        suspend fun fetch(url: String, referer: String?): String? = runCatching {
+            val res = app.get(url, headers = gateHeaders, referer = referer)
+            println("[CimaNow] gate GET $url -> ${res.code} len=${res.text.length}")
+            res.text
+        }.onFailure { println("[CimaNow] gate GET $url FAILED: ${it.javaClass.simpleName}: ${it.message}") }
+            .getOrNull()
+
+        return try {
             // Step 1: loadon page -> href.li -> redirectingfree -> blog-post.html
-            val loadon = app.get(shineUrl, headers = gateHeaders, referer = "$mainUrl/").text
-            val next1 = extractRedirect(loadon) ?: return@runCatching null
+            val loadon = fetch(shineUrl, "$mainUrl/") ?: return null
+            val next1 = extractRedirect(loadon) ?: run {
+                println("[CimaNow] gate: no redirect in loadon (len=${loadon.length})")
+                return null
+            }
             val href = if (next1.contains("href.li")) next1 else "https://href.li/?$next1"
-            val hrefPage = app.get(href, headers = gateHeaders, referer = "$mainUrl/").text
+            val hrefPage = fetch(href, "$mainUrl/") ?: return null
             val next2 = extractRedirect(hrefPage) ?: next1
             val redirectFree = if (next2.contains("href.li")) (extractRedirect(next2) ?: next2) else next2
-            val redirectPage = app.get(redirectFree, headers = gateHeaders).text
+            val redirectPage = fetch(redirectFree, null) ?: return null
             val next3 = extractRedirect(redirectPage)
             val blogUrl = (next3 ?: redirectFree).trimEnd('/') + "/"
             val blogBase = blogUrl.substringBeforeLast("/") // .../example.com/2020/02
-            val blog = app.get(blogUrl, headers = gateHeaders, referer = redirectFree).text
-            val gate = solveGateToken(blog) ?: return@runCatching null
+            val blog = fetch(blogUrl, redirectFree) ?: return null
+            val gate = solveGateToken(blog) ?: run {
+                println("[CimaNow] gate: solveGateToken failed (blog len=${blog.length})")
+                return null
+            }
+            println("[CimaNow] gate: requestId=${gate.requestId} ch=${gate.ch} hmac=${gate.hmacToken}")
             val post = app.post(
                 "$blogBase/get-link.php",
                 data = mapOf(
@@ -417,7 +431,10 @@ class CimaNow : MainAPI() {
             ).text.trim().trimStart('\uFEFF').trim()
             println("[CimaNow] gate post resp=${post.take(160)}")
             post.takeIf { it.contains("/watching", true) && it.startsWith("http") }
-        }.getOrNull()
+        } catch (e: Exception) {
+            println("[CimaNow] gate EXCEPTION: ${e.javaClass.simpleName}: ${e.message}")
+            null
+        }
     }
 
     private data class GateToken(val requestId: String, val ch: String, val hmacToken: String)
