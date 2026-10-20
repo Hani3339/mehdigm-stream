@@ -573,32 +573,47 @@ class CimaNow : MainAPI() {
     }
 
     /**
-     * Parses `window['ctx_XXXX'] = { v_a: '..', ... }` using the `window.map_YYYY =
-     * { ch:'v_a', ri:'v_b', ke:'v_c', se:'v_d' }` indirection (names are randomized per request).
+     * Parses the active `window['ctx_XXXX'] = { v_a: '..', ... }` config. The page may contain a
+     * decoy block; the active one is referenced by `window.ptr_YYYY = 'ctx_XXXX'`. The names `ch`,
+     * `ri`, `ke`, `se` map to those `v_` keys via the `window.map_Z` object.
      */
     private fun parseGateConfig(page: String): GateToken? {
-        val mapMatch = Regex("""\{[^{}]*\b(ch|ri|ke|se)\s*:[^{}]*\}""").findAll(page)
-            .firstOrNull { it.value.contains("ch") && it.value.contains("ri") && it.value.contains("ke") }
-            ?: return null
-        val map = mapMatch.value
+        // All ctx blocks, keyed by their name; the active one is named by `ptr_`.
+        val ctxBlocks = Regex("""window\[['"](ctx_[0-9a-f]+)['"]\]\s*=\s*\{([^{}]*)\}""")
+            .findAll(page).associate { it.groupValues[1] to it.groupValues[2] }
+        val ptrName = Regex("""window\.ptr_[0-9a-f]+\s*=\s*['"](ctx_[0-9a-f]+)['"]""")
+            .find(page)?.groupValues?.get(1)
+        val ordered = buildList {
+            ptrName?.let { name -> ctxBlocks[name]?.let { add(it) } }
+            addAll(ctxBlocks.values.filter { it !in this })
+        }
+        if (ordered.isEmpty()) return null
+        // The map object ties the semantic keys to the randomized `v_` names.
+        val map = Regex("""\{[^{}]*\bch\s*:[^{}]*\bri\s*:[^{}]*\}""").find(page)?.value ?: return null
         fun ref(key: String): String? =
             Regex("""['"]?""" + key + """['"]?\s*:\s*['"](v_[0-9a-f]+)['"]""").find(map)?.groupValues?.get(1)
         val chRef = ref("ch") ?: return null
         val riRef = ref("ri") ?: return null
         val keRef = ref("ke") ?: return null
         val seRef = ref("se") ?: return null
-        val ch = findJsonish(page, chRef) ?: return null
-        val requestId = findJsonish(page, riRef) ?: return null
-        val ke = findJsonish(page, keRef) ?: return null
-        val se = findJsonish(page, seRef) ?: return null
-        val keyBytes = xorRepeating(decodeBase64(ke) ?: return null, se.toByteArray(Charsets.ISO_8859_1))
-        val key = String(keyBytes, Charsets.ISO_8859_1)
-        val msg = (requestId + ch + CN_GATE_FP).toByteArray(Charsets.ISO_8859_1)
-        val mac = javax.crypto.Mac.getInstance("HmacSHA256")
-        mac.init(javax.crypto.spec.SecretKeySpec(key.toByteArray(Charsets.ISO_8859_1), "HmacSHA256"))
-        val hmacToken = encodeBase64(mac.doFinal(msg)) ?: return null
-        println("[CimaNow] gate config: requestId=$requestId ch=$ch")
-        return GateToken(requestId, ch, hmacToken)
+        for (block in ordered) {
+            fun valOf(ref: String): String? =
+                Regex("""['"]?""" + Regex.escape(ref) + """['"]?\s*[:=]\s*['"]([^'"]+)['"]""")
+                    .find(block)?.groupValues?.get(1)
+            val ch = valOf(chRef) ?: continue
+            val requestId = valOf(riRef) ?: continue
+            val ke = valOf(keRef) ?: continue
+            val se = valOf(seRef) ?: continue
+            val keyBytes = xorRepeating(decodeBase64(ke) ?: continue, se.toByteArray(Charsets.ISO_8859_1))
+            val key = String(keyBytes, Charsets.ISO_8859_1)
+            val msg = (requestId + ch + CN_GATE_FP).toByteArray(Charsets.ISO_8859_1)
+            val mac = javax.crypto.Mac.getInstance("HmacSHA256")
+            mac.init(javax.crypto.spec.SecretKeySpec(key.toByteArray(Charsets.ISO_8859_1), "HmacSHA256"))
+            val hmacToken = encodeBase64(mac.doFinal(msg)) ?: continue
+            println("[CimaNow] gate config: requestId=$requestId ch=$ch ke=${ke.take(16)} se=$se")
+            return GateToken(requestId, ch, hmacToken)
+        }
+        return null
     }
 
     /** Finds the random `window["NAME"] = [ "base64", ... ]` chunk array and joins it. */
