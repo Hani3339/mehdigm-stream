@@ -295,11 +295,9 @@ class CimaNow : MainAPI() {
         var watchUrl = postDoc?.let { watchUrlFromDoc(it) } ?: watchingUrl(data)
         var raw: String? = null
         if (!shine.isNullOrBlank()) {
-            // The gate needs a JS handshake; resolve its URL then run it in the WebView. Fall back
-            // to reproducing the HMAC in code.
-            val gateUrl = resolveGateUrl(shine)
-            println("[CimaNow] gateUrl=$gateUrl")
-            val tokenUrl = (gateUrl?.let { resolveWatchTokenWebView(it) }) ?: resolveWatchToken(shine)
+            // Reproduce the gate's HMAC in code (cookie-aware); fall back to running the gate in
+            // the WebView if that fails.
+            val tokenUrl = resolveWatchToken(shine) ?: shine.let { resolveWatchTokenWebView(it) }
             println("[CimaNow] tokenUrl=$tokenUrl")
             if (!tokenUrl.isNullOrBlank()) {
                 watchUrl = tokenUrl
@@ -387,25 +385,29 @@ class CimaNow : MainAPI() {
      * HMAC key, then a POST to `get-link.php` returns the tokenized URL.
      */
     private suspend fun resolveWatchToken(shineUrl: String): String? {
-        val gateHeaders = mapOf(
-            "User-Agent" to CN_MOBILE_UA,
-            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-            "Accept-Language" to "en-US,en;q=0.9,ar-MA;q=0.8,ar;q=0.7",
-            "X-Requested-With" to "mark.via.gp",
-            "Upgrade-Insecure-Requests" to "1",
-            "sec-ch-ua" to "\"Not;A=Brand\";v=\"8\", \"Chromium\";v=\"150\", \"Android WebView\";v=\"150\"",
-            "sec-ch-ua-mobile" to "?1",
-            "sec-ch-ua-platform" to "\"Android\"",
-            "Sec-Fetch-Site" to "same-origin",
-            "Sec-Fetch-Mode" to "navigate",
-            "Sec-Fetch-Dest" to "document"
-        )
+        var cookie: String? = null
+        suspend fun gateHeaders(): Map<String, String> = buildMap {
+            put("User-Agent", CN_MOBILE_UA)
+            put("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
+            put("Accept-Language", "en-US,en;q=0.9,ar-MA;q=0.8,ar;q=0.7")
+            put("X-Requested-With", "mark.via.gp")
+            put("Upgrade-Insecure-Requests", "1")
+            put("sec-ch-ua", "\"Not;A=Brand\";v=\"8\", \"Chromium\";v=\"150\", \"Android WebView\";v=\"150\"")
+            put("sec-ch-ua-mobile", "?1")
+            put("sec-ch-ua-platform", "\"Android\"")
+            put("Sec-Fetch-Site", "same-origin")
+            put("Sec-Fetch-Mode", "navigate")
+            put("Sec-Fetch-Dest", "document")
+            cookie?.let { put("Cookie", it) }
+        }
         suspend fun fetch(url: String, referer: String?): String? = runCatching {
-            val res = app.get(url, headers = gateHeaders, referer = referer, timeout = 60L)
-            val ct = res.headers.values("Content-Type").joinToString(";").take(60)
-            val sc = res.headers.values("Set-Cookie").joinToString(";").take(120)
-            val server = res.headers.values("Server").joinToString(";").take(40)
-            println("[CimaNow] gate GET $url -> ${res.code} len=${res.text.length} ct=$ct server=$server setcookie=$sc")
+            val res = app.get(url, headers = gateHeaders(), referer = referer, timeout = 60L)
+            // Preserve the session cookie set by `loadon`; it is required for the gate page.
+            res.headers.values("Set-Cookie").forEach { sc ->
+                val pair = sc.substringBefore(';').trim()
+                if (pair.contains("PHPSESSID=")) cookie = pair
+            }
+            println("[CimaNow] gate GET $url -> ${res.code} len=${res.text.length} cookie=${cookie?.take(40)}")
             res.text
         }.onFailure { println("[CimaNow] gate GET $url FAILED: ${it.javaClass.simpleName}: ${it.message}") }
             .getOrNull()
@@ -441,7 +443,7 @@ class CimaNow : MainAPI() {
                     "ch" to gate.ch,
                     "fp" to CN_GATE_FP
                 ),
-                headers = gateHeaders + mapOf(
+                headers = gateHeaders() + mapOf(
                     "Content-Type" to "application/x-www-form-urlencoded",
                     "Origin" to origin(blogUrl),
                     "Referer" to blogUrl
