@@ -312,7 +312,7 @@
     "iconUrl": "https://cimanow.cc/wp-content/uploads/2017/05/cropped-Favicon-192x192.gif",
     "apiVersion": 1,
     "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-    "fileSize": 54928,
+    "fileSize": 54995,
     "status": 1,
     "language": "ar",
     "authors": [
@@ -323,7 +323,7 @@
       "TvSeries",
       "Anime"
     ],
-    "version": 1,
+    "version": 2,
     "internalName": "CimaNow",
     "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/CimaNow.cs3",
     "name": "سيما ناو (CimaNow)",
