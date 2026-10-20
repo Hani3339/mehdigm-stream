@@ -3,7 +3,7 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-version = 19
+version = 20
 
 cloudstream {
     description = "ويت أنمي (WitAnime) — أنمي مترجم ومدبلج وأفلام أنمي بجودة عالية."

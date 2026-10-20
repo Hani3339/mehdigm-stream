@@ -41,6 +41,31 @@ object WitAnimeWebView {
 
     private const val BRIDGE = "WitAnimeBridge"
 
+    /**
+     * Replays a genuine touch (DOWN then UP) on [view] at the given CSS-pixel
+     * coordinates. Used to satisfy Cloudflare's Turnstile checkbox, which often
+     * ignores synthetic JS clicks. Coordinates are converted to device pixels
+     * using the view's display density.
+     */
+    private fun simulateRealTouch(view: View, cssX: Float, cssY: Float) {
+        val density = view.resources.displayMetrics.density
+        val x = cssX * density
+        val y = cssY * density
+        val downTime = android.os.SystemClock.uptimeMillis()
+        val upTime = downTime + 60
+        val down = android.view.MotionEvent.obtain(
+            downTime, downTime, android.view.MotionEvent.ACTION_DOWN, x, y, 0
+        )
+        val up = android.view.MotionEvent.obtain(
+            downTime, upTime, android.view.MotionEvent.ACTION_UP, x, y, 0
+        )
+        runCatching {
+            view.dispatchTouchEvent(down)
+            view.postDelayed({ runCatching { view.dispatchTouchEvent(up) } }, 60)
+        }
+        view.postDelayed({ runCatching { down.recycle(); up.recycle() } }, 200)
+    }
+
     data class Result(val json: String?, val error: String?)
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -124,7 +149,52 @@ object WitAnimeWebView {
                 mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                 cacheMode = WebSettings.LOAD_DEFAULT
                 userAgentString = userAgent
-                blockNetworkImage = true
+                // Turnstile renders an image/graphics widget; blockNetworkImage
+                // would leave it blank, so it must stay off while we solve.
+                blockNetworkImage = false
+            }
+
+            // Cloudflare's Turnstile will not render or accept touches unless the
+            // WebView is actually laid out at a real size and visible. We keep the
+            // view 1x1 (so the user never sees the automation) and only expand it
+            // to full screen while a challenge is on screen, shrinking back once
+            // the challenge clears.
+            var expanded = false
+            fun setExpanded(on: Boolean) {
+                if (expanded == on) return
+                expanded = on
+                handler.post {
+                    runCatching {
+                        view.visibility = if (on) View.VISIBLE else View.INVISIBLE
+                        view.layoutParams = if (on) ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT
+                        ) else ViewGroup.LayoutParams(1, 1)
+                        view.requestLayout()
+                        dialog.window?.apply {
+                            setBackgroundDrawableResource(
+                                if (on) android.R.color.black else android.R.color.transparent
+                            )
+                            if (on) {
+                                clearFlags(
+                                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                                        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                                )
+                            } else {
+                                addFlags(
+                                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                                        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                                )
+                            }
+                            attributes = attributes?.apply {
+                                width = if (on) ViewGroup.LayoutParams.MATCH_PARENT else 1
+                                height = if (on) ViewGroup.LayoutParams.MATCH_PARENT else 1
+                                x = if (on) 0 else -10000
+                                y = if (on) 0 else -10000
+                            }
+                        }
+                    }
+                }
             }
 
             cookieManager.setAcceptThirdPartyCookies(view, true)
@@ -146,6 +216,29 @@ object WitAnimeWebView {
                 fun onProgress(message: String) = handler.post {
                     println("[WitAnime][WebView] $message")
                 }
+
+                /**
+                 * Cloudflare's managed/Turnstile checkbox frequently ignores a
+                 * synthetic `element.click()` and only reacts to a genuine touch
+                 * sequence. When the page reports the checkbox position we replay
+                 * a real ACTION_DOWN/ACTION_UP pair at those (CSS px) coordinates.
+                 */
+                @JavascriptInterface
+                fun onTap(cssX: Float, cssY: Float) = handler.post {
+                    runCatching { simulateRealTouch(view, cssX, cssY) }
+                }
+
+                @JavascriptInterface
+                fun onChallenge() = handler.post {
+                    println("[WitAnime][WebView] cloudflare challenge detected, expanding view")
+                    setExpanded(true)
+                }
+
+                @JavascriptInterface
+                fun onChallengeCleared() = handler.post {
+                    println("[WitAnime][WebView] cloudflare challenge cleared, shrinking view")
+                    setExpanded(false)
+                }
             }, BRIDGE)
 
             view.webChromeClient = object : WebChromeClient() {
@@ -154,6 +247,78 @@ object WitAnimeWebView {
                     return true
                 }
             }
+
+            // Cloudflare "Just a moment..." / Turnstile solver. Injected on every
+            // main-frame navigation (not only the watch page) so the challenge on
+            // the homepage warm-up is cleared too. It locates the Turnstile
+            // checkbox and asks Kotlin to replay a real touch, which the widget
+            // trusts far more than a synthetic element.click().
+            val solverJs = """
+                (function() {
+                    var B = $BRIDGE;
+                    if (window.__witanimeSolver) return;
+                    window.__witanimeSolver = true;
+                    // Coordinated clicks are only allowed on the visible challenge
+                    // widget; we never tap the real watch page.
+                    function isChallenge() {
+                        var t = (document.title || '').toLowerCase();
+                        if (t.indexOf('just a moment') >= 0 || t.indexOf('attention required') >= 0) return true;
+                        if (document.querySelector('#challenge-form, #challenge-stage, #cf-chl-widget-container, .cf-turnstile, [id^=cf-chl-widget]')) return true;
+                        if (document.querySelector('iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"]')) return true;
+                        return false;
+                    }
+                    function boxEl() {
+                        // The clickable checkbox inside the Turnstile widget.
+                        var sel = [
+                            '.cf-turnstile input[type=checkbox]',
+                            '#cf-chl-widget-container input[type=checkbox]',
+                            '[id^=cf-chl-widget] input[type=checkbox]',
+                            'input[type=checkbox]',
+                            '.cf-turnstile',
+                            '[id^=cf-chl-widget]',
+                            '#challenge-stage',
+                            '#challenge-form'
+                        ];
+                        for (var i = 0; i < sel.length; i++) {
+                            var e = document.querySelector(sel[i]);
+                            if (e) return e;
+                        }
+                        return null;
+                    }
+                    var attempts = 0;
+                    var announced = false;
+                    var iv = setInterval(function() {
+                        if (!isChallenge()) {
+                            if (announced) { announced = false; try { B.onChallengeCleared(); } catch (e) {} }
+                            clearInterval(iv);
+                            return;
+                        }
+                        attempts++;
+                        if (!announced) {
+                            announced = true;
+                            try { B.onChallenge(); } catch (e) {}
+                            try { B.onProgress('cloudflare challenge page: title="' + document.title + '"'); } catch (e) {}
+                        }
+                        if (attempts > 120) { clearInterval(iv); return; }
+                        var el = boxEl();
+                        if (!el) return;
+                        try {
+                            var r = el.getBoundingClientRect();
+                            if (r.width > 0 && r.height > 0) {
+                                var cx = r.left + r.width / 2;
+                                var cy = r.top + r.height / 2;
+                                if (attempts % 2 === 0) {
+                                    try { B.onProgress('cf challenge: tapping ' + Math.round(cx) + ',' + Math.round(cy)); } catch (e) {}
+                                    try { B.onTap(cx, cy); } catch (e) {}
+                                }
+                            }
+                        } catch (e) {}
+                        // Also try a plain click + focus on the widget itself.
+                        try { el.click(); } catch (e) {}
+                        try { var cb = document.querySelector('input[type=checkbox]'); if (cb) { cb.focus(); cb.click(); } } catch (e) {}
+                    }, 1500);
+                })();
+            """.trimIndent()
 
             val injectedJs = """
                 (function() {
@@ -374,6 +539,7 @@ object WitAnimeWebView {
                     override fun onPageStarted(v: WebView?, url: String?, favicon: Bitmap?) {
                         super.onPageStarted(v, url, favicon)
                         println("[WitAnime][WebView] onPageStarted $url")
+                        runCatching { v?.evaluateJavascript(solverJs, null) }
                         if ((url ?: "").contains("/watch/")) {
                             runCatching { v?.evaluateJavascript(injectedJs, null) }
                         }
@@ -382,6 +548,7 @@ object WitAnimeWebView {
                     override fun onPageFinished(v: WebView?, url: String?) {
                         super.onPageFinished(v, url)
                         println("[WitAnime][WebView] onPageFinished $url")
+                        runCatching { v?.evaluateJavascript(solverJs, null) }
                         if (!navigated) {
                             navigated = true
                             handler.postDelayed({ runCatching { v?.loadUrl(watchUrl) } }, 300)
