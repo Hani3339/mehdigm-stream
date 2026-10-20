@@ -203,7 +203,8 @@ class WitAnime(private val context: android.content.Context) : MainAPI() {
         // data = watch page url: /watch/<slug>/<ep>
         val watchUrl = if (data.startsWith("http")) data else "$mainUrl$data"
         println("[WitAnime] loadLinks data=$data watchUrl=$watchUrl")
-        val page = try {
+
+        var page = try {
             app.get(
                 watchUrl,
                 headers = pageHeaders + mapOf(
@@ -215,38 +216,35 @@ class WitAnime(private val context: android.content.Context) : MainAPI() {
             )
         } catch (e: Exception) {
             println("[WitAnime] watch page GET failed: ${e.message}")
-            return false
+            null
         }
-        println("[WitAnime] watch page code=${page.code} cookies=${page.cookies.keys}")
-        val document = page.document
-        val csrf = document.selectFirst("meta[name=csrf-token]")?.attr("content")?.trim()
+        // Back off once on a transient rate-limit (the site caps at ~20 req).
+        if (page != null && page.code == 429) {
+            println("[WitAnime] watch page 429, retrying after backoff")
+            kotlinx.coroutines.delay(4000)
+            page = try {
+                app.get(
+                    watchUrl,
+                    headers = pageHeaders + mapOf(
+                        "User-Agent" to browserUa,
+                        "X-Requested-With" to xRequestedWith,
+                        "Accept-Language" to "en-US,en;q=0.9,ar;q=0.8",
+                    ),
+                    interceptor = cfInterceptor
+                )
+            } catch (e: Exception) {
+                println("[WitAnime] watch page retry failed: ${e.message}")
+                page
+            }
+        }
+        println("[WitAnime] watch page code=${page?.code} cookies=${page?.cookies?.keys}")
+        val document = page?.document
+        val csrf = document?.selectFirst("meta[name=csrf-token]")?.attr("content")?.trim()
             ?.ifBlank { null }
-        if (csrf == null) {
-            println("[WitAnime] no csrf meta found")
-            return false
-        }
-        val cookies = page.cookies
+        val cookies = page?.cookies ?: emptyMap()
+        println("[WitAnime] csrf=${if (csrf == null) "null" else "ok"}")
 
         val sourcesUrl = "$watchUrl/sources"
-
-        // Exact request the site's own front-end issues (verified against a live
-        // HAR capture): bare POST, no body, `X-Requested-With: mark.via.gp`.
-        val minimalHeaders = mapOf(
-            "Accept" to "application/json",
-            "X-CSRF-TOKEN" to csrf,
-            "X-Requested-With" to xRequestedWith,
-            "Referer" to watchUrl,
-            "Origin" to mainUrl,
-            "User-Agent" to browserUa,
-            "Accept-Language" to "en-US,en;q=0.9,ar-MA;q=0.8,ar;q=0.7",
-            "Sec-CH-UA" to secChUa,
-            "Sec-CH-UA-Mobile" to "?1",
-            "Sec-CH-UA-Platform" to "\"Android\"",
-            "Sec-Fetch-Site" to "same-origin",
-            "Sec-Fetch-Mode" to "cors",
-            "Sec-Fetch-Dest" to "empty",
-        )
-        val fullHeaders = apiRequestHeaders(csrf, watchUrl)
 
         var body: String? = null
 
@@ -257,11 +255,14 @@ class WitAnime(private val context: android.content.Context) : MainAPI() {
 
         // Preferred path: run the request from a real (hidden) WebView so it
         // carries a browser TLS/JA3 fingerprint. Cloudflare rejects the OkHttp
-        // client for this endpoint with a 404, but a WebView passes.
+        // client for this endpoint with a 404, but a WebView passes. The WebView
+        // loads the watch page itself, so it also works when the pre-fetch above
+        // was rate-limited (429) and no CSRF could be read.
+        var gateMap: Map<String, String> = emptyMap()
         val activity = context as? android.app.Activity
         if (activity != null && !activity.isFinishing) {
             try {
-                val wv = WitAnimeWebView.fetchSources(
+                val wv = WitAnimeWebView.fetch(
                     activity = activity,
                     watchUrl = watchUrl,
                     cookies = cookies,
@@ -270,44 +271,75 @@ class WitAnime(private val context: android.content.Context) : MainAPI() {
                 println("[WitAnime] sources WEBVIEW json=${wv.json?.take(300)} err=${wv.error}")
                 if (!wv.json.isNullOrBlank() && wv.json.trimStart().startsWith("{")) {
                     body = wv.json
+                    val gs = runCatching { JSONObject(wv.json).optJSONObject("gates") }.getOrNull()
+                    if (gs != null) {
+                        gateMap = buildMap {
+                            for (k in gs.keys()) {
+                                val v = gs.optString(k)
+                                if (v.isNotBlank()) put(k, v)
+                            }
+                        }
+                    }
                 }
             } catch (e: Exception) {
                 println("[WitAnime] sources WEBVIEW failed: ${e.message}")
             }
         }
 
-        if (body == null) try {
-            val r = app.post(
-                sourcesUrl,
-                headers = minimalHeaders,
-                cookies = cookies,
-                interceptor = cfInterceptor
+        // Direct HTTP fallback (only possible when a CSRF token was obtained).
+        val directCsrf = csrf
+        if (body == null && directCsrf != null) {
+            // Exact request the site's own front-end issues (verified against a
+            // live HAR capture): bare POST, no body, `X-Requested-With`.
+            val minimalHeaders = mapOf(
+                "Accept" to "application/json",
+                "X-CSRF-TOKEN" to directCsrf,
+                "X-Requested-With" to xRequestedWith,
+                "Referer" to watchUrl,
+                "Origin" to mainUrl,
+                "User-Agent" to browserUa,
+                "Accept-Language" to "en-US,en;q=0.9,ar-MA;q=0.8,ar;q=0.7",
+                "Sec-CH-UA" to secChUa,
+                "Sec-CH-UA-Mobile" to "?1",
+                "Sec-CH-UA-Platform" to "\"Android\"",
+                "Sec-Fetch-Site" to "same-origin",
+                "Sec-Fetch-Mode" to "cors",
+                "Sec-Fetch-Dest" to "empty",
             )
-            accept("POST-min", r.code, r.text)
-        } catch (e: Exception) {
-            println("[WitAnime] sources POST-min failed: ${e.message}")
-        }
-        if (body == null) try {
-            val r = app.post(
-                sourcesUrl,
-                headers = fullHeaders,
-                cookies = cookies,
-                interceptor = cfInterceptor
-            )
-            accept("POST-full", r.code, r.text)
-        } catch (e: Exception) {
-            println("[WitAnime] sources POST-full failed: ${e.message}")
-        }
-        if (body == null) try {
-            val r = app.get(
-                sourcesUrl,
-                headers = fullHeaders,
-                cookies = cookies,
-                interceptor = cfInterceptor
-            )
-            accept("GET", r.code, r.text)
-        } catch (e: Exception) {
-            println("[WitAnime] sources GET failed: ${e.message}")
+            val fullHeaders = apiRequestHeaders(directCsrf, watchUrl)
+            try {
+                val r = app.post(
+                    sourcesUrl,
+                    headers = minimalHeaders,
+                    cookies = cookies,
+                    interceptor = cfInterceptor
+                )
+                accept("POST-min", r.code, r.text)
+            } catch (e: Exception) {
+                println("[WitAnime] sources POST-min failed: ${e.message}")
+            }
+            if (body == null) try {
+                val r = app.post(
+                    sourcesUrl,
+                    headers = fullHeaders,
+                    cookies = cookies,
+                    interceptor = cfInterceptor
+                )
+                accept("POST-full", r.code, r.text)
+            } catch (e: Exception) {
+                println("[WitAnime] sources POST-full failed: ${e.message}")
+            }
+            if (body == null) try {
+                val r = app.get(
+                    sourcesUrl,
+                    headers = fullHeaders,
+                    cookies = cookies,
+                    interceptor = cfInterceptor
+                )
+                accept("GET", r.code, r.text)
+            } catch (e: Exception) {
+                println("[WitAnime] sources GET failed: ${e.message}")
+            }
         }
         if (body == null) return false
         val finalBody: String = body
@@ -329,7 +361,7 @@ class WitAnime(private val context: android.content.Context) : MainAPI() {
                     val token = entry.optString("token").ifBlank { continue }
                     val label = entry.optString("label")
                     val qualityValue = parseQuality(quality)
-                    if (emitStream(token, quality, qualityValue, label, watchUrl, csrf, cookies, subtitleCallback, callback)) {
+                    if (emitStream(token, quality, qualityValue, label, watchUrl, csrf ?: "", cookies, gateMap[token], subtitleCallback, callback)) {
                         found = true
                     }
                 }
@@ -345,7 +377,7 @@ class WitAnime(private val context: android.content.Context) : MainAPI() {
                     val entry = list.optJSONObject(i) ?: continue
                     val token = entry.optString("token").ifBlank { continue }
                     val qualityValue = parseQuality(quality)
-                    val resolved = resolveDownload(token, watchUrl, csrf, cookies)
+                    val resolved = resolveDownload(token, watchUrl, csrf ?: "", cookies)
                     if (resolved != null) {
                         callback.invoke(
                             newExtractorLink(
@@ -375,20 +407,23 @@ class WitAnime(private val context: android.content.Context) : MainAPI() {
         watchUrl: String,
         csrf: String,
         cookies: Map<String, String>,
+        webGate: String?,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         // Prime the gate, then follow the 302 to the real embed host.
-        try {
-            val resp = app.post(
-                "$mainUrl/watch/stream-source/$token",
-                headers = apiRequestHeaders(csrf, watchUrl),
-                cookies = cookies,
-                interceptor = cfInterceptor
-            )
-            println("[WitAnime] stream-source $token code=${resp.code} body=${resp.text.take(200)}")
-        } catch (e: Exception) {
-            println("[WitAnime] stream-source $token failed: ${e.message}")
+        if (csrf.isNotBlank()) {
+            try {
+                val resp = app.post(
+                    "$mainUrl/watch/stream-source/$token",
+                    headers = apiRequestHeaders(csrf, watchUrl),
+                    cookies = cookies,
+                    interceptor = cfInterceptor
+                )
+                println("[WitAnime] stream-source $token code=${resp.code} body=${resp.text.take(200)}")
+            } catch (e: Exception) {
+                println("[WitAnime] stream-source $token failed: ${e.message}")
+            }
         }
 
         val gate = "$mainUrl/watch/stream-gate/$token"
@@ -400,6 +435,10 @@ class WitAnime(private val context: android.content.Context) : MainAPI() {
         // then feed the redirect target (and any nested candidates) to the
         // extractor pipeline.
         val candidates = linkedSetOf<String>()
+        if (!webGate.isNullOrBlank()) {
+            println("[WitAnime] webGate $token -> $webGate")
+            candidates.add(webGate)
+        }
         val gateHeaders = mapOf(
             "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
             "X-Requested-With" to xRequestedWith,

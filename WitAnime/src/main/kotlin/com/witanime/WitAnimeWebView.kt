@@ -25,10 +25,17 @@ import kotlinx.coroutines.withContext
 import kotlin.coroutines.resume
 
 /**
- * Loads a WitAnime watch page inside a real (hidden) WebView so the request
- * carries a genuine browser TLS/HTTP2 fingerprint, then triggers the site's own
- * `/sources` POST from page context and returns the JSON manifest. This is the
- * reliable path when Cloudflare rejects OkHttp/MainAPI requests with a 404.
+ * Drives the whole WitAnime play flow inside a real (hidden) WebView so the
+ * requests carry a genuine browser TLS/HTTP2/JA3 fingerprint. Cloudflare rejects
+ * the OkHttp/MainAPI client for `/sources` with a 404, but a WebView passes.
+ *
+ * The page's own JS is already capable of:
+ *   1. POST /watch/<slug>/<ep>/sources          -> { players, downloads }
+ *   2. POST /watch/stream-source/<token>        -> { sandbox, referrerPolicy }
+ *   3. GET  /watch/stream-gate/<token>          -> 302 to the real embed URL
+ *
+ * We inject a script that performs exactly these steps and posts the resulting
+ * JSON (sources + a token->embedUrl map) back over a JS bridge.
  */
 object WitAnimeWebView {
 
@@ -37,12 +44,12 @@ object WitAnimeWebView {
     data class Result(val json: String?, val error: String?)
 
     @SuppressLint("SetJavaScriptEnabled")
-    suspend fun fetchSources(
+    suspend fun fetch(
         activity: Activity,
         watchUrl: String,
         cookies: Map<String, String>,
         userAgent: String,
-        timeoutMs: Long = 25_000L
+        timeoutMs: Long = 35_000L
     ): Result = withContext(Dispatchers.Main) {
         suspendCancellableCoroutine { cont ->
             var finished = false
@@ -121,9 +128,6 @@ object WitAnimeWebView {
             }
 
             cookieManager.setAcceptThirdPartyCookies(view, true)
-
-            // Seed the WebView with the cookies CloudStream already holds so the
-            // watch page renders authenticated and the CSRF/session line up.
             runCatching {
                 for ((name, value) in cookies) {
                     cookieManager.setCookie(watchUrl, "$name=$value")
@@ -137,38 +141,76 @@ object WitAnimeWebView {
 
                 @JavascriptInterface
                 fun onError(message: String) = handler.post { deliver(Result(null, message)) }
+
+                @JavascriptInterface
+                fun onProgress(message: String) = handler.post {
+                    println("[WitAnime][WebView] $message")
+                }
             }, BRIDGE)
 
             view.webChromeClient = WebChromeClient()
 
             val injectedJs = """
                 (function() {
-                    function report(json) { $BRIDGE.onResult(typeof json === 'string' ? json : JSON.stringify(json)); }
-                    function fail(msg) { $BRIDGE.onError(String(msg)); }
-                    function grab() {
+                    var B = $BRIDGE;
+                    function log(m){ try { B.onProgress(String(m)); } catch(e){} }
+                    function report(o){ B.onResult(JSON.stringify(o)); }
+                    function fail(m){ B.onError(String(m)); }
+
+                    async function gateFor(token, csrf) {
+                        try {
+                            var srcUri = '/watch/stream-source/' + token;
+                            var sr = await fetch(srcUri, {
+                                method: 'POST',
+                                headers: { 'Accept': 'application/json', 'X-CSRF-TOKEN': csrf, 'X-Requested-With': 'mark.via.gp' }
+                            });
+                            log('stream-source ' + token.slice(0,8) + ' -> ' + sr.status);
+                            var gr = await fetch('/watch/stream-gate/' + token, {
+                                method: 'GET',
+                                redirect: 'follow',
+                                headers: { 'Accept': 'text/html,application/xhtml+xml,*/*;q=0.8', 'X-Requested-With': 'mark.via.gp' }
+                            });
+                            log('stream-gate ' + token.slice(0,8) + ' -> ' + gr.status + ' ' + gr.url);
+                            return gr.url || '';
+                        } catch (e) { log('gate err ' + token.slice(0,8) + ' ' + e); return ''; }
+                    }
+
+                    async function run() {
                         try {
                             var csrfEl = document.querySelector('meta[name=csrf-token]');
                             var csrf = csrfEl ? csrfEl.content : '';
+                            if (!csrf) { fail('no csrf'); return; }
                             var path = location.pathname.replace(/\/$/, '') + '/sources';
-                            fetch(path, {
+                            var r = await fetch(path, {
                                 method: 'POST',
                                 headers: { 'Accept': 'application/json', 'X-CSRF-TOKEN': csrf, 'X-Requested-With': 'mark.via.gp' }
-                            }).then(function(r) {
-                                return r.text().then(function(t) {
-                                    if (r.status >= 200 && r.status < 300) report(t);
-                                    else fail('HTTP ' + r.status + ' ' + t.slice(0, 200));
-                                });
-                            }).catch(function(e) { fail(e && e.message ? e.message : 'fetch failed'); });
+                            });
+                            var t = await r.text();
+                            log('sources -> ' + r.status);
+                            if (r.status < 200 || r.status >= 300) { fail('HTTP ' + r.status + ' ' + t.slice(0, 200)); return; }
+                            var data = JSON.parse(t);
+                            var gates = {};
+                            var players = data.players || {};
+                            var tokens = [];
+                            Object.keys(players).forEach(function(q){
+                                (players[q]||[]).forEach(function(e){ if (e && e.token) tokens.push(e.token); });
+                            });
+                            for (var i = 0; i < tokens.length; i++) {
+                                gates[tokens[i]] = await gateFor(tokens[i], csrf);
+                            }
+                            data.gates = gates;
+                            report(data);
                         } catch (e) { fail(e && e.message ? e.message : 'unknown'); }
                     }
+
                     var tries = 0;
                     var iv = setInterval(function() {
                         tries++;
                         if (document.querySelector('meta[name=csrf-token]') && tries > 6) {
                             clearInterval(iv);
-                            grab();
+                            run();
                         }
-                        if (tries > 60) { clearInterval(iv); fail('csrf not found'); }
+                        if (tries > 80) { clearInterval(iv); fail('csrf not found'); }
                     }, 500);
                 })();
             """.trimIndent()
