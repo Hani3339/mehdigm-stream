@@ -435,7 +435,7 @@ class CimaNow : MainAPI() {
                 return null
             }
             println("[CimaNow] gate: requestId=${gate.requestId} ch=${gate.ch} hmac=${gate.hmacToken}")
-            val post = app.post(
+            val postRes = app.post(
                 "$blogBase/get-link.php",
                 data = mapOf(
                     "request_id" to gate.requestId,
@@ -450,9 +450,15 @@ class CimaNow : MainAPI() {
                 ),
                 referer = blogUrl,
                 timeout = 60L
-            ).text.trim().trimStart('\uFEFF').trim()
-            println("[CimaNow] gate post resp=${post.take(160)}")
-            post.takeIf { it.contains("/watching", true) && it.startsWith("http") }
+            )
+            val locHeader = postRes.headers.values("Location").firstOrNull()
+            val post = postRes.text.trim().trimStart('\uFEFF').trim()
+            println("[CimaNow] gate post code=${postRes.code} location=$locHeader len=${post.length}")
+            println("[CimaNow] gate post resp=${post.take(600).replace("\n", " ")}")
+            // The POST may answer with the tokenized URL directly, a `Location` header, or a small
+            // HTML redirect page. Extract the tokenized `/watching/?token=...` URL from any of them.
+            val candidates = listOfNotNull(locHeader, extractRedirect(post), post.takeIf { it.startsWith("http") })
+            candidates.firstOrNull { it.contains("/watching", true) && it.contains("token=") }
         } catch (e: Exception) {
             println("[CimaNow] gate EXCEPTION: ${e.javaClass.simpleName}: ${e.message}")
             null
