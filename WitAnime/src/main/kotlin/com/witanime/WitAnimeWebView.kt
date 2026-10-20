@@ -173,21 +173,16 @@ object WitAnimeWebView {
                     // we can drive them here and read the resulting frame's DOM. Skipping
                     // the authorisation POST (as the OkHttp path did) leaves the gate
                     // hanging with no content — the "webview gates=[]" symptom.
-                    async function resolveGate(token, csrf) {
-                        if (!/^[a-f0-9]{64}$/.test(token)) return null;
-                        try {
-                            var s = await fetch('/watch/stream-source/' + token, {
-                                method: 'POST',
-                                headers: { 'Accept': 'application/json', 'X-CSRF-TOKEN': csrf }
-                            });
-                            log('stream-source ' + token.slice(0, 8) + ' -> ' + s.status);
-                            if (!s.ok) return null;
-                        } catch (e) { return null; }
-                        return await new Promise(function(resolve) {
+                    function sleep(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
+
+                    // Load /watch/stream-gate/<token> once and read the same-origin
+                    // frame DOM. Returns {url} on success, {status} when the site
+                    // answered with its rate-limit/error page (data-status), or null.
+                    function loadGate(token) {
+                        return new Promise(function(resolve) {
                             var done = false;
                             var ifr = document.createElement('iframe');
                             ifr.style.cssText = 'position:fixed;width:1px;height:1px;left:-9999px;top:-9999px;border:0';
-                            // No referrer, matching the site's iframe referrerpolicy.
                             ifr.referrerPolicy = 'no-referrer';
                             function finish(v) {
                                 if (done) return;
@@ -198,28 +193,58 @@ object WitAnimeWebView {
                             function inspect() {
                                 try {
                                     var doc = ifr.contentDocument;
-                                    if (!doc || !doc.documentElement) { finish(null); return; }
+                                    if (!doc || !doc.documentElement) { finish({status: null, url: null}); return; }
                                     var status = doc.documentElement.dataset ? doc.documentElement.dataset.status : null;
-                                    if (status) { log('gate status=' + status); finish(null); return; }
+                                    if (status) { finish({status: status, url: null}); return; }
                                     var ifr2 = doc.querySelector('iframe[src]');
-                                    if (ifr2 && ifr2.src && ifr2.src.indexOf('about:') !== 0) { finish(ifr2.src); return; }
+                                    if (ifr2 && ifr2.src && ifr2.src.indexOf('about:') !== 0) { finish({status: null, url: ifr2.src}); return; }
                                     var m = doc.querySelector('meta[http-equiv=refresh]');
                                     if (m) {
                                         var c = m.getAttribute('content') || '';
                                         var i = c.indexOf('url=');
-                                        if (i >= 0) { finish(c.substring(i + 4).replace(/^['"]|['"]$/g, '')); return; }
+                                        if (i >= 0) { finish({status: null, url: c.substring(i + 4).replace(/^['"]|['"]$/g, '')}); return; }
                                     }
                                     var a = doc.querySelector('a[href^=http]');
-                                    if (a && /embed|player|\/e\/|watch|stream/.test(a.href)) { finish(a.href); return; }
+                                    if (a && /embed|player|\/e\/|watch|stream/.test(a.href)) { finish({status: null, url: a.href}); return; }
                                 } catch (e) {}
-                                finish(null);
+                                finish({status: null, url: null});
                             }
                             ifr.addEventListener('load', function() { setTimeout(inspect, 250); });
                             setTimeout(inspect, 1500);
-                            setTimeout(function() { finish(null); }, 8000);
+                            setTimeout(function() { finish({status: null, url: null}); }, 8000);
                             ifr.src = '/watch/stream-gate/' + token;
                             document.body.appendChild(ifr);
                         });
+                    }
+
+                    async function resolveGate(token, getCsrf) {
+                        if (!/^[a-f0-9]{64}$/.test(token)) return null;
+                        // Authorise the token. Retry while the site rate-limits.
+                        for (var a = 0; a < 3; a++) {
+                            try {
+                                var s = await fetch('/watch/stream-source/' + token, {
+                                    method: 'POST',
+                                    headers: { 'Accept': 'application/json', 'X-CSRF-TOKEN': getCsrf() }
+                                });
+                                log('stream-source ' + token.slice(0, 8) + ' -> ' + s.status);
+                                if (s.status === 429 || s.status === 419) { await sleep(3000 * (a + 1)); continue; }
+                                if (!s.ok) return null;
+                                break;
+                            } catch (e) { await sleep(1500); }
+                        }
+                        // Load the gate; on a rate-limit status page wait and retry.
+                        for (var b = 0; b < 3; b++) {
+                            var res = await loadGate(token);
+                            if (res.status === '429' || res.status === '419') {
+                                log('gate ' + token.slice(0, 8) + ' rate-limited (' + res.status + '), retry #' + (b + 1));
+                                await sleep(3000 * (b + 1));
+                                continue;
+                            }
+                            if (res.status) { log('gate status=' + res.status); return null; }
+                            if (res.url) return res.url;
+                            return null;
+                        }
+                        return null;
                     }
 
                     async function run() {
@@ -262,10 +287,20 @@ object WitAnimeWebView {
                                 }
                             } catch (e) {}
                             var gates = {};
+                            var csrfNow = function() {
+                                var c = document.querySelector('meta[name=csrf-token]');
+                                return c ? c.content : csrf;
+                            };
                             for (var k = 0; k < tokens.length; k++) {
-                                var real = await resolveGate(tokens[k], csrf);
+                                // Pace the requests: the site rate-limits aggressively
+                                // and each token costs an authorisation POST + a gate load.
+                                if (k > 0) await sleep(1200);
+                                var real = await resolveGate(tokens[k], csrfNow);
                                 log('gate ' + tokens[k].slice(0, 8) + ' -> ' + real);
                                 if (real) gates[tokens[k]] = real;
+                                // The first successfully resolved server is usually all
+                                // the user needs; stop hammering once we have a few.
+                                if (Object.keys(gates).length >= 3) break;
                             }
                             data.gates = gates;
                             report(data);
