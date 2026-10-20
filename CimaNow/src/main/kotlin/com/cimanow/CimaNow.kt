@@ -13,6 +13,7 @@ import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.fixUrl
 import com.lagradost.cloudstream3.mainPageOf
+import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.newEpisode
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newMovieLoadResponse
@@ -69,7 +70,7 @@ class CimaNow : MainAPI() {
     override val hasMainPage = true
     override val hasQuickSearch = true
     override val hasDownloadSupport = true
-    override val usesWebView = false
+    override val usesWebView = true
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
 
     override val mainPage = mainPageOf(
@@ -294,7 +295,9 @@ class CimaNow : MainAPI() {
         var watchUrl = postDoc?.let { watchUrlFromDoc(it) } ?: watchingUrl(data)
         var raw: String? = null
         if (!shine.isNullOrBlank()) {
-            val tokenUrl = resolveWatchToken(shine)
+            // The gate needs a JS/Cloudflare handshake; run it in the WebView first, then fall
+            // back to reproducing the HMAC in code.
+            val tokenUrl = resolveWatchTokenWebView(shine) ?: resolveWatchToken(shine)
             println("[CimaNow] tokenUrl=$tokenUrl")
             if (!tokenUrl.isNullOrBlank()) {
                 watchUrl = tokenUrl
@@ -414,9 +417,11 @@ class CimaNow : MainAPI() {
             val redirectFree = unwrapHrefLi(next1)
             val redirectPage = fetch(redirectFree, "$mainUrl/") ?: return null
             val next3 = extractRedirect(redirectPage)
-            val blogUrl = unwrapHrefLi(next3 ?: redirectFree).trimEnd('/') + "/"
+            // NOTE: `.../blog-post.html` (no trailing slash) serves the gate; with a trailing
+            // slash the server resolves a *different* post (the plain Blogger page), so keep it.
+            val blogUrl = unwrapHrefLi(next3 ?: redirectFree).trimEnd('/')
             // POSTs go to `<blog-url>/get-link.php`, i.e. `.../blog-post.html/get-link.php`.
-            val blogBase = blogUrl.trimEnd('/')
+            val blogBase = blogUrl
             val blog = fetch(blogUrl, redirectFree) ?: return null
             val gate = solveGateToken(blog) ?: run {
                 println("[CimaNow] gate: solveGateToken failed (blog len=${blog.length})")
@@ -445,6 +450,51 @@ class CimaNow : MainAPI() {
             println("[CimaNow] gate EXCEPTION: ${e.javaClass.simpleName}: ${e.message}")
             null
         }
+    }
+
+    /**
+     * Runs the ad-gate inside CloudStream's WebView: the gate is a JS/Cloudflare page whose
+     * redirect chain ends on a tokenized `cimanow.cc/<slug>/watching/?token=...` URL. A script
+     * polls for that URL and returns it.
+     */
+    private suspend fun resolveWatchTokenWebView(shineUrl: String): String? {
+        return runCatching {
+            var found: String? = null
+            val pollScript = """
+                (function(){
+                    function grab(){
+                        var href = window.location.href || '';
+                        if (href.indexOf('/watching') > -1 && href.indexOf('token=') > -1) {
+                            return href;
+                        }
+                        var a = document.querySelector('#downloadbtn');
+                        if (a && a.href && a.href.indexOf('token=') > -1) return a.href;
+                        var m = document.documentElement.innerHTML.match(/https?:\/\/[^"'\s]+\/watching\/\?token=[a-f0-9]+/);
+                        return m ? m[0] : null;
+                    }
+                    if (window.__cn_poll) clearInterval(window.__cn_poll);
+                    window.__cn_poll = setInterval(function(){
+                        var r = grab();
+                        if (r) { console.log('__CN_TOKEN__' + r); }
+                    }, 1000);
+                })();
+            """.trimIndent()
+            val resolver = WebViewResolver(
+                interceptUrl = Regex(".*"),
+                userAgent = null,
+                useOkhttp = false,
+                script = pollScript,
+                scriptCallback = { msg ->
+                    val idx = msg.indexOf("__CN_TOKEN__")
+                    if (idx >= 0) found = msg.substring(idx + "__CN_TOKEN__".length).trim()
+                },
+                timeout = 45L
+            )
+            resolver.resolveUsingWebView(shineUrl, "$mainUrl/", "GET") { true }
+            println("[CimaNow] webview token=$found")
+            found
+        }.onFailure { println("[CimaNow] webview FAILED: ${it.javaClass.simpleName}: ${it.message}") }
+            .getOrNull()
     }
 
     private data class GateToken(val requestId: String, val ch: String, val hmacToken: String)
