@@ -454,45 +454,22 @@ class CimaNow : MainAPI() {
 
     /**
      * Runs the ad-gate inside CloudStream's WebView: the gate is a JS/Cloudflare page whose
-     * redirect chain ends on a tokenized `cimanow.cc/<slug>/watching/?token=...` URL. A script
-     * polls for that URL and returns it.
+     * redirect chain ends on a tokenized `cimanow.cc/<slug>/watching/?token=...` URL. The
+     * resolver stops as soon as the WebView requests that URL and returns it.
      */
     private suspend fun resolveWatchTokenWebView(shineUrl: String): String? {
         return runCatching {
-            var found: String? = null
-            val pollScript = """
-                (function(){
-                    function grab(){
-                        var href = window.location.href || '';
-                        if (href.indexOf('/watching') > -1 && href.indexOf('token=') > -1) {
-                            return href;
-                        }
-                        var a = document.querySelector('#downloadbtn');
-                        if (a && a.href && a.href.indexOf('token=') > -1) return a.href;
-                        var m = document.documentElement.innerHTML.match(/https?:\/\/[^"'\s]+\/watching\/\?token=[a-f0-9]+/);
-                        return m ? m[0] : null;
-                    }
-                    if (window.__cn_poll) clearInterval(window.__cn_poll);
-                    window.__cn_poll = setInterval(function(){
-                        var r = grab();
-                        if (r) { console.log('__CN_TOKEN__' + r); }
-                    }, 1000);
-                })();
-            """.trimIndent()
             val resolver = WebViewResolver(
-                interceptUrl = Regex(".*"),
+                // Stop once the WebView requests the tokenized watch URL (its request is the signal).
+                interceptUrl = Regex(""".*/watching/\?token=[a-fA-F0-9]+"""),
                 userAgent = null,
                 useOkhttp = false,
-                script = pollScript,
-                scriptCallback = { msg ->
-                    val idx = msg.indexOf("__CN_TOKEN__")
-                    if (idx >= 0) found = msg.substring(idx + "__CN_TOKEN__".length).trim()
-                },
-                timeout = 45L
+                timeout = 45_000L
             )
-            resolver.resolveUsingWebView(shineUrl, "$mainUrl/", "GET") { true }
-            println("[CimaNow] webview token=$found")
-            found
+            val (request, _) = resolver.resolveUsingWebView(shineUrl, "$mainUrl/", "GET") { false }
+            val result = request?.url?.toString()?.trim()
+            println("[CimaNow] webview token=$result")
+            result?.takeIf { it.contains("/watching") && it.contains("token=") }
         }.onFailure { println("[CimaNow] webview FAILED: ${it.javaClass.simpleName}: ${it.message}") }
             .getOrNull()
     }
