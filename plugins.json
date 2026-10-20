@@ -312,7 +312,7 @@
     "iconUrl": "https://witanime.site/favicon.ico",
     "apiVersion": 1,
     "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-    "fileSize": 23119,
+    "fileSize": 25282,
     "status": 1,
     "language": "ar",
     "authors": [
@@ -326,7 +326,7 @@
       "Movie",
       "Cartoon"
     ],
-    "version": 1,
+    "version": 2,
     "internalName": "WitAnime",
     "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/WitAnime.cs3",
     "name": "ويت أنمي (WitAnime)",

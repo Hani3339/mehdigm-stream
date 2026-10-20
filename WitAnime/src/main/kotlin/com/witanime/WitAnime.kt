@@ -12,6 +12,7 @@ import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.addEpisodes
 import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.fixUrl
 import com.lagradost.cloudstream3.mainPageOf
 import com.lagradost.cloudstream3.newAnimeLoadResponse
 import com.lagradost.cloudstream3.newAnimeSearchResponse
@@ -172,17 +173,22 @@ class WitAnime : MainAPI() {
     ): Boolean {
         // data = watch page url: /watch/<slug>/<ep>
         val watchUrl = if (data.startsWith("http")) data else "$mainUrl$data"
+        println("[WitAnime] loadLinks data=$data watchUrl=$watchUrl")
         val page = try {
             app.get(watchUrl, headers = pageHeaders)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            println("[WitAnime] watch page GET failed: ${e.message}")
             return false
         }
+        println("[WitAnime] watch page code=${page.code} cookies=${page.cookies.keys}")
         val document = page.document
         val csrf = document.selectFirst("meta[name=csrf-token]")?.attr("content")?.trim()
-            ?.ifBlank { null } ?: return false
-        val cookieHeader = page.cookies.entries
-            .filter { it.value.isNotBlank() }
-            .joinToString("; ") { "${it.key}=${it.value}" }
+            ?.ifBlank { null }
+        if (csrf == null) {
+            println("[WitAnime] no csrf meta found")
+            return false
+        }
+        val cookies = page.cookies
 
         val sourcesUrl = "$watchUrl/sources"
         val sourceHeaders = buildMap {
@@ -190,12 +196,19 @@ class WitAnime : MainAPI() {
             put("X-CSRF-TOKEN", csrf)
             put("Referer", watchUrl)
             put("Origin", mainUrl)
-            if (cookieHeader.isNotBlank()) put("Cookie", cookieHeader)
         }
 
         val body = try {
-            app.post(sourcesUrl, headers = sourceHeaders, data = emptyMap()).text
-        } catch (_: Exception) {
+            val resp = app.post(
+                sourcesUrl,
+                headers = sourceHeaders,
+                cookies = cookies,
+                json = emptyMap<String, String>()
+            )
+            println("[WitAnime] sources POST code=${resp.code} body=${resp.text.take(300)}")
+            resp.text
+        } catch (e: Exception) {
+            println("[WitAnime] sources POST failed: ${e.message}")
             return false
         }
 
@@ -216,7 +229,7 @@ class WitAnime : MainAPI() {
                     val token = entry.optString("token").ifBlank { continue }
                     val label = entry.optString("label")
                     val qualityValue = parseQuality(quality)
-                    if (emitStream(token, quality, qualityValue, label, watchUrl, csrf, cookieHeader, subtitleCallback, callback)) {
+                    if (emitStream(token, quality, qualityValue, label, watchUrl, csrf, cookies, subtitleCallback, callback)) {
                         found = true
                     }
                 }
@@ -232,7 +245,7 @@ class WitAnime : MainAPI() {
                     val entry = list.optJSONObject(i) ?: continue
                     val token = entry.optString("token").ifBlank { continue }
                     val qualityValue = parseQuality(quality)
-                    val resolved = resolveDownload(token, watchUrl, csrf, cookieHeader)
+                    val resolved = resolveDownload(token, watchUrl, csrf, cookies)
                     if (resolved != null) {
                         callback.invoke(
                             newExtractorLink(
@@ -261,34 +274,63 @@ class WitAnime : MainAPI() {
         label: String?,
         watchUrl: String,
         csrf: String,
-        cookieHeader: String,
+        cookies: Map<String, String>,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         // Prime the gate, then hand the gate URL to loadExtractor.
         try {
-            app.post(
+            val resp = app.post(
                 "$mainUrl/watch/stream-source/$token",
                 headers = buildMap {
                     putAll(apiHeaders)
                     put("X-CSRF-TOKEN", csrf)
                     put("Referer", watchUrl)
                     put("Origin", mainUrl)
-                    if (cookieHeader.isNotBlank()) put("Cookie", cookieHeader)
                 },
-                data = emptyMap()
+                cookies = cookies,
+                json = emptyMap<String, String>()
             )
-        } catch (_: Exception) {
-            // Non-fatal: proceed to try the gate anyway.
+            println("[WitAnime] stream-source $token code=${resp.code} body=${resp.text.take(200)}")
+        } catch (e: Exception) {
+            println("[WitAnime] stream-source $token failed: ${e.message}")
         }
 
         val gate = "$mainUrl/watch/stream-gate/$token"
         val display = if (label.isNullOrBlank()) "$name $quality" else "$name $quality - $label"
         val resolved = mutableListOf<ExtractorLink>()
+
+        // The gate is a same-origin wrapper that resolves the real player. Fetch
+        // it, then try every candidate URL we can find (redirect target, nested
+        // iframes, direct media) through the extractor pipeline.
+        val candidates = linkedSetOf<String>()
         try {
-            loadExtractor(gate, watchUrl, subtitleCallback) { resolved.add(it) }
-        } catch (_: Exception) {
+            val gateResp = app.get(gate, headers = pageHeaders, cookies = cookies, referer = watchUrl)
+            println("[WitAnime] gate code=${gateResp.code} final=${gateResp.url} len=${gateResp.text.length}")
+            val finalUrl = gateResp.url
+            if (finalUrl.isNotBlank() && finalUrl != gate) candidates.add(finalUrl)
+            val gateDoc = gateResp.document
+            gateDoc.select("iframe[src]").forEach { s ->
+                s.attr("src").trim().ifBlank { null }?.let { candidates.add(fixUrl(it)) }
+            }
+            gateDoc.select("video source[src], video[src], source[src]").forEach { s ->
+                s.attr("src").trim().ifBlank { null }?.let { candidates.add(fixUrl(it)) }
+            }
+            Regex("""https?://[^"'\\\s]+\.(?:m3u8|mp4)[^"'\\\s]*""")
+                .findAll(gateResp.text).forEach { candidates.add(it.value) }
+        } catch (e: Exception) {
+            println("[WitAnime] gate GET failed: ${e.message}")
         }
+        candidates.add(gate)
+
+        candidates.forEach { candidate ->
+            try {
+                loadExtractor(candidate, watchUrl, subtitleCallback) { resolved.add(it) }
+            } catch (e: Exception) {
+                println("[WitAnime] loadExtractor($candidate) failed: ${e.message}")
+            }
+        }
+        println("[WitAnime] gate=$gate candidates=${candidates.size} resolved=${resolved.size}")
         resolved.forEach { link ->
             callback.invoke(
                 newExtractorLink(
@@ -310,7 +352,7 @@ class WitAnime : MainAPI() {
         token: String,
         watchUrl: String,
         csrf: String,
-        cookieHeader: String
+        cookies: Map<String, String>
     ): String? {
         try {
             app.post(
@@ -320,9 +362,9 @@ class WitAnime : MainAPI() {
                     put("X-CSRF-TOKEN", csrf)
                     put("Referer", watchUrl)
                     put("Origin", mainUrl)
-                    if (cookieHeader.isNotBlank()) put("Cookie", cookieHeader)
                 },
-                data = emptyMap()
+                cookies = cookies,
+                json = emptyMap<String, String>()
             )
         } catch (_: Exception) {
         }
