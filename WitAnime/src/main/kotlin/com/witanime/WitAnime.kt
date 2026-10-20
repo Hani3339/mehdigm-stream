@@ -289,6 +289,33 @@ class WitAnime(private val context: android.content.Context) : MainAPI() {
         return found
     }
 
+    private suspend fun diagStreamSource(
+        token: String,
+        watchUrl: String,
+        cookies: Map<String, String>
+    ) {
+        try {
+            val r = app.post(
+                "$mainUrl/watch/stream-source/$token",
+                headers = mapOf(
+                    "Accept" to "application/json",
+                    "X-Requested-With" to xRequestedWith,
+                    "User-Agent" to browserUa,
+                    "Referer" to watchUrl,
+                    "Origin" to mainUrl,
+                    "Sec-Fetch-Site" to "same-origin",
+                    "Sec-Fetch-Mode" to "cors",
+                    "Sec-Fetch-Dest" to "empty",
+                ),
+                cookies = cookies,
+                interceptor = cfInterceptor
+            )
+            println("[WitAnime] stream-source $token code=${r.code}")
+        } catch (e: Exception) {
+            println("[WitAnime] stream-source $token failed: ${e.message}")
+        }
+    }
+
     private suspend fun emitStream(
         token: String,
         quality: String,
@@ -311,31 +338,40 @@ class WitAnime(private val context: android.content.Context) : MainAPI() {
         if (!webGate.isNullOrBlank()) {
             println("[WitAnime] webGate $token -> $webGate")
             candidates.add(webGate)
-        } else {
-            // Fallback: the WebView may not have exposed the redirect target
-            // (cross-origin 302). Follow the gate ourselves using the cleared
-            // WebView cookies; this endpoint is not the one Cloudflare rejects.
-            try {
-                val r = app.get(
-                    gate,
-                    headers = mapOf(
-                        "Accept" to "text/html,application/xhtml+xml,*/*;q=0.8",
-                        "X-Requested-With" to xRequestedWith,
-                        "User-Agent" to browserUa,
-                        "Referer" to watchUrl,
-                    ),
-                    cookies = cookies,
-                    interceptor = cfInterceptor
-                )
-                println("[WitAnime] gateHTTP $token code=${r.code} final=${r.url}")
-                if (r.url.isNotBlank() && r.url != gate) candidates.add(r.url)
-                Regex("""https?://[^"'\\\s]+\.(?:m3u8|mp4)[^"'\\\s]*""")
-                    .findAll(r.text).forEach { candidates.add(it.value) }
-            } catch (e: Exception) {
-                println("[WitAnime] gateHTTP $token failed: ${e.message}")
-            }
-            candidates.add(gate)
         }
+        // The real flow (verified in a live HAR): first GET the same-origin
+        // stream-gate (a 302 to the real embed host), THEN POST stream-source.
+        // Doing it the other way round makes the gate 404.
+        try {
+            val r = app.get(
+                gate,
+                headers = mapOf(
+                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                    "X-Requested-With" to xRequestedWith,
+                    "User-Agent" to browserUa,
+                    "Referer" to watchUrl,
+                    "Accept-Language" to "en-US,en;q=0.9,ar-MA;q=0.8,ar;q=0.7",
+                    "Sec-Fetch-Site" to "same-origin",
+                    "Sec-Fetch-Mode" to "navigate",
+                    "Sec-Fetch-User" to "?1",
+                    "Sec-Fetch-Dest" to "iframe",
+                    "Upgrade-Insecure-Requests" to "1",
+                ),
+                cookies = cookies,
+                interceptor = cfInterceptor
+            )
+            println("[WitAnime] gateHTTP $token code=${r.code} final=${r.url}")
+            if (r.url.isNotBlank() && r.url != gate) candidates.add(r.url)
+            Regex("""https?://[^"'\\\s]+\.(?:m3u8|mp4)[^"'\\\s]*""")
+                .findAll(r.text).forEach { candidates.add(it.value) }
+        } catch (e: Exception) {
+            println("[WitAnime] gateHTTP $token failed: ${e.message}")
+        }
+        if (candidates.isEmpty()) candidates.add(gate)
+
+        // Best-effort: the page fires this after the gate 302 (it primes the
+        // session for the embed). Not required for extraction.
+        diagStreamSource(token, watchUrl, cookies)
 
         candidates.forEach { candidate ->
             try {

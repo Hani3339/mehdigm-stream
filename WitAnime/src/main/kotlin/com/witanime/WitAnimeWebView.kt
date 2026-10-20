@@ -162,24 +162,6 @@ object WitAnimeWebView {
                     function report(o){ B.onResult(JSON.stringify(o)); }
                     function fail(m){ B.onError(String(m)); }
 
-                    async function gateFor(token, csrf) {
-                        try {
-                            var srcUri = '/watch/stream-source/' + token;
-                            var sr = await fetch(srcUri, {
-                                method: 'POST',
-                                headers: { 'Accept': 'application/json', 'X-CSRF-TOKEN': csrf, 'X-Requested-With': 'mark.via.gp' }
-                            });
-                            log('stream-source ' + token.slice(0,8) + ' -> ' + sr.status);
-                            var gr = await fetch('/watch/stream-gate/' + token, {
-                                method: 'GET',
-                                redirect: 'follow',
-                                headers: { 'Accept': 'text/html,application/xhtml+xml,*/*;q=0.8', 'X-Requested-With': 'mark.via.gp' }
-                            });
-                            log('stream-gate ' + token.slice(0,8) + ' -> ' + gr.status + ' ' + gr.url);
-                            return gr.url || '';
-                        } catch (e) { log('gate err ' + token.slice(0,8) + ' ' + e); return ''; }
-                    }
-
                     async function run() {
                         try {
                             var csrfEl = document.querySelector('meta[name=csrf-token]');
@@ -203,21 +185,7 @@ object WitAnimeWebView {
                                 if (c2) csrf = c2.content;
                             }
                             if (r.status < 200 || r.status >= 300) { fail('HTTP ' + r.status + ' ' + t.slice(0, 200)); return; }
-                            var data = JSON.parse(t);
-                            // Resolve each token to its real embed URL from inside the
-                            // browser (the gate is a same-origin 302). This is best-effort;
-                            // Kotlin also has a fallback.
-                            var gates = {};
-                            var players = data.players || {};
-                            var tokens = [];
-                            Object.keys(players).forEach(function(q){
-                                (players[q]||[]).forEach(function(e){ if (e && e.token) tokens.push(e.token); });
-                            });
-                            for (var i = 0; i < tokens.length; i++) {
-                                gates[tokens[i]] = await gateFor(tokens[i], csrf);
-                            }
-                            data.gates = gates;
-                            report(data);
+                            report(JSON.parse(t));
                         } catch (e) { fail(e && e.message ? e.message : 'unknown'); }
                     }
 
