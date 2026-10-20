@@ -307,5 +307,29 @@
     "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/TopCinema.cs3",
     "name": "توب سينما (TopCinema)",
     "description": "توب سينما — مشاهدة وتحميل الأفلام والمسلسلات الأجنبية والآسيوية والأنمي."
+  },
+  {
+    "iconUrl": "https://witanime.site/favicon.ico",
+    "apiVersion": 1,
+    "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
+    "fileSize": 23119,
+    "status": 1,
+    "language": "ar",
+    "authors": [
+      "mehdigm4life"
+    ],
+    "tvTypes": [
+      "Anime",
+      "AnimeMovie",
+      "OVA",
+      "TvSeries",
+      "Movie",
+      "Cartoon"
+    ],
+    "version": 1,
+    "internalName": "WitAnime",
+    "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/WitAnime.cs3",
+    "name": "ويت أنمي (WitAnime)",
+    "description": "ويت أنمي (WitAnime) — أنمي مترجم ومدبلج وأفلام أنمي بجودة عالية."
   }
 ]
