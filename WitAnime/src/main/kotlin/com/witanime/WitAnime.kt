@@ -75,19 +75,21 @@ class WitAnime : MainAPI() {
         "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 " +
         "(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
 
+    private val xRequestedWith = "mark.via.gp"
+
     private fun apiRequestHeaders(csrf: String, referer: String): Map<String, String> = mapOf(
-        "Accept" to "application/json, text/plain, */*",
+        "Accept" to "application/json",
         "X-CSRF-TOKEN" to csrf,
-        "X-XSRF-TOKEN" to csrf,
-        "X-Requested-With" to "XMLHttpRequest",
+        "X-Requested-With" to xRequestedWith,
         "Referer" to referer,
         "Origin" to mainUrl,
         "User-Agent" to browserUa,
-        "Accept-Language" to "ar,en-US;q=0.9,en;q=0.8",
-        "Sec-Fetch-Dest" to "empty",
-        "Sec-Fetch-Mode" to "cors",
+        "Accept-Language" to "en-US,en;q=0.9,ar;q=0.8",
         "Sec-Fetch-Site" to "same-origin",
+        "Sec-Fetch-Mode" to "cors",
+        "Sec-Fetch-Dest" to "empty",
     )
+
 
     override val mainPage = mainPageOf(
         "home" to "الرئيسية",
@@ -199,7 +201,8 @@ class WitAnime : MainAPI() {
                 watchUrl,
                 headers = pageHeaders + mapOf(
                     "User-Agent" to browserUa,
-                    "Accept-Language" to "ar,en-US;q=0.9,en;q=0.8",
+                    "X-Requested-With" to xRequestedWith,
+                    "Accept-Language" to "en-US,en;q=0.9,ar;q=0.8",
                 ),
                 interceptor = cfInterceptor
             )
@@ -219,11 +222,15 @@ class WitAnime : MainAPI() {
 
         val sourcesUrl = "$watchUrl/sources"
 
-        // The site's front-end issues a bare `fetch(sourcesUrl,{method:'POST',
-        // headers:{Accept, X-CSRF-TOKEN}})` with no body.
+        // Exact request the site's own front-end issues (verified against a live
+        // HAR capture): bare POST, no body, `X-Requested-With: mark.via.gp`.
         val minimalHeaders = mapOf(
             "Accept" to "application/json",
             "X-CSRF-TOKEN" to csrf,
+            "X-Requested-With" to xRequestedWith,
+            "Referer" to watchUrl,
+            "Origin" to mainUrl,
+            "User-Agent" to browserUa,
         )
         val fullHeaders = apiRequestHeaders(csrf, watchUrl)
 
@@ -268,7 +275,7 @@ class WitAnime : MainAPI() {
             println("[WitAnime] sources GET failed: ${e.message}")
         }
         if (body == null) return false
-        val finalBody = body
+        val finalBody: String = body
 
         val root = try {
             JSONObject(finalBody)
@@ -336,7 +343,7 @@ class WitAnime : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // Prime the gate, then hand the gate URL to loadExtractor.
+        // Prime the gate, then follow the 302 to the real embed host.
         try {
             val resp = app.post(
                 "$mainUrl/watch/stream-source/$token",
@@ -353,14 +360,26 @@ class WitAnime : MainAPI() {
         val display = if (label.isNullOrBlank()) "$name $quality" else "$name $quality - $label"
         val resolved = mutableListOf<ExtractorLink>()
 
-        // The gate is a same-origin wrapper that resolves the real player. Fetch
-        // it, then try every candidate URL we can find (redirect target, nested
-        // iframes, direct media) through the extractor pipeline.
+        // The gate is a same-origin wrapper that 302-redirects to the real player
+        // (mega.nz/embed, mp4upload.com/embed, videa.hu/player, ...). Follow it,
+        // then feed the redirect target (and any nested candidates) to the
+        // extractor pipeline.
         val candidates = linkedSetOf<String>()
+        val gateHeaders = mapOf(
+            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "X-Requested-With" to xRequestedWith,
+            "User-Agent" to browserUa,
+            "Referer" to watchUrl,
+            "Accept-Language" to "en-US,en;q=0.9,ar;q=0.8",
+            "Sec-Fetch-Site" to "same-origin",
+            "Sec-Fetch-Mode" to "navigate",
+            "Sec-Fetch-Dest" to "iframe",
+            "Upgrade-Insecure-Requests" to "1",
+        )
         try {
             val gateResp = app.get(
                 gate,
-                headers = pageHeaders,
+                headers = gateHeaders,
                 cookies = cookies,
                 referer = watchUrl,
                 interceptor = cfInterceptor
