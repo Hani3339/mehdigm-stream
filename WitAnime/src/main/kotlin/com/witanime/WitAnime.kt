@@ -82,9 +82,6 @@ class WitAnime(private val context: android.content.Context) : MainAPI() {
 
     private val xRequestedWith = "mark.via.gp"
 
-    private val secChUa = "\"Not;A=Brand\";v=\"8\", \"Chromium\";v=\"150\", \"Android WebView\";v=\"150\""
-
-
     override val mainPage = mainPageOf(
         "home" to "الرئيسية",
         "browse" to "قائمة الأنمي",

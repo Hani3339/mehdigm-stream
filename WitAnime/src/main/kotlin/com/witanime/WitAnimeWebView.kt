@@ -157,6 +157,9 @@ object WitAnimeWebView {
 
             val injectedJs = """
                 (function() {
+                    // Only the watch page exposes the player + /sources endpoint.
+                    // The warm-up navigation to the homepage must be ignored.
+                    if (!/\/watch\//.test(location.pathname)) return;
                     if (window.__witanimeRunning) return;
                     window.__witanimeRunning = true;
                     var B = $BRIDGE;
@@ -246,43 +249,56 @@ object WitAnimeWebView {
                 })();
             """.trimIndent()
 
-            view.webViewClient = object : WebViewClient() {
-                override fun onPageStarted(v: WebView?, url: String?, favicon: Bitmap?) {
-                    super.onPageStarted(v, url, favicon)
-                    println("[WitAnime][WebView] onPageStarted $url")
-                    runCatching { v?.evaluateJavascript(injectedJs, null) }
-                }
-
-                override fun onPageFinished(v: WebView?, url: String?) {
-                    super.onPageFinished(v, url)
-                    println("[WitAnime][WebView] onPageFinished $url")
-                    runCatching { v?.evaluateJavascript(injectedJs, null) }
-                }
-
-                override fun onReceivedError(
-                    v: WebView?,
-                    request: WebResourceRequest?,
-                    error: android.webkit.WebResourceError?
-                ) {
-                    super.onReceivedError(v, request, error)
-                    if (request?.isForMainFrame == true) {
-                        println("[WitAnime][WebView] onReceivedError ${error?.description} ${request.url}")
-                    }
-                }
-
-                override fun shouldInterceptRequest(
-                    v: WebView,
-                    request: WebResourceRequest
-                ): WebResourceResponse? = super.shouldInterceptRequest(v, request)
-            }
-
             handler.postDelayed({
                 if (!finished) deliver(Result(null, "timeout"))
             }, timeoutMs)
 
             cont.invokeOnCancellation { handler.post { deliver(Result(null, "cancelled")) } }
 
-            runCatching { view.loadUrl(watchUrl) }
+            // Warm the session on the homepage first (like a real user), then go
+            // to the watch page. Hitting the site's bot/rate limiter cold on the
+            // watch URL is what produced the "طلبات كثيرة جدًا" (429) page.
+            val origin = runCatching {
+                val u = java.net.URI(watchUrl)
+                "${u.scheme}://${u.host}/"
+            }.getOrNull()
+            if (!origin.isNullOrBlank()) {
+                var navigated = false
+                view.webViewClient = object : WebViewClient() {
+                    override fun onPageStarted(v: WebView?, url: String?, favicon: Bitmap?) {
+                        super.onPageStarted(v, url, favicon)
+                        println("[WitAnime][WebView] onPageStarted $url")
+                        if ((url ?: "").contains("/watch/")) {
+                            runCatching { v?.evaluateJavascript(injectedJs, null) }
+                        }
+                    }
+
+                    override fun onPageFinished(v: WebView?, url: String?) {
+                        super.onPageFinished(v, url)
+                        println("[WitAnime][WebView] onPageFinished $url")
+                        if (!navigated) {
+                            navigated = true
+                            handler.postDelayed({ runCatching { v?.loadUrl(watchUrl) } }, 300)
+                        } else {
+                            runCatching { v?.evaluateJavascript(injectedJs, null) }
+                        }
+                    }
+
+                    override fun onReceivedError(
+                        v: WebView?,
+                        request: WebResourceRequest?,
+                        error: android.webkit.WebResourceError?
+                    ) {
+                        super.onReceivedError(v, request, error)
+                        if (request?.isForMainFrame == true) {
+                            println("[WitAnime][WebView] onReceivedError ${error?.description} ${request.url}")
+                        }
+                    }
+                }
+                runCatching { view.loadUrl(origin) }
+            } else {
+                runCatching { view.loadUrl(watchUrl) }
+            }
         }
     }
 
@@ -382,8 +398,35 @@ object WitAnimeWebView {
                     if (u != gateUrl && !u.startsWith("about:")) {
                         captured = u
                     }
-                    // Give any final client-side redirect a moment, then report.
-                    handler.postDelayed({ deliver(captured) }, 600)
+                    // Not every gate is a 302. Some return a tiny HTML page whose
+                    // only content is an <iframe> (or a meta refresh) pointing at
+                    // the real embed. Pull that out of the DOM before reporting.
+                    v?.evaluateJavascript(
+                        """(function(){
+                            try {
+                                var ifr = document.querySelector('iframe[src]');
+                                if (ifr && ifr.src && ifr.src.indexOf('about:') !== 0) return ifr.src;
+                                var m = document.querySelector('meta[http-equiv=refresh]');
+                                if (m) {
+                                    var c = m.getAttribute('content') || '';
+                                    var i = c.indexOf('url=');
+                                    if (i >= 0) return c.substring(i + 4).replace(/^['"]|['"]$/g, '');
+                                }
+                                var a = document.querySelector('a[href^=http]');
+                                if (a && /embed|player|\/e\/|watch/.test(a.href)) return a.href;
+                            } catch (e) {}
+                            return '';
+                        })()"""
+                    ) { result ->
+                        val nested = result?.trim('"')?.replace("\\/", "/")
+                        if (!nested.isNullOrBlank() && nested.startsWith("http") &&
+                            nested != gateUrl && nested != captured
+                        ) {
+                            println("[WitAnime][WebView] gate nested -> $nested")
+                            captured = nested
+                        }
+                        handler.postDelayed({ if (!finished) deliver(captured) }, 400)
+                    }
                 }
 
                 override fun onReceivedError(
