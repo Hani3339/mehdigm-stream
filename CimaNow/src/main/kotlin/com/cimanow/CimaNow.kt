@@ -451,15 +451,30 @@ class CimaNow : MainAPI() {
 
     /** Reproduces the gate's HMAC token from the decoded `blog-post.html` payload. */
     private fun solveGateToken(blog: String): GateToken? {
+        println(
+            "[CimaNow] gate blog: tkfetpf=${blog.contains("TKFetpf")} cfg=${blog.contains("_0x_cfg")} " +
+                "v_41e5=${blog.contains("v_41e5")} ctx=${blog.contains("ctx_")} " +
+                "getlink=${blog.contains("get-link")} len=${blog.length}"
+        )
         // The payload is split into base64 chunks inside `window["TKFetpf"] = [ "...", ... ]`.
         val arrMatch = Regex("""window\[["']TKFetpf["']\]\s*=\s*\[(.*?)\];""", RegexOption.DOT_MATCHES_ALL)
-            .find(blog) ?: return null
+            .find(blog)
+        if (arrMatch == null) {
+            println("[CimaNow] gate blog: no TKFetpf array; head=${blog.take(400).replace("\n", " ")}")
+            return null
+        }
         val chunks = Regex(""""([^"]*)"""").findAll(arrMatch.groupValues[1]).map { it.groupValues[1] }.toList()
         if (chunks.isEmpty()) return null
         val payload = decodeBase64(chunks.joinToString("")) ?: return null
+        println("[CimaNow] gate payload len=${payload.size} head=${String(payload.copyOfRange(0, minOf(40, payload.size)), Charsets.ISO_8859_1)}")
         // The gate XORs the payload with a key derived from DOM measurements; on this fixed
         // layout it is constant ("21686"). Try a small range as a safety net.
-        val page = gateDecodePayload(payload) ?: return null
+        val page = gateDecodePayload(payload)
+        if (page == null) {
+            println("[CimaNow] gate: no key decoded payload head=${String(payload.copyOfRange(0, minOf(120, payload.size)), Charsets.ISO_8859_1)}")
+            return null
+        }
+        println("[CimaNow] gate decoded page head=${page.take(400).replace("\n", " ")}")
         val requestId = findJsonish(page, "v_41e5") ?: Regex("""request_id['"]?\s*[:=]\s*['"]([0-9a-f]{16,})['"]""")
             .find(page)?.groupValues?.get(1)
         val ch = findJsonish(page, "v_9e00")
