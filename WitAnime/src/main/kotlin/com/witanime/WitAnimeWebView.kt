@@ -186,14 +186,27 @@ object WitAnimeWebView {
                             var csrf = csrfEl ? csrfEl.content : '';
                             if (!csrf) { fail('no csrf'); return; }
                             var path = location.pathname.replace(/\/$/, '') + '/sources';
-                            var r = await fetch(path, {
-                                method: 'POST',
-                                headers: { 'Accept': 'application/json', 'X-CSRF-TOKEN': csrf, 'X-Requested-With': 'mark.via.gp' }
-                            });
-                            var t = await r.text();
-                            log('sources -> ' + r.status);
+                            var attempt = 0;
+                            var r, t;
+                            while (true) {
+                                r = await fetch(path, {
+                                    method: 'POST',
+                                    headers: { 'Accept': 'application/json', 'X-CSRF-TOKEN': csrf, 'X-Requested-With': 'mark.via.gp' }
+                                });
+                                t = await r.text();
+                                log('sources -> ' + r.status + (r.status === 429 ? ' (rate-limited, retrying)' : ''));
+                                if (r.status !== 429) break;
+                                attempt++;
+                                if (attempt >= 4) break;
+                                await new Promise(function(res){ setTimeout(res, 2500 * attempt); });
+                                var c2 = document.querySelector('meta[name=csrf-token]');
+                                if (c2) csrf = c2.content;
+                            }
                             if (r.status < 200 || r.status >= 300) { fail('HTTP ' + r.status + ' ' + t.slice(0, 200)); return; }
                             var data = JSON.parse(t);
+                            // Resolve each token to its real embed URL from inside the
+                            // browser (the gate is a same-origin 302). This is best-effort;
+                            // Kotlin also has a fallback.
                             var gates = {};
                             var players = data.players || {};
                             var tokens = [];
