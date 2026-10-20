@@ -402,7 +402,7 @@ class WitAnime(private val context: android.content.Context) : MainAPI() {
 
         candidates.forEach { candidate ->
             try {
-                loadExtractor(candidate, watchUrl, subtitleCallback) { resolved.add(it) }
+                loadExtractor(candidate, candidate, subtitleCallback) { resolved.add(it) }
             } catch (e: Exception) {
                 println("[WitAnime] loadExtractor($candidate) failed: ${e.message}")
             }
@@ -416,13 +416,29 @@ class WitAnime(private val context: android.content.Context) : MainAPI() {
                     url = link.url,
                     type = link.type
                 ) {
-                    this.referer = link.referer ?: watchUrl
+                    // Prefer the embed's referer (required by mp4upload/videa/4shared),
+                    // fall back to the candidate embed URL.
+                    this.referer = link.referer ?: candidateReferer(link)
                     this.headers = link.headers
                     this.quality = qualityValue
                 }
             )
         }
         return resolved.isNotEmpty()
+    }
+
+    private fun candidateReferer(link: ExtractorLink): String {
+        val url = link.url
+        return when {
+            url.contains("mp4upload.com") -> "https://www.mp4upload.com/"
+            url.contains("videa.hu") -> "https://videa.hu/"
+            url.contains("4shared.com") -> "https://www.4shared.com/"
+            url.contains("hgcloud.to") || url.contains("hgcloud") -> "https://hgcloud.to/"
+            url.contains("streamtape") -> "https://streamtape.com/"
+            url.contains("dood") -> "https://dood.to/"
+            url.contains("mixdrop") -> "https://mixdrop.co/"
+            else -> "https://witanime.site/"
+        }
     }
 
     private suspend fun resolveDownload(
