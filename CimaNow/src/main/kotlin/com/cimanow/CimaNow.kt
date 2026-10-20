@@ -402,7 +402,10 @@ class CimaNow : MainAPI() {
         )
         suspend fun fetch(url: String, referer: String?): String? = runCatching {
             val res = app.get(url, headers = gateHeaders, referer = referer, timeout = 60L)
-            println("[CimaNow] gate GET $url -> ${res.code} len=${res.text.length}")
+            val ct = res.headers.values("Content-Type").joinToString(";").take(60)
+            val sc = res.headers.values("Set-Cookie").joinToString(";").take(120)
+            val server = res.headers.values("Server").joinToString(";").take(40)
+            println("[CimaNow] gate GET $url -> ${res.code} len=${res.text.length} ct=$ct server=$server setcookie=$sc")
             res.text
         }.onFailure { println("[CimaNow] gate GET $url FAILED: ${it.javaClass.simpleName}: ${it.message}") }
             .getOrNull()
@@ -474,7 +477,10 @@ class CimaNow : MainAPI() {
         )
         suspend fun fetch(url: String, referer: String?): String? = runCatching {
             val res = app.get(url, headers = gateHeaders, referer = referer, timeout = 60L)
-            println("[CimaNow] gate GET $url -> ${res.code} len=${res.text.length}")
+            val ct = res.headers.values("Content-Type").joinToString(";").take(60)
+            val sc = res.headers.values("Set-Cookie").joinToString(";").take(120)
+            val server = res.headers.values("Server").joinToString(";").take(40)
+            println("[CimaNow] gate GET $url -> ${res.code} len=${res.text.length} ct=$ct server=$server setcookie=$sc")
             res.text
         }.onFailure { println("[CimaNow] gate GET $url FAILED: ${it.javaClass.simpleName}: ${it.message}") }
             .getOrNull()
