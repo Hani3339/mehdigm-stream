@@ -187,10 +187,12 @@ object WitAnimeWebView {
                             if (r.status < 200 || r.status >= 300) { fail('HTTP ' + r.status + ' ' + t.slice(0, 200)); return; }
                             var data = JSON.parse(t);
 
-                            // Resolve every stream/download gate to its final embed
-                            // URL browser-side (the gate is a same-origin 302 the
-                            // OkHttp client cannot follow without a CF challenge).
+                            // Report the sources immediately so loadLinks() never times
+                            // out waiting on gate resolution. Gates are streamed in a
+                            // separate message (onGates) as they resolve.
                             data.gates = {};
+                            report(data);
+
                             var tokens = [];
                             Object.keys(data.players || {}).forEach(function(q){
                                 (data.players[q] || []).forEach(function(e){ if (e && e.token) tokens.push(e.token); });
@@ -203,17 +205,9 @@ object WitAnimeWebView {
                             for (var i = 0; i < tokens.length; i++) {
                                 var tok = tokens[i];
                                 try {
-                                    var sr = await fetch('/watch/stream-source/' + tok, {
-                                        method: 'POST',
-                                        headers: { 'Accept': 'application/json', 'X-CSRF-TOKEN': csrf }
-                                    });
-                                    var meta = sr.ok ? await sr.json() : {};
-                                    var gr = await fetch('/watch/stream-gate/' + tok, { redirect: 'follow' });
-                                    data.gates[tok] = gr.url;
-                                    if (meta.referrerPolicy) data.gates[tok + ':rp'] = meta.referrerPolicy;
+                                    await fetch('/watch/stream-gate/' + tok, { redirect: 'follow' });
                                 } catch (e) { log('gate ' + tok.slice(0,6) + ' failed: ' + e); }
                             }
-                            report(data);
                         } catch (e) { fail(e && e.message ? e.message : 'unknown'); }
                     }
 
