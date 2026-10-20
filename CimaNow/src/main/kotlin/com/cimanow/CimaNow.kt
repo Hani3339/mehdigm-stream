@@ -384,11 +384,19 @@ class CimaNow : MainAPI() {
     private suspend fun resolveWatchToken(shineUrl: String): String? {
         val gateHeaders = mapOf(
             "User-Agent" to CN_MOBILE_UA,
-            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language" to "ar,en;q=0.9"
+            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language" to "en-US,en;q=0.9,ar-MA;q=0.8,ar;q=0.7",
+            "X-Requested-With" to "mark.via.gp",
+            "Upgrade-Insecure-Requests" to "1",
+            "sec-ch-ua" to "\"Not;A=Brand\";v=\"8\", \"Chromium\";v=\"150\", \"Android WebView\";v=\"150\"",
+            "sec-ch-ua-mobile" to "?1",
+            "sec-ch-ua-platform" to "\"Android\"",
+            "Sec-Fetch-Site" to "same-origin",
+            "Sec-Fetch-Mode" to "navigate",
+            "Sec-Fetch-Dest" to "document"
         )
         suspend fun fetch(url: String, referer: String?): String? = runCatching {
-            val res = app.get(url, headers = gateHeaders, referer = referer)
+            val res = app.get(url, headers = gateHeaders, referer = referer, timeout = 60L)
             println("[CimaNow] gate GET $url -> ${res.code} len=${res.text.length}")
             res.text
         }.onFailure { println("[CimaNow] gate GET $url FAILED: ${it.javaClass.simpleName}: ${it.message}") }
@@ -407,7 +415,8 @@ class CimaNow : MainAPI() {
             val redirectPage = fetch(redirectFree, "$mainUrl/") ?: return null
             val next3 = extractRedirect(redirectPage)
             val blogUrl = unwrapHrefLi(next3 ?: redirectFree).trimEnd('/') + "/"
-            val blogBase = blogUrl.substringBeforeLast("/") // .../example.com/2020/02
+            // POSTs go to `<blog-url>/get-link.php`, i.e. `.../blog-post.html/get-link.php`.
+            val blogBase = blogUrl.trimEnd('/')
             val blog = fetch(blogUrl, redirectFree) ?: return null
             val gate = solveGateToken(blog) ?: run {
                 println("[CimaNow] gate: solveGateToken failed (blog len=${blog.length})")
@@ -426,7 +435,9 @@ class CimaNow : MainAPI() {
                     "Content-Type" to "application/x-www-form-urlencoded",
                     "Origin" to origin(blogUrl),
                     "Referer" to blogUrl
-                )
+                ),
+                referer = blogUrl,
+                timeout = 60L
             ).text.trim().trimStart('\uFEFF').trim()
             println("[CimaNow] gate post resp=${post.take(160)}")
             post.takeIf { it.contains("/watching", true) && it.startsWith("http") }
