@@ -326,10 +326,11 @@
       "Movie",
       "Cartoon"
     ],
-    "version": 2,
+    "version": 3,
     "internalName": "WitAnime",
     "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/WitAnime.cs3",
     "name": "ويت أنمي (WitAnime)",
-    "description": "ويت أنمي (WitAnime) — أنمي مترجم ومدبلج وأفلام أنمي بجودة عالية."
+    "description": "ويت أنمي (WitAnime) — أنمي مترجم ومدبلج وأفلام أنمي بجودة عالية.",
+    "fileSize": 26349
   }
 ]

@@ -60,13 +60,26 @@ class WitAnime : MainAPI() {
         TvType.Cartoon,
     )
 
-    private val apiHeaders = mapOf(
-        "Accept" to "application/json, text/plain, */*",
-        "X-Requested-With" to "XMLHttpRequest",
-    )
-
     private val pageHeaders = mapOf(
         "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    )
+
+    private val browserUa =
+        "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 " +
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+
+    private fun apiRequestHeaders(csrf: String, referer: String): Map<String, String> = mapOf(
+        "Accept" to "application/json, text/plain, */*",
+        "X-CSRF-TOKEN" to csrf,
+        "X-XSRF-TOKEN" to csrf,
+        "X-Requested-With" to "XMLHttpRequest",
+        "Referer" to referer,
+        "Origin" to mainUrl,
+        "User-Agent" to browserUa,
+        "Accept-Language" to "ar,en-US;q=0.9,en;q=0.8",
+        "Sec-Fetch-Dest" to "empty",
+        "Sec-Fetch-Mode" to "cors",
+        "Sec-Fetch-Site" to "same-origin",
     )
 
     override val mainPage = mainPageOf(
@@ -175,7 +188,13 @@ class WitAnime : MainAPI() {
         val watchUrl = if (data.startsWith("http")) data else "$mainUrl$data"
         println("[WitAnime] loadLinks data=$data watchUrl=$watchUrl")
         val page = try {
-            app.get(watchUrl, headers = pageHeaders)
+            app.get(
+                watchUrl,
+                headers = pageHeaders + mapOf(
+                    "User-Agent" to browserUa,
+                    "Accept-Language" to "ar,en-US;q=0.9,en;q=0.8",
+                )
+            )
         } catch (e: Exception) {
             println("[WitAnime] watch page GET failed: ${e.message}")
             return false
@@ -191,14 +210,10 @@ class WitAnime : MainAPI() {
         val cookies = page.cookies
 
         val sourcesUrl = "$watchUrl/sources"
-        val sourceHeaders = buildMap {
-            putAll(apiHeaders)
-            put("X-CSRF-TOKEN", csrf)
-            put("Referer", watchUrl)
-            put("Origin", mainUrl)
-        }
+        val sourceHeaders = apiRequestHeaders(csrf, watchUrl)
 
-        val body = try {
+        var body: String? = null
+        try {
             val resp = app.post(
                 sourcesUrl,
                 headers = sourceHeaders,
@@ -206,14 +221,25 @@ class WitAnime : MainAPI() {
                 json = emptyMap<String, String>()
             )
             println("[WitAnime] sources POST code=${resp.code} body=${resp.text.take(300)}")
-            resp.text
+            if (resp.code in 200..299) body = resp.text
         } catch (e: Exception) {
             println("[WitAnime] sources POST failed: ${e.message}")
-            return false
         }
+        if (body == null) {
+            // Some deployments expose the manifest as GET instead of POST.
+            try {
+                val resp = app.get(sourcesUrl, headers = sourceHeaders, cookies = cookies)
+                println("[WitAnime] sources GET code=${resp.code} body=${resp.text.take(300)}")
+                if (resp.code in 200..299) body = resp.text
+            } catch (e: Exception) {
+                println("[WitAnime] sources GET failed: ${e.message}")
+            }
+        }
+        if (body == null) return false
+        val finalBody = body
 
         val root = try {
-            JSONObject(body)
+            JSONObject(finalBody)
         } catch (_: Exception) {
             return false
         }
@@ -282,12 +308,7 @@ class WitAnime : MainAPI() {
         try {
             val resp = app.post(
                 "$mainUrl/watch/stream-source/$token",
-                headers = buildMap {
-                    putAll(apiHeaders)
-                    put("X-CSRF-TOKEN", csrf)
-                    put("Referer", watchUrl)
-                    put("Origin", mainUrl)
-                },
+                headers = apiRequestHeaders(csrf, watchUrl),
                 cookies = cookies,
                 json = emptyMap<String, String>()
             )
@@ -357,12 +378,7 @@ class WitAnime : MainAPI() {
         try {
             app.post(
                 "$mainUrl/watch/download-source/$token",
-                headers = buildMap {
-                    putAll(apiHeaders)
-                    put("X-CSRF-TOKEN", csrf)
-                    put("Referer", watchUrl)
-                    put("Origin", mainUrl)
-                },
+                headers = apiRequestHeaders(csrf, watchUrl),
                 cookies = cookies,
                 json = emptyMap<String, String>()
             )
