@@ -537,8 +537,10 @@ class CimaNow : MainAPI() {
         return runCatching {
             val resolver = WebViewResolver(
                 // Stop once the WebView navigates to the tokenized watch URL.
-                interceptUrl = Regex(""".*/watching/\?token=[a-fA-F0-9]+"""),
-                userAgent = CN_MOBILE_UA,
+                interceptUrl = Regex(""".*/watching/\?token=[a-fA-F0-9]+.*"""),
+                additionalUrls = listOf(Regex(""".*/watching/\?token=[a-fA-F0-9]+.*""")),
+                // Keep the WebView's native UA: overriding it breaks Cloudflare's captcha.
+                userAgent = null,
                 useOkhttp = false,
                 timeout = 60_000L
             )
