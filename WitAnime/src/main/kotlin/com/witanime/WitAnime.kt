@@ -47,7 +47,7 @@ import org.jsoup.nodes.Element
  * The CSRF token is read from `<meta name="csrf-token">` on the watch page; the
  * session cookies from the same response are forwarded with every API call.
  */
-class WitAnime : MainAPI() {
+class WitAnime(private val context: android.content.Context) : MainAPI() {
     override var mainUrl = "https://witanime.site"
     override var name = "ويت أنمي (WitAnime)"
     override val hasMainPage = true
@@ -72,10 +72,12 @@ class WitAnime : MainAPI() {
     private val cfInterceptor: Interceptor get() = cloudflareKiller
 
     private val browserUa =
-        "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 " +
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+        "Mozilla/5.0 (Linux; Android 14; M2006C3MG Build/UQ1A.240205.004) " +
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.7871.63 Mobile Safari/537.36"
 
     private val xRequestedWith = "mark.via.gp"
+
+    private val secChUa = "\"Not;A=Brand\";v=\"8\", \"Chromium\";v=\"150\", \"Android WebView\";v=\"150\""
 
     private fun apiRequestHeaders(csrf: String, referer: String): Map<String, String> = mapOf(
         "Accept" to "application/json",
@@ -84,10 +86,15 @@ class WitAnime : MainAPI() {
         "Referer" to referer,
         "Origin" to mainUrl,
         "User-Agent" to browserUa,
-        "Accept-Language" to "en-US,en;q=0.9,ar;q=0.8",
+        "Accept-Language" to "en-US,en;q=0.9,ar-MA;q=0.8,ar;q=0.7",
+        "Accept-Encoding" to "gzip, deflate, br",
+        "Sec-CH-UA" to secChUa,
+        "Sec-CH-UA-Mobile" to "?1",
+        "Sec-CH-UA-Platform" to "\"Android\"",
         "Sec-Fetch-Site" to "same-origin",
         "Sec-Fetch-Mode" to "cors",
         "Sec-Fetch-Dest" to "empty",
+        "Priority" to "u=1, i",
     )
 
 
@@ -231,6 +238,13 @@ class WitAnime : MainAPI() {
             "Referer" to watchUrl,
             "Origin" to mainUrl,
             "User-Agent" to browserUa,
+            "Accept-Language" to "en-US,en;q=0.9,ar-MA;q=0.8,ar;q=0.7",
+            "Sec-CH-UA" to secChUa,
+            "Sec-CH-UA-Mobile" to "?1",
+            "Sec-CH-UA-Platform" to "\"Android\"",
+            "Sec-Fetch-Site" to "same-origin",
+            "Sec-Fetch-Mode" to "cors",
+            "Sec-Fetch-Dest" to "empty",
         )
         val fullHeaders = apiRequestHeaders(csrf, watchUrl)
 
@@ -241,7 +255,28 @@ class WitAnime : MainAPI() {
             if (body == null && code in 200..299 && text.trimStart().startsWith("{")) body = text
         }
 
-        try {
+        // Preferred path: run the request from a real (hidden) WebView so it
+        // carries a browser TLS/JA3 fingerprint. Cloudflare rejects the OkHttp
+        // client for this endpoint with a 404, but a WebView passes.
+        val activity = context as? android.app.Activity
+        if (activity != null && !activity.isFinishing) {
+            try {
+                val wv = WitAnimeWebView.fetchSources(
+                    activity = activity,
+                    watchUrl = watchUrl,
+                    cookies = cookies,
+                    userAgent = browserUa
+                )
+                println("[WitAnime] sources WEBVIEW json=${wv.json?.take(300)} err=${wv.error}")
+                if (!wv.json.isNullOrBlank() && wv.json.trimStart().startsWith("{")) {
+                    body = wv.json
+                }
+            } catch (e: Exception) {
+                println("[WitAnime] sources WEBVIEW failed: ${e.message}")
+            }
+        }
+
+        if (body == null) try {
             val r = app.post(
                 sourcesUrl,
                 headers = minimalHeaders,
