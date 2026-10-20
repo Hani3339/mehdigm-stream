@@ -295,9 +295,11 @@ class CimaNow : MainAPI() {
         var watchUrl = postDoc?.let { watchUrlFromDoc(it) } ?: watchingUrl(data)
         var raw: String? = null
         if (!shine.isNullOrBlank()) {
-            // The gate needs a JS/Cloudflare handshake; run it in the WebView first, then fall
-            // back to reproducing the HMAC in code.
-            val tokenUrl = resolveWatchTokenWebView(shine) ?: resolveWatchToken(shine)
+            // The gate needs a JS handshake; resolve its URL then run it in the WebView. Fall back
+            // to reproducing the HMAC in code.
+            val gateUrl = resolveGateUrl(shine)
+            println("[CimaNow] gateUrl=$gateUrl")
+            val tokenUrl = (gateUrl?.let { resolveWatchTokenWebView(it) }) ?: resolveWatchToken(shine)
             println("[CimaNow] tokenUrl=$tokenUrl")
             if (!tokenUrl.isNullOrBlank()) {
                 watchUrl = tokenUrl
@@ -417,11 +419,11 @@ class CimaNow : MainAPI() {
             val redirectFree = unwrapHrefLi(next1)
             val redirectPage = fetch(redirectFree, "$mainUrl/") ?: return null
             val next3 = extractRedirect(redirectPage)
-            // NOTE: `.../blog-post.html` (no trailing slash) serves the gate; with a trailing
-            // slash the server resolves a *different* post (the plain Blogger page), so keep it.
-            val blogUrl = unwrapHrefLi(next3 ?: redirectFree).trimEnd('/')
-            // POSTs go to `<blog-url>/get-link.php`, i.e. `.../blog-post.html/get-link.php`.
-            val blogBase = blogUrl
+            // Keep the trailing slash: `.../blog-post.html/` serves the gate page (the one with
+            // `TKFetpf`); without it the server returns a plain Blogger decoy.
+            val blogUrl = unwrapHrefLi(next3 ?: redirectFree).trimEnd('/') + "/"
+            // POSTs go to `<blog-url>get-link.php`, i.e. `.../blog-post.html/get-link.php`.
+            val blogBase = blogUrl.trimEnd('/')
             val blog = fetch(blogUrl, redirectFree) ?: return null
             val gate = solveGateToken(blog) ?: run {
                 println("[CimaNow] gate: solveGateToken failed (blog len=${blog.length})")
@@ -453,20 +455,60 @@ class CimaNow : MainAPI() {
     }
 
     /**
-     * Runs the ad-gate inside CloudStream's WebView: the gate is a JS/Cloudflare page whose
-     * redirect chain ends on a tokenized `cimanow.cc/<slug>/watching/?token=...` URL. The
-     * resolver stops as soon as the WebView requests that URL and returns it.
+     * Resolves the gate's `blog-post.html/` URL by following the redirect chain (OkHttp reaches
+     * it fine, but the server serves a decoy unless the page's JS runs). Returns null on failure.
      */
-    private suspend fun resolveWatchTokenWebView(shineUrl: String): String? {
+    private suspend fun resolveGateUrl(shineUrl: String): String? {
+        val gateHeaders = mapOf(
+            "User-Agent" to CN_MOBILE_UA,
+            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language" to "en-US,en;q=0.9,ar-MA;q=0.8,ar;q=0.7",
+            "X-Requested-With" to "mark.via.gp",
+            "Upgrade-Insecure-Requests" to "1",
+            "sec-ch-ua" to "\"Not;A=Brand\";v=\"8\", \"Chromium\";v=\"150\", \"Android WebView\";v=\"150\"",
+            "sec-ch-ua-mobile" to "?1",
+            "sec-ch-ua-platform" to "\"Android\"",
+            "Sec-Fetch-Site" to "same-origin",
+            "Sec-Fetch-Mode" to "navigate",
+            "Sec-Fetch-Dest" to "document"
+        )
+        suspend fun fetch(url: String, referer: String?): String? = runCatching {
+            val res = app.get(url, headers = gateHeaders, referer = referer, timeout = 60L)
+            println("[CimaNow] gate GET $url -> ${res.code} len=${res.text.length}")
+            res.text
+        }.onFailure { println("[CimaNow] gate GET $url FAILED: ${it.javaClass.simpleName}: ${it.message}") }
+            .getOrNull()
+
+        return try {
+            val loadon = fetch(shineUrl, "$mainUrl/") ?: return null
+            val next1 = extractRedirect(loadon) ?: return null
+            val redirectFree = unwrapHrefLi(next1)
+            val redirectPage = fetch(redirectFree, "$mainUrl/") ?: return null
+            val next3 = extractRedirect(redirectPage)
+            unwrapHrefLi(next3 ?: redirectFree).trimEnd('/') + "/"
+        } catch (e: Exception) {
+            println("[CimaNow] gate url EXCEPTION: ${e.javaClass.simpleName}: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Runs the ad-gate inside CloudStream's WebView. The gate (`blog-post.html/`) shows a 10s
+     * countdown then auto-submits `get-link.php`, navigating to `cimanow.cc/<slug>/watching/?token=`.
+     * The resolver stops as soon as the WebView requests that tokenized URL and returns it.
+     *
+     * [startUrl] is a URL whose page is the gate itself (e.g. the `blog-post.html/` redirect target).
+     */
+    private suspend fun resolveWatchTokenWebView(startUrl: String): String? {
         return runCatching {
             val resolver = WebViewResolver(
-                // Stop once the WebView requests the tokenized watch URL (its request is the signal).
+                // Stop once the WebView navigates to the tokenized watch URL.
                 interceptUrl = Regex(""".*/watching/\?token=[a-fA-F0-9]+"""),
-                userAgent = null,
+                userAgent = CN_MOBILE_UA,
                 useOkhttp = false,
-                timeout = 45_000L
+                timeout = 60_000L
             )
-            val (request, _) = resolver.resolveUsingWebView(shineUrl, "$mainUrl/", "GET") { false }
+            val (request, _) = resolver.resolveUsingWebView(startUrl, "$mainUrl/", "GET") { false }
             val result = request?.url?.toString()?.trim()
             println("[CimaNow] webview token=$result")
             result?.takeIf { it.contains("/watching") && it.contains("token=") }
