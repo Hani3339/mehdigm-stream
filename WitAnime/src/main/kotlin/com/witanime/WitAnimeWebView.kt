@@ -249,4 +249,123 @@ object WitAnimeWebView {
             runCatching { view.loadUrl(watchUrl) }
         }
     }
+
+    /**
+     * Loads a same-origin stream-gate URL in a throwaway WebView and returns the
+     * URL it redirects to (the real embed). Running the navigation in the browser
+     * bypasses any Cloudflare bot check that rejects the OkHttp client.
+     */
+    @SuppressLint("SetJavaScriptEnabled")
+    suspend fun resolveGate(
+        activity: Activity,
+        gateUrl: String,
+        cookies: Map<String, String>,
+        userAgent: String,
+        timeoutMs: Long = 20_000L
+    ): String? = withContext(Dispatchers.Main) {
+        suspendCancellableCoroutine { cont ->
+            var finished = false
+            val handler = Handler(Looper.getMainLooper())
+            var webView: WebView? = null
+            val dialog = Dialog(activity)
+            var captured: String? = null
+
+            fun cleanup() {
+                runCatching { webView?.stopLoading() }
+                runCatching { webView?.destroy() }
+                runCatching { dialog.dismiss() }
+            }
+
+            fun deliver(result: String?) {
+                if (finished) return
+                finished = true
+                runCatching { if (cont.isActive) cont.resume(result) }
+                cleanup()
+            }
+
+            val cookieManager = CookieManager.getInstance()
+            cookieManager.setAcceptCookie(true)
+
+            dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+            dialog.setCancelable(false)
+            dialog.setCanceledOnTouchOutside(false)
+
+            val view = WebView(activity)
+            webView = view
+            view.visibility = View.INVISIBLE
+
+            dialog.window?.apply {
+                setBackgroundDrawableResource(android.R.color.transparent)
+                setDimAmount(0f)
+                clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+                addFlags(
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                )
+                attributes = attributes?.apply {
+                    width = 1
+                    height = 1
+                    x = -10000
+                    y = -10000
+                    gravity = Gravity.START or Gravity.TOP
+                }
+            }
+            try {
+                dialog.setContentView(view, ViewGroup.LayoutParams(1, 1))
+                dialog.show()
+            } catch (_: Exception) {
+            }
+
+            view.settings.apply {
+                javaScriptEnabled = true
+                domStorageEnabled = true
+                userAgentString = userAgent
+                blockNetworkImage = true
+            }
+            cookieManager.setAcceptThirdPartyCookies(view, true)
+            runCatching {
+                for ((name, value) in cookies) {
+                    cookieManager.setCookie(gateUrl, "$name=$value")
+                }
+                cookieManager.flush()
+            }
+
+            view.webViewClient = object : WebViewClient() {
+                override fun onPageStarted(v: WebView?, url: String?, favicon: Bitmap?) {
+                    super.onPageStarted(v, url, favicon)
+                    val u = url ?: return
+                    println("[WitAnime][WebView] gate nav $u")
+                    if (u != gateUrl && !u.startsWith("about:")) {
+                        captured = u
+                    }
+                }
+
+                override fun onPageFinished(v: WebView?, url: String?) {
+                    super.onPageFinished(v, url)
+                    val u = url ?: return
+                    if (u != gateUrl && !u.startsWith("about:")) {
+                        captured = u
+                    }
+                    // Give any final client-side redirect a moment, then report.
+                    handler.postDelayed({ deliver(captured) }, 600)
+                }
+
+                override fun onReceivedError(
+                    v: WebView?,
+                    request: WebResourceRequest?,
+                    error: android.webkit.WebResourceError?
+                ) {
+                    super.onReceivedError(v, request, error)
+                    if (request?.isForMainFrame == true) {
+                        deliver(captured)
+                    }
+                }
+            }
+
+            handler.postDelayed({ if (!finished) deliver(captured) }, timeoutMs)
+            cont.invokeOnCancellation { handler.post { deliver(null) } }
+
+            runCatching { view.loadUrl(gateUrl) }
+        }
+    }
 }

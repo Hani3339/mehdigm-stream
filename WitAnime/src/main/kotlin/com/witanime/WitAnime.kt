@@ -244,6 +244,30 @@ class WitAnime(private val context: android.content.Context) : MainAPI() {
 
         val players = root.optJSONObject("players")
         if (players != null) {
+            // Warm the gate map from the WebView (browser context) so the exact
+            // embed URL is available even if the OkHttp gate is bot-blocked.
+            val allTokens = linkedSetOf<String>()
+            for (quality in players.keys()) {
+                val list = players.optJSONArray(quality) ?: continue
+                for (i in 0 until list.length()) {
+                    val t = list.optJSONObject(i)?.optString("token")?.ifBlank { null }
+                    if (t != null) allTokens.add(t)
+                }
+            }
+            if (gateMap.isEmpty()) {
+                val mutable = LinkedHashMap<String, String>()
+                for (t in allTokens) {
+                    val gateUrl = "$mainUrl/watch/stream-gate/$t"
+                    val real = try {
+                        WitAnimeWebView.resolveGate(activity, gateUrl, cookies, browserUa)
+                    } catch (_: Exception) {
+                        null
+                    }
+                    if (!real.isNullOrBlank()) mutable[t] = real
+                }
+                gateMap = mutable
+                println("[WitAnime] webview gates=${gateMap.values}")
+            }
             for (quality in players.keys()) {
                 val list = players.optJSONArray(quality) ?: continue
                 for (i in 0 until list.length()) {
@@ -339,9 +363,9 @@ class WitAnime(private val context: android.content.Context) : MainAPI() {
             println("[WitAnime] webGate $token -> $webGate")
             candidates.add(webGate)
         }
-        // The real flow (verified in a live HAR): first GET the same-origin
-        // stream-gate (a 302 to the real embed host), THEN POST stream-source.
-        // Doing it the other way round makes the gate 404.
+        // The gate is a same-origin 302 whose `Location` is the real embed host
+        // (mega.nz/embed, mp4upload.com/embed, videa.hu/player, 4shared, ...).
+        // Read it without following so we can hand the exact URL to the extractor.
         try {
             val r = app.get(
                 gate,
@@ -358,9 +382,12 @@ class WitAnime(private val context: android.content.Context) : MainAPI() {
                     "Upgrade-Insecure-Requests" to "1",
                 ),
                 cookies = cookies,
+                allowRedirects = false,
                 interceptor = cfInterceptor
             )
-            println("[WitAnime] gateHTTP $token code=${r.code} final=${r.url}")
+            val loc = r.headers["Location"] ?: r.headers["location"]
+            println("[WitAnime] gateHTTP $token code=${r.code} location=$loc")
+            if (!loc.isNullOrBlank()) candidates.add(loc)
             if (r.url.isNotBlank() && r.url != gate) candidates.add(r.url)
             Regex("""https?://[^"'\\\s]+\.(?:m3u8|mp4)[^"'\\\s]*""")
                 .findAll(r.text).forEach { candidates.add(it.value) }
