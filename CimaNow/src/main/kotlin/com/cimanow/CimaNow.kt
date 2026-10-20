@@ -385,23 +385,33 @@ class CimaNow : MainAPI() {
      * HMAC key, then a POST to `get-link.php` returns the tokenized URL.
      */
     private suspend fun resolveWatchToken(shineUrl: String): String? {
+        // The gate's `request_id` is single-use: if the server answers with its placeholder
+        // (`/pig/watching/`) retry the whole handshake with a fresh session.
+        repeat(2) { attempt ->
+            val url = resolveWatchTokenOnce(shineUrl)
+            if (url != null) return url
+            println("[CimaNow] gate: attempt ${attempt + 1} produced no token, retrying")
+        }
+        return null
+    }
+
+    private suspend fun resolveWatchTokenOnce(shineUrl: String): String? {
         var cookie: String? = null
-        suspend fun gateHeaders(): Map<String, String> = buildMap {
+        // Exact browser header sets captured from a working session (Via browser on Android).
+        fun getHeaders(secFetchSite: String, referer: String): Map<String, String> = buildMap {
             put("User-Agent", CN_MOBILE_UA)
-            put("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
+            put("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
             put("Accept-Language", "en-US,en;q=0.9,ar-MA;q=0.8,ar;q=0.7")
             put("X-Requested-With", "mark.via.gp")
             put("Upgrade-Insecure-Requests", "1")
-            put("sec-ch-ua", "\"Not;A=Brand\";v=\"8\", \"Chromium\";v=\"150\", \"Android WebView\";v=\"150\"")
-            put("sec-ch-ua-mobile", "?1")
-            put("sec-ch-ua-platform", "\"Android\"")
-            put("Sec-Fetch-Site", "same-origin")
+            put("Sec-Fetch-Site", secFetchSite)
             put("Sec-Fetch-Mode", "navigate")
             put("Sec-Fetch-Dest", "document")
+            put("Referer", referer)
             cookie?.let { put("Cookie", it) }
         }
-        suspend fun fetch(url: String, referer: String?): String? = runCatching {
-            val res = app.get(url, headers = gateHeaders(), referer = referer, timeout = 60L)
+        suspend fun fetch(url: String, referer: String, secFetchSite: String = "cross-site"): String? = runCatching {
+            val res = app.get(url, headers = getHeaders(secFetchSite, referer), timeout = 60L)
             // Preserve the session cookie set by `loadon`; it is required for the gate page.
             res.headers.values("Set-Cookie").forEach { sc ->
                 val pair = sc.substringBefore(';').trim()
@@ -422,19 +432,33 @@ class CimaNow : MainAPI() {
                 return null
             }
             val redirectFree = unwrapHrefLi(next1)
-            val redirectPage = fetch(redirectFree, "$mainUrl/") ?: return null
+            val redirectPage = fetch(redirectFree, "https://rm.freex2line.online/") ?: return null
             val next3 = extractRedirect(redirectPage)
             // Keep the trailing slash: `.../blog-post.html/` serves the gate page (the one with
             // `TKFetpf`); without it the server returns a plain Blogger decoy.
             val blogUrl = unwrapHrefLi(next3 ?: redirectFree).trimEnd('/') + "/"
             // POSTs go to `<blog-url>get-link.php`, i.e. `.../blog-post.html/get-link.php`.
             val blogBase = blogUrl.trimEnd('/')
-            val blog = fetch(blogUrl, redirectFree) ?: return null
+            val blog = fetch(blogUrl, redirectFree, "same-origin") ?: return null
             val gate = solveGateToken(blog) ?: run {
                 println("[CimaNow] gate: solveGateToken failed (blog len=${blog.length})")
                 return null
             }
             println("[CimaNow] gate: requestId=${gate.requestId} ch=${gate.ch} hmac=${gate.hmacToken}")
+            // The XHR that the gate page fires, headers exactly as the browser sends them.
+            val postHeaders = buildMap {
+                put("User-Agent", CN_MOBILE_UA)
+                put("Accept", "*/*")
+                put("Accept-Language", "en-US,en;q=0.9,ar-MA;q=0.8,ar;q=0.7")
+                put("X-Requested-With", "mark.via.gp")
+                put("Content-Type", "application/x-www-form-urlencoded")
+                put("Origin", origin(blogUrl))
+                put("Referer", blogUrl)
+                put("Sec-Fetch-Site", "same-origin")
+                put("Sec-Fetch-Mode", "cors")
+                put("Sec-Fetch-Dest", "empty")
+                cookie?.let { put("Cookie", it) }
+            }
             val postRes = app.post(
                 "$blogBase/get-link.php",
                 data = mapOf(
@@ -443,21 +467,17 @@ class CimaNow : MainAPI() {
                     "ch" to gate.ch,
                     "fp" to CN_GATE_FP
                 ),
-                headers = gateHeaders() + mapOf(
-                    "Content-Type" to "application/x-www-form-urlencoded",
-                    "Origin" to origin(blogUrl),
-                    "Referer" to blogUrl
-                ),
+                headers = postHeaders,
                 referer = blogUrl,
                 timeout = 60L
             )
             val locHeader = postRes.headers.values("Location").firstOrNull()
             val post = postRes.text.trim().trimStart('\uFEFF').trim()
             println("[CimaNow] gate post code=${postRes.code} location=$locHeader len=${post.length}")
-            println("[CimaNow] gate post resp=${post.take(600).replace("\n", " ")}")
-            // The POST may answer with the tokenized URL directly, a `Location` header, or a small
-            // HTML redirect page. Extract the tokenized `/watching/?token=...` URL from any of them.
-            val candidates = listOfNotNull(locHeader, extractRedirect(post), post.takeIf { it.startsWith("http") })
+            println("[CimaNow] gate post resp=${post.take(400).replace("\n", " ")}")
+            // The POST answers with the tokenized URL as plain text (optionally preceded by a BOM);
+            // tolerate a `Location` header or an HTML redirect as well.
+            val candidates = listOfNotNull(post.takeIf { it.startsWith("http") }, locHeader, extractRedirect(post))
             candidates.firstOrNull { it.contains("/watching", true) && it.contains("token=") }
         } catch (e: Exception) {
             println("[CimaNow] gate EXCEPTION: ${e.javaClass.simpleName}: ${e.message}")
