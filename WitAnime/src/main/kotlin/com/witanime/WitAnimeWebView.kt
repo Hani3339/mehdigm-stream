@@ -167,6 +167,61 @@ object WitAnimeWebView {
                     function report(o){ B.onResult(JSON.stringify(o)); }
                     function fail(m){ B.onError(String(m)); }
 
+                    // The site authorises a token by POSTing /watch/stream-source/<token>
+                    // (returns {sandbox, referrerPolicy}) and only then loads
+                    // /watch/stream-gate/<token> in an iframe. Both are same-origin, so
+                    // we can drive them here and read the resulting frame's DOM. Skipping
+                    // the authorisation POST (as the OkHttp path did) leaves the gate
+                    // hanging with no content — the "webview gates=[]" symptom.
+                    async function resolveGate(token, csrf) {
+                        if (!/^[a-f0-9]{64}$/.test(token)) return null;
+                        try {
+                            var s = await fetch('/watch/stream-source/' + token, {
+                                method: 'POST',
+                                headers: { 'Accept': 'application/json', 'X-CSRF-TOKEN': csrf }
+                            });
+                            log('stream-source ' + token.slice(0, 8) + ' -> ' + s.status);
+                            if (!s.ok) return null;
+                        } catch (e) { return null; }
+                        return await new Promise(function(resolve) {
+                            var done = false;
+                            var ifr = document.createElement('iframe');
+                            ifr.style.cssText = 'position:fixed;width:1px;height:1px;left:-9999px;top:-9999px;border:0';
+                            // No referrer, matching the site's iframe referrerpolicy.
+                            ifr.referrerPolicy = 'no-referrer';
+                            function finish(v) {
+                                if (done) return;
+                                done = true;
+                                try { ifr.remove(); } catch (e) {}
+                                resolve(v);
+                            }
+                            function inspect() {
+                                try {
+                                    var doc = ifr.contentDocument;
+                                    if (!doc || !doc.documentElement) { finish(null); return; }
+                                    var status = doc.documentElement.dataset ? doc.documentElement.dataset.status : null;
+                                    if (status) { log('gate status=' + status); finish(null); return; }
+                                    var ifr2 = doc.querySelector('iframe[src]');
+                                    if (ifr2 && ifr2.src && ifr2.src.indexOf('about:') !== 0) { finish(ifr2.src); return; }
+                                    var m = doc.querySelector('meta[http-equiv=refresh]');
+                                    if (m) {
+                                        var c = m.getAttribute('content') || '';
+                                        var i = c.indexOf('url=');
+                                        if (i >= 0) { finish(c.substring(i + 4).replace(/^['"]|['"]$/g, '')); return; }
+                                    }
+                                    var a = doc.querySelector('a[href^=http]');
+                                    if (a && /embed|player|\/e\/|watch|stream/.test(a.href)) { finish(a.href); return; }
+                                } catch (e) {}
+                                finish(null);
+                            }
+                            ifr.addEventListener('load', function() { setTimeout(inspect, 250); });
+                            setTimeout(inspect, 1500);
+                            setTimeout(function() { finish(null); }, 8000);
+                            ifr.src = '/watch/stream-gate/' + token;
+                            document.body.appendChild(ifr);
+                        });
+                    }
+
                     async function run() {
                         try {
                             var csrfEl = document.querySelector('meta[name=csrf-token]');
@@ -192,11 +247,27 @@ object WitAnimeWebView {
                             if (r.status < 200 || r.status >= 300) { fail('HTTP ' + r.status + ' ' + t.slice(0, 200)); return; }
                             var data = JSON.parse(t);
 
-                            // Report the sources immediately. Gates are resolved by
-                            // the Kotlin side (reading the 302 Location) so we do not
-                            // spend extra requests here, which only worsens the site's
-                            // aggressive rate limiting.
-                            data.gates = {};
+                            // Resolve every player token to its real embed URL here, in
+                            // the browser session, then hand the map to Kotlin so it can
+                            // skip the (bot-blocked) OkHttp gate request entirely.
+                            var tokens = [];
+                            try {
+                                var players = data.players || {};
+                                for (var q in players) {
+                                    var list = players[q] || [];
+                                    for (var i = 0; i < list.length; i++) {
+                                        var tk = list[i] && list[i].token;
+                                        if (tk && tokens.indexOf(tk) < 0) tokens.push(tk);
+                                    }
+                                }
+                            } catch (e) {}
+                            var gates = {};
+                            for (var k = 0; k < tokens.length; k++) {
+                                var real = await resolveGate(tokens[k], csrf);
+                                log('gate ' + tokens[k].slice(0, 8) + ' -> ' + real);
+                                if (real) gates[tokens[k]] = real;
+                            }
+                            data.gates = gates;
                             report(data);
                         } catch (e) { fail(e && e.message ? e.message : 'unknown'); }
                     }
