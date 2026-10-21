@@ -374,8 +374,12 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
         }
 
         // 2) Downloads: `/download/<uuid>?expires=&signature=` per quality.
-        for (link in extractDownloads(html)) {
-            if (emitDownload(link.first, link.second, episodeUrl, callback)) found = true
+        //    Only offered when streaming is unavailable — these live on the
+        //    Cloudflare-protected main domain and are not playable in-app.
+        if (!found) {
+            for (link in extractDownloads(html)) {
+                emitDownload(link.first, link.second, episodeUrl, callback)
+            }
         }
 
         return found
@@ -435,7 +439,34 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
         referer: String,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val playerHtml = getText(playerUrl, referer) ?: return false
+        // vid3rb validates the request context (referer + iframe semantics) and
+        // the token is bound to the session that produced `video_url`. Fetch it
+        // as an embedded frame would, and fall back to the real WebView (which
+        // keeps the solved Cloudflare session on the device's real IP).
+        val frameHeaders = headers + mapOf(
+            "Referer" to "$mainUrl/",
+            "Sec-Fetch-Dest" to "iframe",
+            "Sec-Fetch-Mode" to "navigate",
+            "Sec-Fetch-Site" to "cross-site",
+            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        )
+
+        var playerHtml = runCatching {
+            app.get(
+                playerUrl,
+                headers = frameHeaders,
+                cookies = persistedCookies(mainUrl) + persistedCookies(playerUrl)
+            ).text
+        }.getOrNull()
+
+        if (playerHtml == null || !playerHtml.contains("video_sources")) {
+            Log.i(TAG, "player plain fetch failed, trying WebView for $playerUrl")
+            Anime3rbCloudflareSolver.solve(context as? android.app.Activity, playerUrl, UA)?.let {
+                playerHtml = it.outerHtml()
+            }
+        }
+        val html = playerHtml ?: return false
+
         var any = false
 
         // Primary format: `var video_sources = [ {"src":"...","label":"1080p","premium":false}, ... ];
@@ -443,7 +474,7 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
             """video_sources\s*=\s*(\[.*?\])\s*;""",
             setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE)
         )
-        for (arr in arrayRe.findAll(playerHtml)) {
+        for (arr in arrayRe.findAll(html)) {
             val json = arr.groupValues[1]
                 .replace("\\/", "/")
                 .replace("&amp;", "&")
@@ -471,7 +502,7 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
                 """"src"\s*:\s*"(https://[^"]+\.(?:mp4|m3u8)[^"]*)"""",
                 RegexOption.IGNORE_CASE
             )
-            for (m in re.findAll(playerHtml)) {
+            for (m in re.findAll(html)) {
                 val src = m.groupValues[1].replace("\\/", "/").replace("&amp;", "&")
                 if (src.isBlank()) continue
                 emitStream(src, qualityLabel(src), playerUrl, referer, callback)
@@ -515,6 +546,8 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
         referer: String,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        val cookieHeader = persistedCookies(mainUrl)
+            .entries.joinToString("; ") { "${it.key}=${it.value}" }
         callback(
             newExtractorLink(
                 source = name,
@@ -524,10 +557,12 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
             ) {
                 this.referer = referer
                 this.quality = qualityValue(label, downloadUrl)
-                this.headers = mapOf(
-                    "User-Agent" to UA,
-                    "Referer" to referer,
-                )
+                this.headers = buildMap {
+                    put("User-Agent", UA)
+                    put("Referer", referer)
+                    put("Accept", "*/*")
+                    if (cookieHeader.isNotBlank()) put("Cookie", cookieHeader)
+                }
             }
         )
         return true
