@@ -1,383 +1,383 @@
 [
-  {
-    "iconUrl": "https://animezid.org/uploads/custom-logo.png",
-    "apiVersion": 1,
-    "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-    "fileSize": 78862,
-    "status": 1,
-    "language": "ar",
-    "authors": [
-      "mehdigm4life"
-    ],
-    "tvTypes": [
-      "Anime",
-      "AnimeMovie",
-      "Cartoon",
-      "TvSeries",
-      "Movie",
-      "OVA"
-    ],
-    "version": 21,
-    "internalName": "Animezid",
-    "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/Animezid.cs3",
-    "name": "انمي زد (Animezid)",
-    "description": "موقع انمي زد — مشاهدة وتحميل أفلام ومسلسلات الأنمي والكرتون المدبلج والمترجم."
-  },
-  {
-    "iconUrl": "https://static.faselhdcdn.com/wp-content/uploads/2022/06/logo-1.png",
-    "apiVersion": 1,
-    "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-    "fileSize": 51661,
-    "status": 1,
-    "language": "ar",
-    "authors": [
-      "mehdigm4life"
-    ],
-    "tvTypes": [
-      "TvSeries",
-      "Movie",
-      "Anime"
-    ],
-    "version": 9,
-    "internalName": "FaselHD",
-    "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/FaselHD.cs3",
-    "name": "فاصل إعلاني (FaselHD)",
-    "description": "مشاهدة وتحميل الأفلام والمسلسلات الأجنبية والآسيوية والأنمي."
-  },
-  {
-    "iconUrl": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/Shahid4u.png",
-    "apiVersion": 1,
-    "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-    "fileSize": 36074,
-    "status": 1,
-    "language": "ar",
-    "authors": [
-      "mehdigm4life"
-    ],
-    "tvTypes": [
-      "TvSeries",
-      "Movie",
-      "Anime"
-    ],
-    "version": 2,
-    "internalName": "Shahid4u",
-    "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/Shahid4u.cs3",
-    "name": "شاهد فور يو (Shahid4u)",
-    "description": "شاهد فور يو — مشاهدة وتحميل الأفلام والمسلسلات الأجنبية والعربية والتركية والآسيوية والأنمي."
-  },
-  {
-    "iconUrl": "https://tuktukhd.com/wp-content/themes/TukTukCinema3/tuk.png?x50750",
-    "apiVersion": 1,
-    "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-    "fileSize": 45461,
-    "status": 1,
-    "language": "ar",
-    "authors": [
-      "mehdigm4life"
-    ],
-    "tvTypes": [
-      "TvSeries",
-      "Movie",
-      "Anime"
-    ],
-    "version": 7,
-    "internalName": "TukTukcima",
-    "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/TukTukcima.cs3",
-    "name": "توك توك سينما (TukTuk)",
-    "description": "مشاهدة وتحميل الأفلام والمسلسلات الأجنبية والآسيوية والتركية والأنمي."
-  },
-  {
-    "iconUrl": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/cartoonanime.jpeg",
-    "apiVersion": 1,
-    "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-    "fileSize": 23198,
-    "status": 1,
-    "language": "ar",
-    "authors": [
-      "mehdigm4life"
-    ],
-    "tvTypes": [
-      "Anime",
-      "TvSeries",
-      "Movie",
-      "Cartoon"
-    ],
-    "version": 2,
-    "internalName": "CartoonAnime",
-    "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/CartoonAnime.cs3",
-    "name": "مسلسلات كرتون وأنمي (CartoonAnime)",
-    "description": "مسلسلات كرتون وأنمي — مسلسلات وأفلام الكرتون والأنمي المترجمة والمدبلجة."
-  },
-  {
-    "iconUrl": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/CimaCloud.png",
-    "apiVersion": 1,
-    "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-    "fileSize": 3284091,
-    "status": 1,
-    "language": "ar",
-    "authors": [
-      "mehdigm4life"
-    ],
-    "tvTypes": [
-      "Anime",
-      "TvSeries",
-      "Movie",
-      "Cartoon"
-    ],
-    "version": 34,
-    "internalName": "CimaCloud",
-    "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/CimaCloud.cs3",
-    "name": "سيما كلاود (CimaCloud)",
-    "description": "CimaCloud — مباشر، مدبلج، مترجم"
-  },
-  {
-    "iconUrl": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/AnimeDay.jpg",
-    "apiVersion": 1,
-    "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-    "fileSize": 3284541,
-    "status": 1,
-    "language": "ar",
-    "authors": [
-      "mehdigm4life"
-    ],
-    "tvTypes": [
-      "Anime",
-      "TvSeries",
-      "Movie",
-      "Cartoon"
-    ],
-    "version": 28,
-    "internalName": "AnimeDay",
-    "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/AnimeDay.cs3",
-    "name": "أنمي داي (AnimeDay)",
-    "description": "AnimeDay — أنمي وكرتون مدبلج ومترجم"
-  },
-  {
-    "iconUrl": "https://stardima.app/logo.png",
-    "apiVersion": 1,
-    "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-    "fileSize": 4198101,
-    "status": 1,
-    "language": "ar",
-    "authors": [
-      "mehdigm4life"
-    ],
-    "tvTypes": [
-      "Movie",
-      "TvSeries",
-      "Anime",
-      "Cartoon",
-      "AnimeMovie"
-    ],
-    "version": 16,
-    "internalName": "StarDima",
-    "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/StarDima.cs3",
-    "name": "ستارديما (StarDima)",
-    "description": "ستارديما — أفلام ومسلسلات وكرتون مدبلج ومترجم."
-  },
-  {
-    "iconUrl": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/DramaWorld.png",
-    "apiVersion": 1,
-    "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-    "fileSize": 41289,
-    "status": 1,
-    "language": "ar",
-    "authors": [
-      "mehdigm4life"
-    ],
-    "tvTypes": [
-      "Movie",
-      "TvSeries"
-    ],
-    "version": 7,
-    "internalName": "DramaWorld",
-    "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/DramaWorld.cs3",
-    "name": "عالم الدراما (DramaWorld)",
-    "description": "عالم الدراما — أفلام ومسلسلات وقنوات بث مباشر."
-  },
-  {
-    "iconUrl": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/animeslayer_logo.png",
-    "apiVersion": 1,
-    "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-    "fileSize": 27295,
-    "status": 1,
-    "language": "ar",
-    "authors": [
-      "mehdigm4life"
-    ],
-    "tvTypes": [
-      "Anime",
-      "AnimeMovie",
-      "Cartoon",
-      "OVA",
-      "Movie",
-      "TvSeries"
-    ],
-    "version": 6,
-    "internalName": "AnimeSlayer",
-    "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/AnimeSlayer.cs3",
-    "name": "أنمي سلاير (AnimeSlayer)",
-    "description": "أنمي سلاير — مشاهدة وتحميل الأنمي المترجم."
-  },
-  {
-    "iconUrl": "https://c4u1r.sbs/wp-content/uploads/2026/03/EgyDead-Logo.png",
-    "apiVersion": 1,
-    "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-    "fileSize": 65887,
-    "status": 1,
-    "language": "ar",
-    "authors": [
-      "mehdigm4life"
-    ],
-    "tvTypes": [
-      "Movie",
-      "TvSeries",
-      "Anime",
-      "AnimeMovie",
-      "Cartoon"
-    ],
-    "version": 16,
-    "internalName": "EgyDead",
-    "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/EgyDead.cs3",
-    "name": "إيجي ديد (EgyDead)",
-    "description": "إيجي ديد — أفلام ومسلسلات وكرتون وأنمي مترجم."
-  },
-  {
-    "iconUrl": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/Egywatch.png",
-    "apiVersion": 1,
-    "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-    "fileSize": 41815,
-    "status": 1,
-    "language": "ar",
-    "authors": [
-      "mehdigm4life"
-    ],
-    "tvTypes": [
-      "Movie",
-      "TvSeries",
-      "Anime",
-      "AnimeMovie",
-      "Live"
-    ],
-    "version": 13,
-    "internalName": "Egywatch",
-    "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/Egywatch.cs3",
-    "name": "إيجي واتش (Egywatch)",
-    "description": "إيجي واتش — أفلام ومسلسلات وأنمي مترجمة وبث مباشر."
-  },
-  {
-    "iconUrl": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/Cimawbas.png",
-    "apiVersion": 1,
-    "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-    "fileSize": 78825,
-    "status": 1,
-    "language": "ar",
-    "authors": [
-      "mehdigm4life"
-    ],
-    "tvTypes": [
-      "Movie",
-      "TvSeries",
-      "Anime",
-      "Cartoon"
-    ],
-    "version": 2,
-    "internalName": "Cimawbas",
-    "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/Cimawbas.cs3",
-    "name": "سيما وبس (Cimawbas)",
-    "description": "سيما وبس — أفلام ومسلسلات وحلقات مترجمة."
-  },
-  {
-    "iconUrl": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/TopCinema.png",
-    "apiVersion": 1,
-    "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-    "fileSize": 50524,
-    "status": 1,
-    "language": "ar",
-    "authors": [
-      "mehdigm4life"
-    ],
-    "tvTypes": [
-      "TvSeries",
-      "Movie",
-      "Anime"
-    ],
-    "version": 9,
-    "internalName": "TopCinema",
-    "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/TopCinema.cs3",
-    "name": "توب سينما (TopCinema)",
-    "description": "توب سينما — مشاهدة وتحميل الأفلام والمسلسلات الأجنبية والآسيوية والأنمي."
-  },
-  {
-    "iconUrl": "https://witanime.site/favicon.ico",
-    "apiVersion": 1,
-    "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-    "fileSize": 52727,
-    "status": 1,
-    "language": "ar",
-    "authors": [
-      "mehdigm4life"
-    ],
-    "tvTypes": [
-      "Anime",
-      "AnimeMovie",
-      "OVA",
-      "TvSeries",
-      "Movie",
-      "Cartoon"
-    ],
-    "version": 21,
-    "internalName": "WitAnime",
-    "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/WitAnime.cs3",
-    "name": "ويت أنمي (WitAnime)",
-    "description": "ويت أنمي (WitAnime) — أنمي مترجم ومدبلج وأفلام أنمي بجودة عالية."
-  },
-  {
-    "iconUrl": "https://images.anime3rb.com/favicon/apple-touch-icon.png",
-    "apiVersion": 1,
-    "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-    "fileSize": 25548,
-    "status": 1,
-    "language": "ar",
-    "authors": [
-      "mehdigm4life"
-    ],
-    "tvTypes": [
-      "Anime",
-      "AnimeMovie",
-      "OVA",
-      "TvSeries",
-      "Movie",
-      "Cartoon"
-    ],
-    "version": 12,
-    "internalName": "Anime3rb",
-    "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/Anime3rb.cs3",
-    "name": "أنمي عرب (Anime3rb)",
-    "description": "أنمي عرب (Anime3rb) — مشاهدة وتحميل الأنمي المترجم بجودات متعددة."
-  },
-  {
-    "iconUrl": "https://www.anime-rift.com/logo.png",
-    "apiVersion": 1,
-    "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-    "fileSize": 36482,
-    "status": 1,
-    "language": "ar",
-    "authors": [
-      "mehdigm4life"
-    ],
-    "tvTypes": [
-      "Anime",
-      "AnimeMovie",
-      "OVA",
-      "TvSeries",
-      "Movie",
-      "Cartoon"
-    ],
-    "version": 1,
-    "internalName": "AnimeRift",
-    "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/AnimeRift.cs3",
-    "name": "أنمي رِفت (AnimeRift)",
-    "description": "أنمي رِفت (AnimeRift) — التطبيق الرسمي: مترجم ومدبلج عربي بجميع الجودات ومصادر المشاهدة والتحميل."
-  }
+    {
+        "iconUrl": "https://animezid.org/uploads/custom-logo.png",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
+        "fileSize": 78862,
+        "status": 1,
+        "language": "ar",
+        "authors": [
+            "mehdigm4life"
+        ],
+        "tvTypes": [
+            "Anime",
+            "AnimeMovie",
+            "Cartoon",
+            "TvSeries",
+            "Movie",
+            "OVA"
+        ],
+        "version": 21,
+        "internalName": "Animezid",
+        "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/Animezid.cs3",
+        "name": "انمي زد (Animezid)",
+        "description": "موقع انمي زد — مشاهدة وتحميل أفلام ومسلسلات الأنمي والكرتون المدبلج والمترجم."
+    },
+    {
+        "iconUrl": "https://static.faselhdcdn.com/wp-content/uploads/2022/06/logo-1.png",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
+        "fileSize": 51661,
+        "status": 1,
+        "language": "ar",
+        "authors": [
+            "mehdigm4life"
+        ],
+        "tvTypes": [
+            "TvSeries",
+            "Movie",
+            "Anime"
+        ],
+        "version": 9,
+        "internalName": "FaselHD",
+        "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/FaselHD.cs3",
+        "name": "فاصل إعلاني (FaselHD)",
+        "description": "مشاهدة وتحميل الأفلام والمسلسلات الأجنبية والآسيوية والأنمي."
+    },
+    {
+        "iconUrl": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/Shahid4u.png",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
+        "fileSize": 36074,
+        "status": 1,
+        "language": "ar",
+        "authors": [
+            "mehdigm4life"
+        ],
+        "tvTypes": [
+            "TvSeries",
+            "Movie",
+            "Anime"
+        ],
+        "version": 2,
+        "internalName": "Shahid4u",
+        "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/Shahid4u.cs3",
+        "name": "شاهد فور يو (Shahid4u)",
+        "description": "شاهد فور يو — مشاهدة وتحميل الأفلام والمسلسلات الأجنبية والعربية والتركية والآسيوية والأنمي."
+    },
+    {
+        "iconUrl": "https://tuktukhd.com/wp-content/themes/TukTukCinema3/tuk.png?x50750",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
+        "fileSize": 45461,
+        "status": 1,
+        "language": "ar",
+        "authors": [
+            "mehdigm4life"
+        ],
+        "tvTypes": [
+            "TvSeries",
+            "Movie",
+            "Anime"
+        ],
+        "version": 7,
+        "internalName": "TukTukcima",
+        "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/TukTukcima.cs3",
+        "name": "توك توك سينما (TukTuk)",
+        "description": "مشاهدة وتحميل الأفلام والمسلسلات الأجنبية والآسيوية والتركية والأنمي."
+    },
+    {
+        "iconUrl": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/cartoonanime.jpeg",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
+        "fileSize": 23198,
+        "status": 1,
+        "language": "ar",
+        "authors": [
+            "mehdigm4life"
+        ],
+        "tvTypes": [
+            "Anime",
+            "TvSeries",
+            "Movie",
+            "Cartoon"
+        ],
+        "version": 2,
+        "internalName": "CartoonAnime",
+        "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/CartoonAnime.cs3",
+        "name": "مسلسلات كرتون وأنمي (CartoonAnime)",
+        "description": "مسلسلات كرتون وأنمي — مسلسلات وأفلام الكرتون والأنمي المترجمة والمدبلجة."
+    },
+    {
+        "iconUrl": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/CimaCloud.png",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
+        "fileSize": 3284091,
+        "status": 1,
+        "language": "ar",
+        "authors": [
+            "mehdigm4life"
+        ],
+        "tvTypes": [
+            "Anime",
+            "TvSeries",
+            "Movie",
+            "Cartoon"
+        ],
+        "version": 34,
+        "internalName": "CimaCloud",
+        "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/CimaCloud.cs3",
+        "name": "سيما كلاود (CimaCloud)",
+        "description": "CimaCloud — مباشر، مدبلج، مترجم"
+    },
+    {
+        "iconUrl": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/AnimeDay.jpg",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
+        "fileSize": 3284541,
+        "status": 1,
+        "language": "ar",
+        "authors": [
+            "mehdigm4life"
+        ],
+        "tvTypes": [
+            "Anime",
+            "TvSeries",
+            "Movie",
+            "Cartoon"
+        ],
+        "version": 28,
+        "internalName": "AnimeDay",
+        "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/AnimeDay.cs3",
+        "name": "أنمي داي (AnimeDay)",
+        "description": "AnimeDay — أنمي وكرتون مدبلج ومترجم"
+    },
+    {
+        "iconUrl": "https://stardima.app/logo.png",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
+        "fileSize": 4198101,
+        "status": 1,
+        "language": "ar",
+        "authors": [
+            "mehdigm4life"
+        ],
+        "tvTypes": [
+            "Movie",
+            "TvSeries",
+            "Anime",
+            "Cartoon",
+            "AnimeMovie"
+        ],
+        "version": 16,
+        "internalName": "StarDima",
+        "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/StarDima.cs3",
+        "name": "ستارديما (StarDima)",
+        "description": "ستارديما — أفلام ومسلسلات وكرتون مدبلج ومترجم."
+    },
+    {
+        "iconUrl": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/DramaWorld.png",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
+        "fileSize": 41289,
+        "status": 1,
+        "language": "ar",
+        "authors": [
+            "mehdigm4life"
+        ],
+        "tvTypes": [
+            "Movie",
+            "TvSeries"
+        ],
+        "version": 7,
+        "internalName": "DramaWorld",
+        "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/DramaWorld.cs3",
+        "name": "عالم الدراما (DramaWorld)",
+        "description": "عالم الدراما — أفلام ومسلسلات وقنوات بث مباشر."
+    },
+    {
+        "iconUrl": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/animeslayer_logo.png",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
+        "fileSize": 27295,
+        "status": 1,
+        "language": "ar",
+        "authors": [
+            "mehdigm4life"
+        ],
+        "tvTypes": [
+            "Anime",
+            "AnimeMovie",
+            "Cartoon",
+            "OVA",
+            "Movie",
+            "TvSeries"
+        ],
+        "version": 6,
+        "internalName": "AnimeSlayer",
+        "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/AnimeSlayer.cs3",
+        "name": "أنمي سلاير (AnimeSlayer)",
+        "description": "أنمي سلاير — مشاهدة وتحميل الأنمي المترجم."
+    },
+    {
+        "iconUrl": "https://c4u1r.sbs/wp-content/uploads/2026/03/EgyDead-Logo.png",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
+        "fileSize": 65887,
+        "status": 1,
+        "language": "ar",
+        "authors": [
+            "mehdigm4life"
+        ],
+        "tvTypes": [
+            "Movie",
+            "TvSeries",
+            "Anime",
+            "AnimeMovie",
+            "Cartoon"
+        ],
+        "version": 16,
+        "internalName": "EgyDead",
+        "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/EgyDead.cs3",
+        "name": "إيجي ديد (EgyDead)",
+        "description": "إيجي ديد — أفلام ومسلسلات وكرتون وأنمي مترجم."
+    },
+    {
+        "iconUrl": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/Egywatch.png",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
+        "fileSize": 41815,
+        "status": 1,
+        "language": "ar",
+        "authors": [
+            "mehdigm4life"
+        ],
+        "tvTypes": [
+            "Movie",
+            "TvSeries",
+            "Anime",
+            "AnimeMovie",
+            "Live"
+        ],
+        "version": 13,
+        "internalName": "Egywatch",
+        "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/Egywatch.cs3",
+        "name": "إيجي واتش (Egywatch)",
+        "description": "إيجي واتش — أفلام ومسلسلات وأنمي مترجمة وبث مباشر."
+    },
+    {
+        "iconUrl": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/Cimawbas.png",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
+        "fileSize": 78825,
+        "status": 1,
+        "language": "ar",
+        "authors": [
+            "mehdigm4life"
+        ],
+        "tvTypes": [
+            "Movie",
+            "TvSeries",
+            "Anime",
+            "Cartoon"
+        ],
+        "version": 2,
+        "internalName": "Cimawbas",
+        "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/Cimawbas.cs3",
+        "name": "سيما وبس (Cimawbas)",
+        "description": "سيما وبس — أفلام ومسلسلات وحلقات مترجمة."
+    },
+    {
+        "iconUrl": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/TopCinema.png",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
+        "fileSize": 50524,
+        "status": 1,
+        "language": "ar",
+        "authors": [
+            "mehdigm4life"
+        ],
+        "tvTypes": [
+            "TvSeries",
+            "Movie",
+            "Anime"
+        ],
+        "version": 9,
+        "internalName": "TopCinema",
+        "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/TopCinema.cs3",
+        "name": "توب سينما (TopCinema)",
+        "description": "توب سينما — مشاهدة وتحميل الأفلام والمسلسلات الأجنبية والآسيوية والأنمي."
+    },
+    {
+        "iconUrl": "https://witanime.site/favicon.ico",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
+        "fileSize": 52727,
+        "status": 1,
+        "language": "ar",
+        "authors": [
+            "mehdigm4life"
+        ],
+        "tvTypes": [
+            "Anime",
+            "AnimeMovie",
+            "OVA",
+            "TvSeries",
+            "Movie",
+            "Cartoon"
+        ],
+        "version": 21,
+        "internalName": "WitAnime",
+        "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/WitAnime.cs3",
+        "name": "ويت أنمي (WitAnime)",
+        "description": "ويت أنمي (WitAnime) — أنمي مترجم ومدبلج وأفلام أنمي بجودة عالية."
+    },
+    {
+        "iconUrl": "https://images.anime3rb.com/favicon/apple-touch-icon.png",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
+        "fileSize": 25548,
+        "status": 1,
+        "language": "ar",
+        "authors": [
+            "mehdigm4life"
+        ],
+        "tvTypes": [
+            "Anime",
+            "AnimeMovie",
+            "OVA",
+            "TvSeries",
+            "Movie",
+            "Cartoon"
+        ],
+        "version": 12,
+        "internalName": "Anime3rb",
+        "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/Anime3rb.cs3",
+        "name": "أنمي عرب (Anime3rb)",
+        "description": "أنمي عرب (Anime3rb) — مشاهدة وتحميل الأنمي المترجم بجودات متعددة."
+    },
+    {
+        "iconUrl": "https://www.anime-rift.com/logo.png",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
+        "fileSize": 51054,
+        "status": 1,
+        "language": "ar",
+        "authors": [
+            "mehdigm4life"
+        ],
+        "tvTypes": [
+            "Anime",
+            "AnimeMovie",
+            "OVA",
+            "TvSeries",
+            "Movie",
+            "Cartoon"
+        ],
+        "version": 2,
+        "internalName": "AnimeRift",
+        "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/AnimeRift.cs3",
+        "name": "أنمي رِفت (AnimeRift)",
+        "description": "أنمي رِفت (AnimeRift) — التطبيق الرسمي: مترجم ومدبلج عربي بجميع الجودات ومصادر المشاهدة والتحميل. مع حماية من حد الطلبات لمنع حظر الـ IP."
+    }
 ]

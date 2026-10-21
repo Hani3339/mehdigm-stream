@@ -50,9 +50,16 @@ class AnimeRift(private val context: android.content.Context) : MainAPI() {
 
     companion object {
         const val TAG = "AnimeRift"
-        private const val MAX_PARALLEL = 4
+
+        /** أقصى عدد روابط تُعرض من المصادر غير العربية. */
         private const val MAX_FOREIGN_LINKS = 6
+
+        /** مدة بقاء روابط الحلقة في الذاكرة (ms). */
+        private const val LINK_CACHE_TTL = 10 * 60_000L
     }
+
+    /** روابط آخر فتحات للحلقات — لتفادي طلبات متكررة من البوابة. */
+    private val linkCache = LinkedHashMap<String, Pair<Long, List<Resolved>>>()
 
     override val mainPage = mainPageOf(
         "$mainUrl/home" to "الرئيسية",
@@ -177,49 +184,81 @@ class AnimeRift(private val context: android.content.Context) : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val parsed = parseEpisodeUrl(data) ?: return false
+
+        // نفس الحلقة لا تُفتح مرتين: النتيجة تُخزَّن مؤقتاً.
+        val cached = linkCache[parsed.cacheKey]
+        if (cached != null && cached.second.isNotEmpty()) {
+            if (System.currentTimeMillis() - cached.first > LINK_CACHE_TTL) {
+                linkCache.remove(parsed.cacheKey)
+            } else {
+                android.util.Log.i(TAG, "loadLinks ${parsed.episodeId} -> من الذاكرة (${cached.second.size})")
+                for (entry in cached.second) callback(entry.link)
+                return true
+            }
+        }
+
         val sources = api.sources(parsed.animeId, parsed.episodeId, parsed.episodeNumber)
             ?: return false
 
         val items = sources.optJSONArray("items") ?: return false
         val configs = parseConfigs(sources)
 
-        // المصادر العربية أولاً: المترجم ثم المدبلج.
-        val ordered = ArrayList<JSONObject>(items.length())
-        for (pass in 0..1) {
-            for (i in 0 until items.length()) {
-                val item = items.optJSONObject(i) ?: continue
-                val track = item.optString("sub_title")
-                val arabic = track.startsWith("ar_")
-                if ((pass == 0 && arabic) || (pass == 1 && !arabic)) ordered.add(item)
+        // اختيار المصادر بميزانية طلبات (SourceSelector) — فتح كل المصادر
+        // دفعة واحدة هو ما يتجاوز سقف البوابة (429 ثم حظر 403).
+        val selected = SourceSelector.select(items)
+
+        // المرحلة 1: طلبات البوابة (can_play + direct_link) — مُبعثرة داخلياً
+        // بواسطة مُخمِّد البوابة نفسه فلا تتجاوز السقف أبداً.
+        val pending = coroutineScope {
+            selected.map { item ->
+                async(Dispatchers.IO) { resolveSource(item, parsed, configs) }
+            }.awaitAll()
+        }.flatten()
+
+        // المرحلة 2: تذاكر الستريم تيب تُستبدل بروابطها بعد `wait_time`
+        // واحد فقط لكل التذاكر (وليس 5 ثوانٍ لكل تذكرة).
+        val tickets = pending.filter { it.ticket != null }
+        if (tickets.isNotEmpty()) {
+            val wait = tickets.maxOf { it.ticket!!.waitTime }
+            if (wait > 0) kotlinx.coroutines.delay(wait * 1000L)
+            coroutineScope {
+                tickets.map { entry ->
+                    async(Dispatchers.IO) {
+                        val t = entry.ticket!!
+                        val resolved = api.resolveTicket(t.fileId, t.ticket, 0)
+                        if (resolved != null) {
+                            entry.url = resolved.first
+                            entry.fileName = resolved.second
+                        }
+                    }
+                }.awaitAll()
             }
         }
 
-        val semaphore = Semaphore(MAX_PARALLEL)
-        val resolved = coroutineScope {
-            ordered.map { item ->
-                async(Dispatchers.IO) {
-                    semaphore.withPermit { resolveSource(item, parsed, configs) }
-                }
-            }.awaitAll()
-        }.flatten()
+        val resolved = pending.mapNotNull { it.build() }
 
         if (resolved.isEmpty()) {
             android.util.Log.i(TAG, "loadLinks ${parsed.episodeId} -> no source")
             return false
         }
 
-        // نفس الرابط قد يreturned أكثر من مرة (لأن الـ API لا يلتزم دائماً
+        // نفس الرابط قد يعود أكثر من مرة (لأن الـ API لا تلتزم دائماً
         // بالجودة المطلوبة) — نُبقي أول نسخة فقط.
         val seen = HashSet<String>()
         var foreign = 0
         var emitted = 0
+        val out = ArrayList<Resolved>(resolved.size)
         for (entry in resolved) {
             val key = "${entry.url}|${entry.label}"
             if (!seen.add(key)) continue
             if (!entry.isArabic && foreign >= MAX_FOREIGN_LINKS) continue
             if (!entry.isArabic) foreign++
+            out.add(entry)
             callback(entry.link)
             emitted++
+        }
+        if (out.isNotEmpty()) {
+            linkCache[parsed.cacheKey] = System.currentTimeMillis() to out
         }
         android.util.Log.i(TAG, "loadLinks ${parsed.episodeId} -> $emitted links")
         return emitted > 0
@@ -232,57 +271,34 @@ class AnimeRift(private val context: android.content.Context) : MainAPI() {
         val label: String
     )
 
-    /**
-     * يطلب رابط المشاهدة لمصدر واحد: يخبر الخادم أن الحلقة مطلوبة
-     * (`can_play`) ثم يطلب الرابط المباشر (`direct_link`). مصادر الستريم تيب
-     * تردّ بتذكرة (ticket) تُستبدل برابط مباشر من api.streamtape.com.
-     */
-    private suspend fun resolveSource(
-        item: JSONObject,
-        episode: EpisodeRef,
-        configs: Map<String, JSONObject>
-    ): List<Resolved> {
-        val hostId = item.optString("_id")
-        if (hostId.isBlank()) return emptyList()
-        val provider = item.optString("provider")
-        val server = item.optString("server_name").ifBlank { provider.uppercase() }
+    private class Ticket(val fileId: String, val ticket: String, val waitTime: Int)
 
-        val qualities = item.optJSONArray("qualities").toStringList()
-        // السيرفرات من نوع "realtime" لا تُحدَّد لها جودة، وتقبل الطلب بدون
-        // حقل الجودة إطلاقاً.
-        val qualityList = if (qualities.isEmpty()) listOf("") else qualities
+    /** مصدر واحد بعد مرحلته الأولى: إما رابط مباشر أو تذكرة ستريم تيب. */
+    private inner class Pending(
+        val provider: String,
+        val server: String,
+        val requested: String,
+        val fallbackTrack: String,
+        val downloadAllowed: Boolean,
+        val response: JSONObject
+    ) {
+        var ticket: Ticket? = null
+        var url: String = ""
+        var fileName: String = ""
 
-        val out = ArrayList<Resolved>(qualityList.size)
-        for (requested in qualityList) {
-            // كل جودة تحتاج جلسة خاصة: الـ sessionId الذي تعيده `can_play`
-            // يُستهلك في أول طلب `direct_link`، وتعيد البوابة بعده
-            // SESSION_ID_INVALID.
-            val play = api.canPlay(episode.episodeId, hostId) ?: continue
-            val sessionId = play.optString("sessionId").ifBlank { null }
-            val link = api.directLink(hostId, requested.ifBlank { null }, sessionId) ?: continue
-            var url = link.optString("videoUrl")
-            var fileName = ""
-
-            if (url.isBlank() && link.optBoolean("ticket_response")) {
-                val fileId = link.optString("fileId")
-                val ticket = link.optString("ticket")
-                val wait = link.optInt("wait_time", 5)
-                val resolved = api.resolveTicket(fileId, ticket, wait) ?: continue
-                url = resolved.first
-                fileName = resolved.second
-            }
-            if (url.isBlank()) continue
+        suspend fun build(): Resolved? {
+            if (url.isBlank()) return null
 
             // >>> التسمية تُشتق من الرابط نفسه وليس من الجودة المطلوبة: <<<
             // البوابة لا تلتزم دائماً بالجودة المطلوبة وتعيد رابطاً بجودة
-            // أخرى، ف.Link هو الحقيقة الوحيدة. مثال:
+            // أخرى، فالـ Link هو الحقيقة الوحيدة. مثال:
             //   .../1/ar_dub/720p/v1/master.mp4      -> مدبلج عربي 720p
             //   .../naruto_ep_1_360p_ar_dub.m3u8    -> مدبلج عربي 360p
             //   "... مدبلج عربي [720p].mp4"          -> مدبلج عربي 720p
-            val info = trackInfo(url, fileName, requested, item.optString("sub_title"))
-            val trackLabel = trackLabel(info.track)
+            val info = trackInfo(url, fileName, requested, fallbackTrack)
+            val track = trackLabel(info.track)
             val quality = info.quality.ifBlank { requested }
-            val label = if (quality.isBlank()) "$trackLabel • $server" else "$trackLabel • $server • $quality"
+            val label = if (quality.isBlank()) "$track • $server" else "$track • $server • $quality"
             val arabic = info.track.startsWith("ar_")
 
             val isHls = url.contains(".m3u8")
@@ -295,7 +311,7 @@ class AnimeRift(private val context: android.content.Context) : MainAPI() {
                     "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 " +
                         "(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
                 )
-                val extra = link.optJSONObject("http_headers")
+                val extra = response.optJSONObject("http_headers")
                 if (extra != null) {
                     for (key in extra.keys()) {
                         val value = extra.optString(key)
@@ -304,31 +320,24 @@ class AnimeRift(private val context: android.content.Context) : MainAPI() {
                 }
             }
 
-            out.add(
-                Resolved(
-                    link = newExtractorLink(
-                        source = name,
-                        name = label,
-                        url = url,
-                        type = if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                    ) {
-                        this.quality = qualityValue(quality, url)
-                        this.headers = linkHeaders
-                    },
-                    isArabic = arabic,
-                    url = url,
-                    label = label
-                )
-            )
+            val main = newExtractorLink(
+                source = name,
+                name = label,
+                url = url,
+                type = if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+            ) {
+                this.quality = qualityValue(quality, url)
+                this.headers = linkHeaders
+            }
+
+            val result = ArrayList<Resolved>(2)
+            result.add(Resolved(main, arabic, url, label))
 
             // رابط التحميل متاح فقط للخوادم التي يسمح التطبيق بالتحميل منها.
-            val config = configs[provider]
-            val downloadAllowed = config?.optBoolean("in_app_download_disabled") != true &&
-                !isHls
-            if (downloadAllowed) {
-                out.add(
+            if (downloadAllowed && !isHls) {
+                result.add(
                     Resolved(
-                        link = newExtractorLink(
+                        newExtractorLink(
                             source = name,
                             name = "$label — تحميل",
                             url = url,
@@ -337,12 +346,65 @@ class AnimeRift(private val context: android.content.Context) : MainAPI() {
                             this.quality = qualityValue(quality, url)
                             this.headers = linkHeaders
                         },
-                        isArabic = arabic,
-                        url = url,
-                        label = "$label — تحميل"
+                        arabic,
+                        url,
+                        "$label — تحميل"
                     )
                 )
             }
+            return result.first()
+        }
+    }
+
+    /**
+     * يطلب رابط المشاهدة لمصدر واحد: يخبر الخادم أن الحلقة مطلوبة
+     * (`can_play`) ثم يطلب الرابط المباشر (`direct_link`).
+     */
+    private suspend fun resolveSource(
+        item: JSONObject,
+        episode: EpisodeRef,
+        configs: Map<String, JSONObject>
+    ): List<Pending> {
+        val hostId = item.optString("_id")
+        if (hostId.isBlank()) return emptyList()
+        val provider = item.optString("provider")
+        val server = item.optString("server_name").ifBlank { provider.uppercase() }
+
+        val qualities = item.optJSONArray("qualities").toStringList()
+        // السيرفرات من نوع "realtime" لا تُحدَّد لها جودة، وتقبل الطلب بدون
+        // حقل الجودة إطلاقاً.
+        val qualityList = if (qualities.isEmpty()) listOf("") else qualities
+
+        val config = configs[provider]
+        val downloadAllowed = config?.optBoolean("in_app_download_disabled") != true
+
+        val out = ArrayList<Pending>(qualityList.size)
+        for (requested in qualityList) {
+            // كل جودة تحتاج جلسة خاصة: الـ sessionId الذي تعيده `can_play`
+            // يُستهلك في أول طلب `direct_link`، وتعيد البوابة بعده
+            // SESSION_ID_INVALID.
+            val play = api.canPlay(episode.episodeId, hostId) ?: continue
+            val sessionId = play.optString("sessionId").ifBlank { null }
+            val link = api.directLink(hostId, requested.ifBlank { null }, sessionId) ?: continue
+
+            val pending = Pending(
+                provider = provider,
+                server = server,
+                requested = requested,
+                fallbackTrack = item.optString("sub_title"),
+                downloadAllowed = downloadAllowed,
+                response = link
+            )
+            pending.url = link.optString("videoUrl")
+            if (pending.url.isBlank() && link.optBoolean("ticket_response")) {
+                pending.ticket = Ticket(
+                    link.optString("fileId"),
+                    link.optString("ticket"),
+                    link.optInt("wait_time", 5)
+                )
+            }
+            if (pending.url.isBlank() && pending.ticket == null) continue
+            out.add(pending)
         }
         return out
     }
@@ -355,7 +417,9 @@ class AnimeRift(private val context: android.content.Context) : MainAPI() {
         val animeId: String,
         val episodeId: String,
         val episodeNumber: Int
-    )
+    ) {
+        val cacheKey: String get() = "$animeId|$episodeId|$episodeNumber"
+    }
 
     private fun animeIdFromUrl(url: String): String? {
         val id = url.substringAfterLast('/').substringBefore('?').substringBefore('#')
