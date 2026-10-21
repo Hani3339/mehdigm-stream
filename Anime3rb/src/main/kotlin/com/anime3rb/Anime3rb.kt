@@ -62,6 +62,15 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
         "Accept-Language" to "ar,en-US;q=0.9,en;q=0.8",
     )
 
+    // `images.anime3rb.com` is behind Cloudflare and serves images only when the
+    // request carries a browser UA + `Referer: https://anime3rb.com/`; without
+    // these the poster requests are challenged and nothing shows in the UI.
+    private val posterHeaders = mapOf(
+        "User-Agent" to UA,
+        "Accept" to "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        "Referer" to "$mainUrl/",
+    )
+
     // =========================================================================
     // Networking (plain, mirrors the working reference implementation)
     // =========================================================================
@@ -108,6 +117,7 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
             val poster = img?.let { poster(it) }
             out[slug] = newAnimeSearchResponse(title, "$mainUrl/titles/$slug", TvType.Anime) {
                 this.posterUrl = poster
+                this.posterHeaders = posterHeaders
             }
         }
         return out.values.toList()
@@ -118,19 +128,17 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
     // =========================================================================
 
     /**
-     * The site's `/search` route is heavily Cloudflare-protected and its results
-     * are rendered client-side by Livewire, so a plain GET returns a challenge
-     * (and the app appears to "hang"). Instead we drive the Livewire component
-     * directly: grab the `wire:snapshot` + CSRF token from the homepage form and
-     * POST the query to `/livewire/update`, then parse the returned HTML.
+     * The site's `/search` route is Cloudflare-protected and renders results
+     * client-side via Livewire. The reliable, query-accurate endpoint is
+     * `/titles/list?search=`, which is server-rendered. We use it first and fall
+     * back to driving the homepage Livewire `search` component.
      */
     override suspend fun search(query: String): List<SearchResponse> {
-        val livewire = searchViaLivewire(query)
-        if (livewire.isNotEmpty()) return livewire
-
-        // Fallback: some deployments still server-render `/titles/list?search=`.
         val url = "$mainUrl/titles/list?search=${URLEncoder.encode(query, "UTF-8")}"
-        return parseTitleList(getDocument(url))
+        val direct = parseTitleList(getDocument(url))
+        if (direct.isNotEmpty()) return direct
+
+        return searchViaLivewire(query)
     }
 
     private suspend fun searchViaLivewire(query: String): List<SearchResponse> {
@@ -181,12 +189,8 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
         val effects = components.firstOrNull()?.get("effects") as? Map<String, Any> ?: return emptyList()
         val html = effects["html"] as? String ?: return emptyList()
 
-        return parseLivewireResults(html)
+        return parseTitleList(org.jsoup.Jsoup.parse(html, mainUrl))
     }
-
-    /** Livewire search results: `a.simple-title-card` with `h4` + `img`. */
-    private fun parseLivewireResults(html: String): List<SearchResponse> =
-        parseTitleList(org.jsoup.Jsoup.parse(html, mainUrl))
 
     /** Parse a grid of anime cards: `a.simple-title-card` or `a[href*=/titles/]`. */
     private fun parseTitleList(doc: Document?): List<SearchResponse> {
@@ -207,6 +211,7 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
             if (title.isBlank()) continue
             out[slug] = newAnimeSearchResponse(title, "$mainUrl/titles/$slug", TvType.Anime) {
                 this.posterUrl = img?.let { poster(it) }
+                this.posterHeaders = posterHeaders
             }
         }
         return out.values.toList()
@@ -236,6 +241,7 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
 
         return newAnimeLoadResponse(title, url, TvType.Anime) {
             this.posterUrl = poster
+            this.posterHeaders = posterHeaders
             this.plot = plot
             this.year = year
             this.tags = tags

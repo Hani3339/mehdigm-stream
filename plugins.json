@@ -336,7 +336,7 @@
     "iconUrl": "https://images.anime3rb.com/favicon/apple-touch-icon.png",
     "apiVersion": 1,
     "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-    "fileSize": 25053,
+    "fileSize": 25166,
     "status": 1,
     "language": "ar",
     "authors": [
@@ -350,7 +350,7 @@
       "Movie",
       "Cartoon"
     ],
-    "version": 7,
+    "version": 8,
     "internalName": "Anime3rb",
     "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/Anime3rb.cs3",
     "name": "أنمي عرب (Anime3rb)",
