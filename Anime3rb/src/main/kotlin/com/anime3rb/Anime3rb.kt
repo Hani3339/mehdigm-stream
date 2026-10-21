@@ -24,6 +24,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import com.lagradost.cloudstream3.network.CloudflareKiller
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
@@ -67,60 +68,76 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
     // =========================================================================
 
     /**
-     * Cookies persisted by [Anime3rbWebView] after a challenge was solved.
-     * Cloudflare's `cf_clearance` is bound to the solving user-agent, so the
-     * same [UA] must be reused everywhere.
+     * Cloudflare's managed challenge blocks plain OkHttp requests (HTTP 403 +
+     * `cf-mitigated: challenge`). The built-in [CloudflareKiller] interceptor
+     * drives a real WebView to solve it and replays the request with the solved
+     * cookies, keeping them cached for subsequent calls.
      */
+    private val cfInterceptor = CloudflareKiller()
+
     private fun persistedCookies(url: String): Map<String, String> = try {
-        android.webkit.CookieManager.getInstance().getCookie(url)
-            ?.split(";")
-            ?.mapNotNull { part ->
+        val raw = buildString {
+            append(Anime3rbWebView.loadSavedCookie(context) ?: "")
+            val live = android.webkit.CookieManager.getInstance().getCookie(url)
+            if (!live.isNullOrBlank()) {
+                if (isNotEmpty()) append("; ")
+                append(live)
+            }
+        }
+        raw.split(";")
+            .mapNotNull { part ->
                 val idx = part.indexOf('=')
                 if (idx <= 0) null
                 else part.substring(0, idx).trim() to part.substring(idx + 1).trim()
             }
-            ?.toMap()
-            ?: emptyMap()
+            .toMap()
     } catch (_: Throwable) {
         emptyMap()
     }
 
-    private fun isCloudflareSolved(): Boolean =
-        persistedCookies(mainUrl).keys.any { it == "cf_clearance" }
+    private fun looksLikeChallenge(html: String): Boolean =
+        html.contains("Just a moment") ||
+            html.contains("cf-mitigated") ||
+            html.contains("challenge-platform") && html.contains("ch_retry")
 
     /**
-     * GET a page, transparently falling back to a real WebView when OkHttp is
-     * stopped by Cloudflare's managed challenge (HTTP 403 + `cf-mitigated`).
+     * GET a page. Tries OkHttp (with the Cloudflare interceptor and any cookies
+     * already solved), and only if that still returns a challenge does it fall
+     * back to a dedicated off-screen WebView.
      */
     private suspend fun getDocument(url: String): Document? {
         val direct = runCatching {
-            app.get(url, headers = headers, cookies = persistedCookies(url)).document
+            app.get(
+                url,
+                headers = headers,
+                cookies = persistedCookies(url),
+                interceptor = cfInterceptor
+            ).text
         }.getOrNull()
-        if (direct != null && !looksLikeChallenge(direct)) return direct
 
-        Log.i(TAG, "challenge detected on $url, falling back to WebView")
-        val html = Anime3rbWebView.fetch(context, url, headers) ?: return direct
-        return runCatching { org.jsoup.Jsoup.parse(html, url) }.getOrNull() ?: direct
+        val html = when {
+            direct != null && !looksLikeChallenge(direct) -> direct
+            else -> {
+                Log.i(TAG, "challenge on $url, WebView fallback")
+                Anime3rbWebView.fetch(context, url, headers) ?: direct
+            }
+        }
+        return html?.let { runCatching { org.jsoup.Jsoup.parse(it, url) }.getOrNull() }
     }
 
     private suspend fun getText(url: String, referer: String? = null): String? {
         val h = if (referer != null) headers + ("Referer" to referer) else headers
         val direct = runCatching {
-            app.get(url, headers = h, cookies = persistedCookies(url)).text
+            app.get(
+                url,
+                headers = h,
+                cookies = persistedCookies(url),
+                interceptor = cfInterceptor
+            ).text
         }.getOrNull()
-        if (direct != null && !direct.contains("Just a moment") && !direct.contains("cf-mitigated"))
-            return direct
-
-        Log.i(TAG, "challenge detected on $url, falling back to WebView")
+        if (direct != null && !looksLikeChallenge(direct)) return direct
+        Log.i(TAG, "challenge on $url, WebView fallback")
         return Anime3rbWebView.fetch(context, url, h) ?: direct
-    }
-
-    private fun looksLikeChallenge(doc: Document): Boolean {
-        val title = doc.title()
-        return title.contains("Just a moment", true) ||
-            title.contains("لحظة") ||
-            doc.selectFirst("div#challenge-form, form#challenge-form, script[src*=challenges.cloudflare.com]") != null ||
-            doc.selectFirst("meta[http-equiv=refresh]") != null && doc.body()?.text()?.contains("Cloudflare") == true
     }
 
     // =========================================================================
@@ -141,18 +158,19 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
         )
     }
 
-    /** Homepage slides are `a.video-card` pointing at `/episode/<slug>/<num>`. */
+    /** Homepage cards: `a.video-card` pointing at `/episode/<slug>/<num>`. */
     private fun parseHomeCards(doc: Document?): List<SearchResponse> {
         if (doc == null) return emptyList()
         val out = LinkedHashMap<String, SearchResponse>()
         for (a in doc.select("a.video-card, a[href^=/episode/]")) {
             val href = absolute(a.attr("href"))
             val slug = episodeSlug(href) ?: continue
-            val title = a.selectFirst("div > span, .video-title, span")?.text()?.trim()
-                ?: a.selectFirst("img")?.attr("alt")?.trim()
+            val img = a.selectFirst("img")
+            val title = a.selectFirst("h3.title-name, .title-name, .video-title, h2, h3, span")?.text()?.trim()
+                ?: img?.attr("alt")?.trim()?.removePrefix("بوستر ")?.trim()
                 ?: continue
             if (title.isBlank()) continue
-            val poster = a.selectFirst("img")?.let { img(it) }
+            val poster = img?.let { poster(it) }
             out[slug] = newAnimeSearchResponse(title, "$mainUrl/titles/$slug", TvType.Anime) {
                 this.posterUrl = poster
             }
@@ -164,23 +182,93 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
     // Search
     // =========================================================================
 
+    /**
+     * The site's `/search` route is heavily Cloudflare-protected and its results
+     * are rendered client-side by Livewire, so a plain GET returns a challenge
+     * (and the app appears to "hang"). Instead we drive the Livewire component
+     * directly: grab the `wire:snapshot` + CSRF token from the homepage form and
+     * POST the query to `/livewire/update`, then parse the returned HTML.
+     */
     override suspend fun search(query: String): List<SearchResponse> {
-        val url = "$mainUrl/search?q=${URLEncoder.encode(query, "UTF-8")}"
-        val doc = getDocument(url) ?: return emptyList()
-        return parseTitleList(doc)
+        val livewire = searchViaLivewire(query)
+        if (livewire.isNotEmpty()) return livewire
+
+        // Fallback: some deployments still server-render `/titles/list?search=`.
+        val url = "$mainUrl/titles/list?search=${URLEncoder.encode(query, "UTF-8")}"
+        return parseTitleList(getDocument(url))
     }
 
-    /** Parse a grid of anime cards: `a[href^=/titles/]` with a poster + title. */
+    private suspend fun searchViaLivewire(query: String): List<SearchResponse> {
+        val home = getDocument(mainUrl) ?: return emptyList()
+
+        val csrf = home.selectFirst("script[src*=livewire.min.js]")?.attr("data-csrf")
+            ?: home.selectFirst("meta[name=csrf-token]")?.attr("content")
+            ?: return emptyList()
+
+        val snapshotRaw = home.selectFirst("form[wire\\:id]")?.attr("wire:snapshot")
+            ?: return emptyList()
+        val snapshot = org.jsoup.parser.Parser.unescapeEntities(snapshotRaw, true)
+
+        val body = mapOf(
+            "_token" to csrf,
+            "components" to listOf(
+                mapOf(
+                    "snapshot" to snapshot,
+                    "updates" to mapOf("query" to query),
+                    "calls" to emptyList<Any>()
+                )
+            )
+        )
+
+        val text = runCatching {
+            app.post(
+                "$mainUrl/livewire/update",
+                headers = headers + mapOf(
+                    "Content-Type" to "application/json",
+                    "Accept" to "*/*",
+                    "Origin" to mainUrl,
+                    "Referer" to "$mainUrl/",
+                    "X-Livewire" to "true",
+                ),
+                cookies = persistedCookies(mainUrl),
+                json = body
+            ).text
+        }.getOrNull() ?: return emptyList()
+
+        if (!text.contains("\"html\"")) return emptyList()
+
+        val json = runCatching {
+            com.lagradost.cloudstream3.utils.AppUtils.parseJson<Map<String, Any>>(text)
+        }.getOrNull() ?: return emptyList()
+
+        @Suppress("UNCHECKED_CAST")
+        val components = json["components"] as? List<Map<String, Any>> ?: return emptyList()
+        @Suppress("UNCHECKED_CAST")
+        val effects = components.firstOrNull()?.get("effects") as? Map<String, Any> ?: return emptyList()
+        val html = effects["html"] as? String ?: return emptyList()
+
+        return parseLivewireResults(html)
+    }
+
+    /** Livewire search results: `a.simple-title-card` with `h4` + `img`. */
+    private fun parseLivewireResults(html: String): List<SearchResponse> =
+        parseTitleList(org.jsoup.Jsoup.parse(html, mainUrl))
+
+    /** Parse a grid of anime cards: `a.simple-title-card` or `a[href*=/titles/]`. */
     private fun parseTitleList(doc: Document?): List<SearchResponse> {
         if (doc == null) return emptyList()
         val out = LinkedHashMap<String, SearchResponse>()
-        for (a in doc.select("a[href*=/titles/]")) {
+        // Prefer the dedicated search-result cards when present (they are more
+        // precise than the generic title anchors that may include navigation).
+        var anchors = doc.select("a.simple-title-card")
+        if (anchors.isEmpty()) anchors = doc.select("a[href*=/titles/]")
+        for (a in anchors) {
             val href = absolute(a.attr("href"))
             val slug = titleSlug(href) ?: continue
             if (slug == "list" || slug.contains("/")) continue
             val img = a.selectFirst("img")
-            val title = a.selectFirst("h2, h3, .title, span")?.text()?.trim()
-                ?: img?.attr("alt")?.trim()
+            val title = a.selectFirst("h2, h3, h4, .title-name, .title, span")?.text()?.trim()
+                ?: img?.attr("alt")?.trim()?.removePrefix("بوستر ")?.trim()
                 ?: continue
             if (title.isBlank()) continue
             out[slug] = newAnimeSearchResponse(title, "$mainUrl/titles/$slug", TvType.Anime) {
@@ -199,10 +287,10 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
         val slug = titleSlug(url) ?: url.substringAfterLast("/")
 
         val title = doc.selectFirst("meta[property=og:title]")?.attr("content")
-            ?.substringBefore(" - Anime3rb")?.trim()
-            ?: doc.title().substringBefore(" - Anime3rb").trim()
+            ?.let { cleanTitle(it) }
+            ?: cleanTitle(doc.title())
         val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
-            ?: doc.selectFirst("div.poster img, img.poster, .anime-poster img")?.let { poster(it) }
+            ?: doc.selectFirst("img[alt^=بوستر], div.poster img, img.poster, .anime-poster img")?.let { poster(it) }
         val plot = doc.selectFirst("meta[name=description]")?.attr("content")
             ?.substringBefore(" Anime3rb")?.trim()
         val tags = doc.select("a[href*=/genre/]").map { it.text().trim() }
@@ -221,19 +309,30 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
         }
     }
 
+    /** Strip the site's "أنمي "/" - Anime3rb" decorations from a title. */
+    private fun cleanTitle(raw: String): String = raw
+        .substringBefore(" - Anime3rb")
+        .removePrefix("أنمي ")
+        .replace(Regex("""\s*\(\s*(مسلسل|فيلم|أوفا|حلقة)\s*\)\s*"""), " ")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+
     private fun parseEpisodes(doc: Document, slug: String): List<Episode> {
         val out = ArrayList<Episode>()
-        for (a in doc.select("a[href*=/episode/]")) {
+        for (a in doc.select("div.video-list a[href*=/episode/], a[href*=/episode/]")) {
             val href = absolute(a.attr("href"))
             val epSlug = episodeSlug(href) ?: continue
             if (epSlug != slug) continue
             val num = href.trimEnd('/').substringAfterLast('/').toIntOrNull() ?: continue
-            val epName = a.selectFirst("div > span, span")?.text()?.trim()
+            val data = a.selectFirst(".video-data")
+            val epName = data?.select("span")?.getOrNull(0)?.text()?.trim()
                 ?.takeIf { it.isNotBlank() }
                 ?: "الحلقة $num"
+            val thumb = a.selectFirst("img")?.let { img(it) }
             out.add(newEpisode(href) {
                 this.name = epName
                 this.episode = num
+                this.posterUrl = thumb
             })
         }
         return out.distinctBy { it.data }.sortedBy { it.episode ?: Int.MAX_VALUE }
@@ -271,18 +370,19 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
     }
 
     private fun extractVideoUrl(html: String): String? {
-        // JSON-encoded inside the wire:snapshot attribute, and also present in the
-        // raw Alpine block as `video_url`.
+        // The episode page embeds the vid3rb player URL inside the Livewire
+        // snapshot (JSON-escaped) and/or the Alpine block as `video_url`.
+        val direct = Regex("""https:(?:\\/|/){2}video\.vid3rb\.com(?:\\/|/)player(?:\\/|/)[^"'&\s]+""")
+            .find(html)?.value
+        if (direct != null) return direct.replace("\\", "").replace("&amp;", "&").trim()
+
         val patterns = listOf(
             Regex("""&quot;video_url&quot;:&quot;(https?:\\?/\\?/[^&]+?)&quot;"""),
             Regex(""""video_url"\s*:\s*"(https?:\\?/\\?/[^"]+?)""""),
         )
         for (re in patterns) {
             val m = re.find(html) ?: continue
-            return m.groupValues[1]
-                .replace("\\/", "/")
-                .replace("&amp;", "&")
-                .trim()
+            return m.groupValues[1].replace("\\/", "/").replace("&amp;", "&").trim()
         }
         return null
     }
@@ -307,21 +407,44 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val playerHtml = getText(playerUrl, referer) ?: return false
-        // video_sources = [{ "src":"https://video.vid3rb.com/video/<uuid>?...","label":"1080p",...}]
-        val re = Regex(""""src"\s*:\s*"(https://[^"]+\.(?:mp4|m3u8)[^"]*)"""", RegexOption.IGNORE_CASE)
-        val altRe = Regex("""\{\s*"src"\s*:\s*"([^"]+)"\s*,\s*"type"\s*:\s*"video/([a-z0-9]+)"\s*,\s*"label"\s*:\s*"([^"]+)"""")
         var any = false
 
-        for (m in altRe.findAll(playerHtml)) {
-            val src = m.groupValues[1].replace("\\/", "/").replace("&amp;", "&")
-            val label = m.groupValues[3]
-            if (src.isBlank()) continue
-            emitStream(src, label, playerUrl, referer, callback)
-            any = true
+        // Primary format: `var video_sources = [ {"src":"...","label":"1080p","premium":false}, ... ];
+        val arrayRe = Regex(
+            """video_sources\s*=\s*(\[.*?\])\s*;""",
+            setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE)
+        )
+        for (arr in arrayRe.findAll(playerHtml)) {
+            val json = arr.groupValues[1]
+                .replace("\\/", "/")
+                .replace("&amp;", "&")
+                .replace("\\u0026", "&")
+                .replace("\\", "")
+            val items = runCatching {
+                com.lagradost.cloudstream3.utils.AppUtils
+                    .parseJson<List<Map<String, Any>>>(json)
+            }.getOrNull() ?: continue
+            for (item in items) {
+                val src = item["src"]?.toString()
+                    ?.replace("\\/", "/")?.replace("&amp;", "&")?.replace("\\u0026", "&")
+                    ?.takeIf { it.startsWith("http") } ?: continue
+                if (item["premium"]?.toString() == "true") continue
+                val label = item["label"]?.toString()?.takeIf { it.isNotBlank() } ?: qualityLabel(src)
+                emitStream(src, label, playerUrl, referer, callback)
+                any = true
+            }
+            if (any) break
         }
+
+        // Fallback: bare `"src":"https://..."` entries.
         if (!any) {
+            val re = Regex(
+                """"src"\s*:\s*"(https://[^"]+\.(?:mp4|m3u8)[^"]*)"""",
+                RegexOption.IGNORE_CASE
+            )
             for (m in re.findAll(playerHtml)) {
                 val src = m.groupValues[1].replace("\\/", "/").replace("&amp;", "&")
+                if (src.isBlank()) continue
                 emitStream(src, qualityLabel(src), playerUrl, referer, callback)
                 any = true
             }
@@ -337,6 +460,7 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ) {
         val isHls = url.contains(".m3u8")
+        val mediaReferer = if (url.contains("vid3rb")) "https://video.vid3rb.com/" else playerUrl
         callback(
             newExtractorLink(
                 source = name,
@@ -344,11 +468,13 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
                 url = url,
                 type = if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
             ) {
-                this.referer = playerUrl
+                this.referer = mediaReferer
                 this.quality = qualityValue(label, url)
                 this.headers = mapOf(
                     "User-Agent" to UA,
-                    "Referer" to playerUrl,
+                    "Referer" to mediaReferer,
+                    "Origin" to "https://video.vid3rb.com",
+                    "Accept" to "*/*",
                 )
             }
         )

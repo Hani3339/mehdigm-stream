@@ -29,6 +29,29 @@ import kotlin.coroutines.resume
 object Anime3rbWebView {
 
     private const val TAG = "Anime3rbWebView"
+    const val PREFS = "anime3rb_prefs"
+    const val COOKIE_KEY = "cf_cookie"
+    const val UA_KEY = "cf_ua"
+
+    /** Persist the solved cookies + UA so later OkHttp calls can reuse them. */
+    fun saveCookies(context: Context, url: String, ua: String) {
+        runCatching {
+            val cookie = CookieManager.getInstance().getCookie(url) ?: return@runCatching
+            if (!cookie.contains("cf_clearance")) return@runCatching
+            context.applicationContext
+                .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .putString(COOKIE_KEY, cookie)
+                .putString(UA_KEY, ua)
+                .apply()
+        }
+    }
+
+    fun loadSavedCookie(context: Context): String? = runCatching {
+        context.applicationContext
+            .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(COOKIE_KEY, null)
+    }.getOrNull()
 
     private fun isChallengeTitle(title: String?): Boolean {
         if (title.isNullOrBlank()) return true
@@ -79,18 +102,83 @@ object Anime3rbWebView {
             }
 
             val handler = Handler(Looper.getMainLooper())
+            var clickBusy = false
 
             fun finish(html: String?) {
                 if (finished) return
                 finished = true
                 handler.removeCallbacksAndMessages(null)
                 runCatching { CookieManager.getInstance().flush() }
+                runCatching { saveCookies(context, url, ua) }
                 runCatching {
                     (webView.parent as? ViewGroup)?.removeView(webView)
                     webView.stopLoading()
                     webView.destroy()
                 }
                 if (cont.isActive) cont.resume(html)
+            }
+
+            // Cloudflare's managed challenge usually shows a Turnstile checkbox.
+            // From a normal (residential) IP a synthetic tap on it clears the
+            // challenge; dispatch real MotionEvents as a genuine touch.
+            fun simulateTap(x: Float, y: Float) {
+                val density = webView.resources.displayMetrics.density
+                val rx = x * density
+                val ry = y * density
+                val down = android.os.SystemClock.uptimeMillis()
+                val move = down + 40
+                val up = down + 90
+                val e1 = android.view.MotionEvent.obtain(down, down, android.view.MotionEvent.ACTION_DOWN, rx, ry, 0)
+                val e2 = android.view.MotionEvent.obtain(down, move, android.view.MotionEvent.ACTION_MOVE, rx + 1, ry + 1, 0)
+                val e3 = android.view.MotionEvent.obtain(down, up, android.view.MotionEvent.ACTION_UP, rx + 1, ry + 1, 0)
+                runCatching {
+                    webView.dispatchTouchEvent(e1)
+                    webView.dispatchTouchEvent(e2)
+                    webView.dispatchTouchEvent(e3)
+                }
+                runCatching { e1.recycle(); e2.recycle(); e3.recycle() }
+            }
+
+            val turnstileJs = """
+                (function(){
+                    try{
+                        var sels = [
+                            'iframe[src*="challenges.cloudflare.com"]',
+                            'iframe[title*="Cloudflare"]',
+                            '#challenge-stage iframe',
+                            '.cf-turnstile',
+                            'div#cf-chl-widget input[type="checkbox"]'
+                        ];
+                        for (var i=0;i<sels.length;i++){
+                            var el = document.querySelector(sels[i]);
+                            if(!el) continue;
+                            var r = el.getBoundingClientRect();
+                            if(r.width===0 || r.height===0) continue;
+                            return (r.left + r.width/2) + "," + (r.top + r.height/2);
+                        }
+                        return "NO_BOX";
+                    }catch(e){ return "ERROR"; }
+                })();
+            """.trimIndent()
+
+            val clicker = object : Runnable {
+                override fun run() {
+                    if (finished || clickBusy) return
+                    clickBusy = true
+                    webView.evaluateJavascript(turnstileJs) { res ->
+                        try {
+                            val clean = res?.removeSurrounding("\"")
+                            if (!clean.isNullOrBlank() && clean.contains(",") && !clean.startsWith("NO") && clean != "ERROR") {
+                                val parts = clean.split(",")
+                                val x = parts.getOrNull(0)?.toFloatOrNull()
+                                val y = parts.getOrNull(1)?.toFloatOrNull()
+                                if (x != null && y != null) simulateTap(x, y)
+                            }
+                        } finally {
+                            handler.postDelayed({ clickBusy = false }, 2500)
+                        }
+                    }
+                }
             }
 
             var attempts = 0
@@ -138,7 +226,9 @@ object Anime3rbWebView {
                 override fun onPageFinished(view: WebView?, u: String?) {
                     super.onPageFinished(view, u)
                     handler.removeCallbacks(poller)
-                    handler.postDelayed(poller, 1500)
+                    handler.removeCallbacks(clicker)
+                    handler.postDelayed(poller, 1000)
+                    handler.postDelayed(clicker, 1200)
                 }
             }
             webView.webChromeClient = WebChromeClient()
