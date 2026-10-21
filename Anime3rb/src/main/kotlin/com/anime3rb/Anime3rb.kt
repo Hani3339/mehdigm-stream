@@ -194,7 +194,7 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
         val poster = doc.selectFirst("img[alt*='بوستر']")?.attr("src") ?: ""
         val desc = doc.selectFirst("p.synopsis")?.text() ?: doc.selectFirst("meta[name='description']")?.attr("content") ?: ""
 
-        var episodes = doc.select(".video-list a").reversed().mapNotNull { element ->
+        val episodes = doc.select(".video-list a").reversed().mapNotNull { element ->
             val href = toAbsoluteUrl(element.attr("href"))
             val videoData = element.selectFirst(".video-data")
             val epText = videoData?.child(0)?.text() ?: ""
@@ -210,29 +210,30 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
         }
 
         // Safety net: the site renamed the episode list container more than
-        // once (`videos-container` -> `videos-list` -> `video-list`). If the
-        // markup changes again the reference selector would return nothing and
-        // the whole series would look empty, so fall back to every episode
-        // link on the page to make sure no episode is lost.
-        if (episodes.isEmpty()) {
-            episodes = doc.select("a[href*=/episode/]").reversed().mapNotNull { element ->
-                val href = toAbsoluteUrl(element.attr("href"))
-                val videoData = element.selectFirst(".video-data, .video-metadata")
-                val epText = videoData?.child(0)?.text() ?: videoData?.text() ?: ""
-                val epName = videoData?.child(1)?.text() ?: ""
-                val epNum = epText.replace(NON_DIGITS, "").toIntOrNull()
-                    ?: href.trimEnd('/').substringAfterLast('/').toIntOrNull()
-                val imgAttr = element.selectFirst("img")?.attr("src") ?: ""
+        // once (`videos-container` -> `videos-list` -> `video-list`) and may
+        // split very long series. Whatever the reference selector did not pick
+        // up is added here, so no episode of the series can be lost. This can
+        // only add episodes, it never changes the ones the reference found.
+        val known = episodes.map { it.data }.toMutableSet()
+        val missing = doc.select("a[href*=/episode/]").reversed().mapNotNull { element ->
+            val href = toAbsoluteUrl(element.attr("href"))
+            if (!known.add(href)) return@mapNotNull null
+            val videoData = element.selectFirst(".video-data, .video-metadata")
+            val epText = videoData?.child(0)?.text() ?: videoData?.text() ?: ""
+            val epName = videoData?.child(1)?.text() ?: ""
+            val epNum = epText.replace(NON_DIGITS, "").toIntOrNull()
+                ?: href.trimEnd('/').substringAfterLast('/').toIntOrNull()
+            val imgAttr = element.selectFirst("img")?.attr("src") ?: ""
 
-                newEpisode(href) {
-                    this.name = epName.ifBlank { epText }
-                    this.episode = epNum
-                    this.posterUrl = imgAttr
-                }
+            newEpisode(href) {
+                this.name = epName.ifBlank { epText }
+                this.episode = epNum
+                this.posterUrl = imgAttr
             }
         }
+        val allEpisodes = episodes + missing
 
-        return newTvSeriesLoadResponse(title, url, TvType.Anime, episodes) {
+        return newTvSeriesLoadResponse(title, url, TvType.Anime, allEpisodes) {
             this.posterUrl = poster
             this.plot = desc
         }
@@ -258,7 +259,7 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
         //    `videos.vid3rb.com`, newer ones on `video.vid3rb.com`), so every
         //    candidate is tried instead of only the first one.
         val candidates = extractPlayerCandidates(html)
-        android.util.Log.i(TAG, "loadLinks candidates=${candidates.size}")
+        android.util.Log.i(TAG, "loadLinks $episodeUrl candidates=${candidates.size}")
         for (candidate in candidates) {
             if (emitFromPlayer(candidate, episodeUrl, callback)) {
                 found = true
@@ -415,15 +416,31 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
             if (any) return true
         }
 
-        // Fallback: bare `"src":"https://..."` entries.
+        // Fallback: legacy players exposed `var videos = [ { src: 'https://files-4.vid3rb.com/.../720p.mp4?e=..&t=..', type: 'video/mp4', label: '720p' } ]`
+        // — single quoted, direct MP4 links and a different variable name.
         if (!any) {
-            val re = Regex(
-                """"src"\s*:\s*"(https://[^"]+\.(?:mp4|m3u8)[^"]*)"""",
-                RegexOption.IGNORE_CASE
+            val legacyRe = Regex(
+                """src\s*[:=]\s*['"](https?://[^'"]+)['"][\s\S]{0,240}?label\s*[:=]\s*['"]?([A-Za-z0-9]{2,6}p?)['"]?""",
+                setOf(RegexOption.IGNORE_CASE)
             )
-            for (m in re.findAll(playerHtml)) {
+            for (m in legacyRe.findAll(playerHtml)) {
                 val src = m.groupValues[1].replace("\\/", "/").replace("&amp;", "&")
-                if (src.isBlank()) continue
+                if (!src.startsWith("http")) continue
+                if (!src.contains("vid3rb") && !src.contains(".mp4") && !src.contains(".m3u8")) continue
+                val label = m.groupValues[2].ifBlank { qualityLabel(src) }
+                emitStream(src, label, callback)
+                any = true
+            }
+        }
+
+        // Last resort: any direct media file hosted on the vid3rb CDN.
+        if (!any) {
+            val mediaRe = Regex(
+                """https?://[a-z0-9.\-]*vid3rb\.com/[^"'\\s<>]*?/\d{3,4}p\.mp4[^"'\\s<>]*""",
+                setOf(RegexOption.IGNORE_CASE)
+            )
+            for (m in mediaRe.findAll(playerHtml)) {
+                val src = m.groupValues[0].replace("\\/", "/").replace("&amp;", "&")
                 emitStream(src, qualityLabel(src), callback)
                 any = true
             }
