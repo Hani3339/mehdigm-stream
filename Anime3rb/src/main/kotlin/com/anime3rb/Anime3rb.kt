@@ -102,8 +102,9 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
 
     /**
      * GET a page. Tries OkHttp (with the Cloudflare interceptor and any cookies
-     * already solved), and only if that still returns a challenge does it fall
-     * back to a dedicated off-screen WebView.
+     * already solved); if that still returns a challenge it drives a real,
+     * off-screen WebView (attached to the activity) to clear Cloudflare and read
+     * the rendered HTML back.
      */
     private suspend fun getDocument(url: String): Document? {
         val direct = runCatching {
@@ -115,28 +116,39 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
             ).text
         }.getOrNull()
 
-        val html = when {
-            direct != null && !looksLikeChallenge(direct) -> direct
-            else -> {
-                Log.i(TAG, "challenge on $url, WebView fallback")
-                Anime3rbWebView.fetch(context, url, headers) ?: direct
-            }
+        if (direct != null && !looksLikeChallenge(direct)) {
+            return runCatching { org.jsoup.Jsoup.parse(direct, url) }.getOrNull()
         }
+
+        Log.i(TAG, "challenge on $url, solving via WebView")
+        val solved = Anime3rbCloudflareSolver.solve(context as? android.app.Activity, url, UA)
+        if (solved != null) return solved
+
+        val html = Anime3rbWebView.fetch(context, url, headers) ?: direct
         return html?.let { runCatching { org.jsoup.Jsoup.parse(it, url) }.getOrNull() }
     }
 
     private suspend fun getText(url: String, referer: String? = null): String? {
         val h = if (referer != null) headers + ("Referer" to referer) else headers
+
+        // The media/player host (vid3rb) is not behind the managed challenge and
+        // is IP/token bound; a plain request keeps playback fast (no 60s WebView).
+        val isMediaHost = url.contains("vid3rb")
         val direct = runCatching {
             app.get(
                 url,
                 headers = h,
                 cookies = persistedCookies(url),
-                interceptor = cfInterceptor
+                interceptor = if (isMediaHost) null else cfInterceptor
             ).text
         }.getOrNull()
         if (direct != null && !looksLikeChallenge(direct)) return direct
-        Log.i(TAG, "challenge on $url, WebView fallback")
+        if (isMediaHost) return direct
+
+        Log.i(TAG, "challenge on $url, solving via WebView")
+        Anime3rbCloudflareSolver.solve(context as? android.app.Activity, url, UA)?.let {
+            return it.outerHtml()
+        }
         return Anime3rbWebView.fetch(context, url, h) ?: direct
     }
 
