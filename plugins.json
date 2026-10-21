@@ -360,7 +360,7 @@
         "iconUrl": "https://www.anime-rift.com/logo.png",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-        "fileSize": 52957,
+        "fileSize": 53002,
         "status": 1,
         "language": "ar",
         "authors": [
@@ -374,7 +374,7 @@
             "Movie",
             "Cartoon"
         ],
-        "version": 3,
+        "version": 4,
         "internalName": "AnimeRift",
         "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/AnimeRift.cs3",
         "name": "أنمي رِفت (AnimeRift)",

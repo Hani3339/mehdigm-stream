@@ -121,8 +121,8 @@ class RiftApi(context: Context) {
         limiter.onAccessDenied()
         android.util.Log.i(
             TAG,
-            "ACCESS_DENIED — إيقاف كل الطلبات حتى " +
-                (limiter.isBanned) + " (تبريد طويل لتفادي تطويل الحظر)"
+            "ACCESS_DENIED — حظر الـ IP: إيقاف كل الطلبات " +
+                "(${limiter.banRemainingMs / 60000} دقيقة)"
         )
     }
 
@@ -134,7 +134,7 @@ class RiftApi(context: Context) {
      * Waits for a pending cooldown to expire (bounded, so the UI never hangs
      * forever) and reports whether the gateway may be used again.
      */
-    private suspend fun awaitCooldown(): Boolean = limiter.awaitCooldown()
+    private suspend fun awaitCooldown(): Boolean = limiter.awaitCooldown(maxWaitMs = 20_000L)
 
     // =====================================================================
     // Cache

@@ -60,7 +60,7 @@ class RateLimiter(
         const val DEFAULT_MAX_BAN_COOLDOWN_MS = 2 * 60 * 60_000L
 
         /** تهدئة قصيرة بعد 429 حتى يمتلئ دلو Endpoint. */
-        const val DEFAULT_THROTTLE_COOLDOWN_MS = 30_000L
+        const val DEFAULT_THROTTLE_COOLDOWN_MS = 15_000L
 
         /** عدد النجاحات المتتالية قبل تخفيف الفاصل. */
         const val DEFAULT_SUCCESS_BEFORE_RELAX = 60
@@ -133,6 +133,10 @@ class RateLimiter(
     /** هل نحن في تهدئة قصيرة بعد 429؟ */
     val isThrottled: Boolean
         get() = now() < store.getLong(KEY_THROTTLE_UNTIL, 0L)
+
+    /** المتبقي من الحظر بالمللي ثانية. */
+    val banRemainingMs: Long
+        get() = (store.getLong(KEY_BAN_UNTIL, 0L) - now()).coerceAtLeast(0L)
 
     /**
      * ينتظر حتى يحين موعد الطلب التالي. يضمن ألا يقلّ الفاصل بين أي
