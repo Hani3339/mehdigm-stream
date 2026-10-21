@@ -1,9 +1,5 @@
 package com.anime3rb
 
-import com.lagradost.cloudstream3.Actor
-import com.lagradost.cloudstream3.ActorData
-import com.lagradost.cloudstream3.DubStatus
-import com.lagradost.cloudstream3.Episode
 import com.lagradost.cloudstream3.HomePageList
 import com.lagradost.cloudstream3.HomePageResponse
 import com.lagradost.cloudstream3.LoadResponse
@@ -12,20 +8,21 @@ import com.lagradost.cloudstream3.MainPageRequest
 import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.TvType
-import com.lagradost.cloudstream3.addEpisodes
+import com.lagradost.cloudstream3.addDubStatus
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.mainPageOf
-import com.lagradost.cloudstream3.newAnimeLoadResponse
 import com.lagradost.cloudstream3.newAnimeSearchResponse
 import com.lagradost.cloudstream3.newEpisode
 import com.lagradost.cloudstream3.newHomePageResponse
+import com.lagradost.cloudstream3.newTvSeriesLoadResponse
+import com.lagradost.cloudstream3.utils.AppUtils
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
-import java.net.URLEncoder
 
 class Anime3rb(private val context: android.content.Context) : MainAPI() {
     override var mainUrl = "https://anime3rb.com"
@@ -33,254 +30,190 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
     override val hasMainPage = true
     override var lang = "ar"
     override val hasDownloadSupport = true
-    override val hasQuickSearch = false
-    override val supportedTypes = setOf(
-        TvType.Anime, TvType.AnimeMovie, TvType.OVA,
-        TvType.TvSeries, TvType.Movie, TvType.Cartoon
-    )
-
-    override val mainPage = mainPageOf(
-        "latest" to "أحدث الحلقات",
-        "tv" to "مسلسلات",
-        "movie" to "أفلام",
-        "ova" to "أوفا",
-        "ona" to "أونا",
-        "special" to "خاصة",
-    )
+    override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA)
 
     companion object {
         const val TAG = "Anime3rb"
-        // Mobile UA; the site serves the full HTML only to a mobile browser UA.
-        private const val UA =
-            "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 " +
-                "(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+        private var savedCookies: String = ""
+        private const val USER_AGENT = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+        val NON_DIGITS = Regex("[^0-9]")
+        val TITLE_EP_REGEX = Regex("الحلقة \\d+")
     }
 
-    private val headers = mapOf(
-        "User-Agent" to UA,
-        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language" to "ar,en-US;q=0.9,en;q=0.8",
+    override val mainPage = mainPageOf(
+        "$mainUrl/" to "الرئيسية"
     )
 
-    // `images.anime3rb.com` is behind Cloudflare and serves images only when the
-    // request carries a browser UA + `Referer: https://anime3rb.com/`; without
-    // these the poster requests are challenged and nothing shows in the UI.
-    private val posterHeaders = mapOf(
-        "User-Agent" to UA,
-        "Accept" to "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-        "Referer" to "$mainUrl/",
-    )
-
-    // =========================================================================
-    // Networking (plain, mirrors the working reference implementation)
-    // =========================================================================
-
-    private suspend fun getDocument(url: String): Document? = runCatching {
-        app.get(url, headers = headers).document
-    }.getOrNull()
-
-    private suspend fun getText(url: String, referer: String? = null): String? {
-        val h = if (referer != null) headers + ("Referer" to referer) else headers
-        return runCatching { app.get(url, headers = h).text }.getOrNull()
-    }
-
-    // =========================================================================
-    // Main page
-    // =========================================================================
-
-    override suspend fun getMainPage(
-        page: Int,
-        request: MainPageRequest
-    ): HomePageResponse {
-        val items = when (request.data) {
-            "latest" -> parseHomeCards(getDocument(mainUrl))
-            else -> parseTitleList(getDocument("$mainUrl/titles/list/${request.data}?page=$page"))
+    private fun toAbsoluteUrl(url: String): String {
+        return when {
+            url.startsWith("http") -> url
+            url.startsWith("//") -> "https:$url"
+            url.startsWith("/") -> "$mainUrl$url"
+            else -> "$mainUrl/$url"
         }
-        return newHomePageResponse(
-            HomePageList(request.name, items, isHorizontalImages = request.data == "latest"),
-            hasNext = request.data != "latest" && items.isNotEmpty()
-        )
     }
 
-    /** Homepage cards: `a.video-card` pointing at `/episode/<slug>/<num>`. */
-    private fun parseHomeCards(doc: Document?): List<SearchResponse> {
-        if (doc == null) return emptyList()
-        val out = LinkedHashMap<String, SearchResponse>()
-        for (a in doc.select("a.video-card, a[href^=/episode/]")) {
-            val href = absolute(a.attr("href"))
-            val slug = episodeSlug(href) ?: continue
-            val img = a.selectFirst("img")
-            val title = a.selectFirst("h3.title-name, .title-name, .video-title, h2, h3, span")?.text()?.trim()
-                ?: img?.attr("alt")?.trim()?.removePrefix("بوستر ")?.trim()
-                ?: continue
-            if (title.isBlank()) continue
-            val poster = img?.let { poster(it) }
-            out[slug] = newAnimeSearchResponse(title, "$mainUrl/titles/$slug", TvType.Anime) {
-                this.posterUrl = poster
-                this.posterHeaders = posterHeaders
+    private fun cleanTitleText(text: String): String {
+        return text.replace("\\n", " ")
+            .replace("\n", " ")
+            .replace(Regex("بترجمة.*"), "")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+    }
+    private suspend fun getDocumentSmart(url: String): Document? {
+        return try {
+            val response = app.get(url, headers = mapOf("User-Agent" to USER_AGENT))
+            if (response.code in 200..399) {
+                val setCookie = response.headers["set-cookie"]
+                if (!setCookie.isNullOrBlank()) savedCookies = setCookie
+                response.document
+            } else {
+                null
             }
+        } catch (e: Exception) {
+            null
         }
-        return out.values.toList()
     }
 
-    // =========================================================================
-    // Search
-    // =========================================================================
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
+        val doc = getDocumentSmart(request.data) ?: return null
+        val homeSets = mutableListOf<HomePageList>()
 
-    /**
-     * The site's `/search` route is Cloudflare-protected and renders results
-     * client-side via Livewire. The reliable, query-accurate endpoint is
-     * `/titles/list?search=`, which is server-rendered. We use it first and fall
-     * back to driving the homepage Livewire `search` component.
-     */
+        val pinnedHeader = doc.selectFirst("h2:contains(الأنميات المثبتة)")
+        val pinnedList = pinnedHeader?.parent()?.parent()?.parent()?.select(".glide__slide:not(.glide__slide--clone) a.video-card")?.mapNotNull {
+            toSearchResult(it)
+        }
+        if (!pinnedList.isNullOrEmpty()) {
+            homeSets.add(HomePageList("الأنميات المثبتة", pinnedList))
+        }
+
+        val latestList = doc.select("#videos a.video-card").mapNotNull {
+            toSearchResult(it)
+        }
+        if (latestList.isNotEmpty()) {
+            homeSets.add(HomePageList("أحدث الحلقات", latestList))
+        }
+
+        val addedHeader = doc.selectFirst("h3:contains(آخر الأنميات المضافة)")
+        val addedList = addedHeader?.parent()?.parent()?.parent()?.select(".glide__slide:not(.glide__slide--clone) a.video-card")?.mapNotNull {
+            toSearchResult(it)
+        }
+        if (!addedList.isNullOrEmpty()) {
+            homeSets.add(HomePageList("آخر الأنميات المضافة", addedList))
+        }
+
+        return newHomePageResponse(homeSets, false)
+    }
+
+    private fun toSearchResult(element: Element): SearchResponse? {
+        try {
+            val rawTitle = element.select("h3.title-name").text()
+            val title = cleanTitleText(rawTitle)
+            val href = toAbsoluteUrl(element.attr("href"))
+            val posterUrl = element.select("img").attr("src")
+            val episodeText = cleanTitleText(element.select("p.number").text())
+            val episodeNum = episodeText.filter { it.isDigit() }.toIntOrNull()
+
+            return newAnimeSearchResponse(title, href, TvType.Anime) {
+                this.posterUrl = posterUrl
+                addDubStatus(false, episodeNum)
+            }
+        } catch (e: Exception) {
+            return null
+        }
+    }
     override suspend fun search(query: String): List<SearchResponse> {
-        val url = "$mainUrl/titles/list?search=${URLEncoder.encode(query, "UTF-8")}"
-        val direct = parseTitleList(getDocument(url))
-        if (direct.isNotEmpty()) return direct
+        val mainDoc = getDocumentSmart(mainUrl) ?: return emptyList()
 
-        return searchViaLivewire(query)
-    }
+        val scriptTag = mainDoc.selectFirst("script[src*=livewire.min.js]")
+        val csrfToken = scriptTag?.attr("data-csrf") ?: return emptyList()
 
-    private suspend fun searchViaLivewire(query: String): List<SearchResponse> {
-        val home = getDocument(mainUrl) ?: return emptyList()
+        val form = mainDoc.selectFirst("form[wire:id]")
+        val snapshotRaw = form?.attr("wire:snapshot") ?: return emptyList()
+        val snapshotStr = org.jsoup.parser.Parser.unescapeEntities(snapshotRaw, true)
 
-        val csrf = home.selectFirst("script[src*=livewire.min.js]")?.attr("data-csrf")
-            ?: home.selectFirst("meta[name=csrf-token]")?.attr("content")
-            ?: return emptyList()
+        val headers = mutableMapOf(
+            "User-Agent" to USER_AGENT,
+            "Accept" to "*/*",
+            "Content-Type" to "application/json",
+            "Origin" to mainUrl,
+            "Referer" to "$mainUrl/"
+        )
+        if (savedCookies.isNotBlank()) {
+            headers["Cookie"] = savedCookies
+        }
 
-        val snapshotRaw = home.selectFirst("form[wire\\:id]")?.attr("wire:snapshot")
-            ?: return emptyList()
-        val snapshot = org.jsoup.parser.Parser.unescapeEntities(snapshotRaw, true)
-
-        val body = mapOf(
-            "_token" to csrf,
+        val updateUrl = "$mainUrl/livewire/update"
+        val payload = mapOf(
+            "_token" to csrfToken,
             "components" to listOf(
                 mapOf(
-                    "snapshot" to snapshot,
+                    "snapshot" to snapshotStr,
                     "updates" to mapOf("query" to query),
                     "calls" to emptyList<Any>()
                 )
             )
         )
 
-        val text = runCatching {
-            app.post(
-                "$mainUrl/livewire/update",
-                headers = headers + mapOf(
-                    "Content-Type" to "application/json",
-                    "Accept" to "*/*",
-                    "Origin" to mainUrl,
-                    "Referer" to "$mainUrl/",
-                    "X-Livewire" to "true",
-                ),
-                json = body
-            ).text
-        }.getOrNull() ?: return emptyList()
+        val postRes = app.post(updateUrl, headers = headers, json = payload)
+        if (postRes.code != 200) return emptyList()
 
-        if (!text.contains("\"html\"")) return emptyList()
-
-        val json = runCatching {
-            com.lagradost.cloudstream3.utils.AppUtils.parseJson<Map<String, Any>>(text)
-        }.getOrNull() ?: return emptyList()
-
-        @Suppress("UNCHECKED_CAST")
-        val components = json["components"] as? List<Map<String, Any>> ?: return emptyList()
-        @Suppress("UNCHECKED_CAST")
+        val responseJson = AppUtils.parseJson<Map<String, Any>>(postRes.text)
+        val components = responseJson["components"] as? List<Map<String, Any>> ?: return emptyList()
         val effects = components.firstOrNull()?.get("effects") as? Map<String, Any> ?: return emptyList()
-        val html = effects["html"] as? String ?: return emptyList()
+        val htmlContent = effects["html"] as? String ?: return emptyList()
 
-        return parseTitleList(org.jsoup.Jsoup.parse(html, mainUrl))
-    }
+        val soupResults = Jsoup.parse(htmlContent)
 
-    /** Parse a grid of anime cards: `a.simple-title-card` or `a[href*=/titles/]`. */
-    private fun parseTitleList(doc: Document?): List<SearchResponse> {
-        if (doc == null) return emptyList()
-        val out = LinkedHashMap<String, SearchResponse>()
-        // Prefer the dedicated search-result cards when present (they are more
-        // precise than the generic title anchors that may include navigation).
-        var anchors = doc.select("a.simple-title-card")
-        if (anchors.isEmpty()) anchors = doc.select("a[href*=/titles/]")
-        for (a in anchors) {
-            val href = absolute(a.attr("href"))
-            val slug = titleSlug(href) ?: continue
-            if (slug == "list" || slug.contains("/")) continue
-            val img = a.selectFirst("img")
-            val title = a.selectFirst("h2, h3, h4, .title-name, .title, span")?.text()?.trim()
-                ?: img?.attr("alt")?.trim()?.removePrefix("بوستر ")?.trim()
-                ?: continue
-            if (title.isBlank()) continue
-            out[slug] = newAnimeSearchResponse(title, "$mainUrl/titles/$slug", TvType.Anime) {
-                this.posterUrl = img?.let { poster(it) }
-                this.posterHeaders = posterHeaders
+        return soupResults.select("a.simple-title-card").mapNotNull { item ->
+            val rawTitle = item.selectFirst("h4")?.text()?.trim() ?: return@mapNotNull null
+            val title = cleanTitleText(rawTitle)
+            val link = item.attr("href")
+            val absoluteLink = toAbsoluteUrl(link)
+            val img = item.selectFirst("img")
+            val image = img?.attr("src")
+            val ratingTag = item.selectFirst(".badge")
+            val rating = ratingTag?.text()?.trim() ?: "N/A"
+
+            val type = if (rating.contains("Movie") || rating.contains("Film") || title.contains("فيلم")) {
+                TvType.AnimeMovie
+            } else {
+                TvType.Anime
+            }
+
+            newAnimeSearchResponse(title, absoluteLink, type) {
+                this.posterUrl = image
             }
         }
-        return out.values.toList()
     }
 
-    // =========================================================================
-    // Load (details + episodes)
-    // =========================================================================
+    override suspend fun load(url: String): LoadResponse? {
+        val doc = getDocumentSmart(url) ?: return null
 
-    override suspend fun load(url: String): LoadResponse {
-        val doc = getDocument(url) ?: return newAnimeLoadResponse(url, url, TvType.Anime) {}
-        val slug = titleSlug(url) ?: url.substringAfterLast("/")
+        val title = TITLE_EP_REGEX.replace(doc.selectFirst("h1")?.text() ?: "", "").trim()
+        val poster = doc.selectFirst("img[alt*='بوستر']")?.attr("src") ?: ""
+        val desc = doc.selectFirst("p.synopsis")?.text() ?: doc.selectFirst("meta[name='description']")?.attr("content") ?: ""
 
-        val title = doc.selectFirst("meta[property=og:title]")?.attr("content")
-            ?.let { cleanTitle(it) }
-            ?: cleanTitle(doc.title())
-        val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
-            ?: doc.selectFirst("img[alt^=بوستر], div.poster img, img.poster, .anime-poster img")?.let { poster(it) }
-        val plot = doc.selectFirst("meta[name=description]")?.attr("content")
-            ?.substringBefore(" Anime3rb")?.trim()
-        val tags = doc.select("a[href*=/genre/]").map { it.text().trim() }
-            .filter { it.isNotBlank() }.distinct()
-        val year = Regex("""\b(19|20)\d{2}\b""").find(doc.select(".anime-info, .details").text())
-            ?.value?.toIntOrNull()
+        val episodes = doc.select(".video-list a").reversed().mapNotNull { element ->
+            val href = toAbsoluteUrl(element.attr("href"))
+            val videoData = element.selectFirst(".video-data")
+            val epText = videoData?.child(0)?.text() ?: ""
+            val epName = videoData?.child(1)?.text() ?: ""
+            val epNum = epText.replace(NON_DIGITS, "").toIntOrNull()
+            val imgAttr = element.selectFirst("img")?.attr("src") ?: ""
 
-        val episodes = parseEpisodes(doc, slug)
+            newEpisode(href) {
+                this.name = epName.ifBlank { epText }
+                this.episode = epNum
+                this.posterUrl = imgAttr
+            }
+        }
 
-        return newAnimeLoadResponse(title, url, TvType.Anime) {
+        return newTvSeriesLoadResponse(title, url, TvType.Anime, episodes) {
             this.posterUrl = poster
-            this.posterHeaders = posterHeaders
-            this.plot = plot
-            this.year = year
-            this.tags = tags
-            addEpisodes(DubStatus.Subbed, episodes)
+            this.plot = desc
         }
     }
-
-    /** Strip the site's "أنمي "/" - Anime3rb" decorations from a title. */
-    private fun cleanTitle(raw: String): String = raw
-        .substringBefore(" - Anime3rb")
-        .removePrefix("أنمي ")
-        .replace(Regex("""\s*\(\s*(مسلسل|فيلم|أوفا|حلقة)\s*\)\s*"""), " ")
-        .replace(Regex("\\s+"), " ")
-        .trim()
-
-    private fun parseEpisodes(doc: Document, slug: String): List<Episode> {
-        val out = ArrayList<Episode>()
-        for (a in doc.select("div.video-list a[href*=/episode/], a[href*=/episode/]")) {
-            val href = absolute(a.attr("href"))
-            val epSlug = episodeSlug(href) ?: continue
-            if (epSlug != slug) continue
-            val num = href.trimEnd('/').substringAfterLast('/').toIntOrNull() ?: continue
-            val data = a.selectFirst(".video-data")
-            val epName = data?.select("span")?.getOrNull(0)?.text()?.trim()
-                ?.takeIf { it.isNotBlank() }
-                ?: "الحلقة $num"
-            val thumb = a.selectFirst("img")?.let { img(it) }
-            out.add(newEpisode(href) {
-                this.name = epName
-                this.episode = num
-                this.posterUrl = thumb
-            })
-        }
-        return out.distinctBy { it.data }.sortedBy { it.episode ?: Int.MAX_VALUE }
-    }
-
-    // =========================================================================
-    // loadLinks (streaming + downloads)
-    // =========================================================================
 
     override suspend fun loadLinks(
         data: String,
@@ -291,7 +224,9 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
         val episodeUrl = data.trim()
         if (episodeUrl.isBlank()) return false
 
-        val html = getText(episodeUrl) ?: return false
+        val html = runCatching {
+            app.get(episodeUrl, headers = mapOf("User-Agent" to USER_AGENT)).text
+        }.getOrNull() ?: return false
         var found = false
 
         // 1) Streaming: the Livewire snapshot holds `video_url`, which points at
@@ -376,7 +311,7 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
         // `var video_sources = [...]` array. No extra cookies/headers.
         val videoHeaders = mapOf(
             "Host" to "video.vid3rb.com",
-            "User-Agent" to UA,
+            "User-Agent" to USER_AGENT,
             "Referer" to "$mainUrl/",
             "Sec-Fetch-Dest" to "iframe",
             "Sec-Fetch-Site" to "cross-site",
@@ -401,8 +336,7 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
                 .replace("\\u0026", "&")
                 .replace("\\", "")
             val items = runCatching {
-                com.lagradost.cloudstream3.utils.AppUtils
-                    .parseJson<List<Map<String, Any>>>(json)
+                AppUtils.parseJson<List<Map<String, Any>>>(json)
             }.getOrNull() ?: continue
             for (item in items) {
                 val src = item["src"]?.toString()
@@ -466,40 +400,13 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
                 this.referer = referer
                 this.quality = qualityValue(label, downloadUrl)
                 this.headers = mapOf(
-                    "User-Agent" to UA,
+                    "User-Agent" to USER_AGENT,
                     "Referer" to referer,
                     "Accept" to "*/*",
                 )
             }
         )
         return true
-    }
-
-    // =========================================================================
-    // Helpers
-    // =========================================================================
-
-    private fun titleSlug(url: String): String? =
-        Regex("""/titles/([^/?#]+)""").find(url)?.groupValues?.get(1)
-
-    private fun episodeSlug(url: String): String? =
-        Regex("""/episode/([^/?#]+)""").find(url)?.groupValues?.get(1)
-
-    private fun img(el: Element): String? {
-        val src = el.attr("src").takeIf { it.isNotBlank() && !it.startsWith("data:") }
-            ?: el.attr("data-src").takeIf { it.isNotBlank() }
-            ?: el.attr("data-original").takeIf { it.isNotBlank() }
-            ?: el.attr("data-lazy-src").takeIf { it.isNotBlank() }
-        return src?.let { absolute(it) }
-    }
-
-    private fun poster(el: Element): String? = img(el)
-
-    private fun absolute(url: String): String = when {
-        url.startsWith("http") -> url
-        url.startsWith("//") -> "https:$url"
-        url.startsWith("/") -> mainUrl + url
-        else -> "$mainUrl/$url"
     }
 
     private fun qualityValue(label: String, url: String): Int {
