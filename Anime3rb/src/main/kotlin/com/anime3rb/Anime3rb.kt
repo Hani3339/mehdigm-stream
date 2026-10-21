@@ -194,7 +194,7 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
         val poster = doc.selectFirst("img[alt*='بوستر']")?.attr("src") ?: ""
         val desc = doc.selectFirst("p.synopsis")?.text() ?: doc.selectFirst("meta[name='description']")?.attr("content") ?: ""
 
-        val episodes = doc.select(".video-list a").reversed().mapNotNull { element ->
+        var episodes = doc.select(".video-list a").reversed().mapNotNull { element ->
             val href = toAbsoluteUrl(element.attr("href"))
             val videoData = element.selectFirst(".video-data")
             val epText = videoData?.child(0)?.text() ?: ""
@@ -206,6 +206,29 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
                 this.name = epName.ifBlank { epText }
                 this.episode = epNum
                 this.posterUrl = imgAttr
+            }
+        }
+
+        // Safety net: the site renamed the episode list container more than
+        // once (`videos-container` -> `videos-list` -> `video-list`). If the
+        // markup changes again the reference selector would return nothing and
+        // the whole series would look empty, so fall back to every episode
+        // link on the page to make sure no episode is lost.
+        if (episodes.isEmpty()) {
+            episodes = doc.select("a[href*=/episode/]").reversed().mapNotNull { element ->
+                val href = toAbsoluteUrl(element.attr("href"))
+                val videoData = element.selectFirst(".video-data, .video-metadata")
+                val epText = videoData?.child(0)?.text() ?: videoData?.text() ?: ""
+                val epName = videoData?.child(1)?.text() ?: ""
+                val epNum = epText.replace(NON_DIGITS, "").toIntOrNull()
+                    ?: href.trimEnd('/').substringAfterLast('/').toIntOrNull()
+                val imgAttr = element.selectFirst("img")?.attr("src") ?: ""
+
+                newEpisode(href) {
+                    this.name = epName.ifBlank { epText }
+                    this.episode = epNum
+                    this.posterUrl = imgAttr
+                }
             }
         }
 
@@ -229,12 +252,18 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
         }.getOrNull() ?: return false
         var found = false
 
-        // 1) Streaming: the Livewire snapshot holds `video_url`, which points at
-        //    the vid3rb player; the player page exposes direct MP4 sources.
-        val playerUrl = extractVideoUrl(html)
-        android.util.Log.i(TAG, "loadLinks playerUrl=$playerUrl")
-        if (playerUrl != null) {
-            if (emitFromPlayer(playerUrl, episodeUrl, callback)) found = true
+        // 1) Streaming: the episode page points at the vid3rb player; the player
+        //    page exposes the direct MP4 sources. The player host is not stable
+        //    across the site's history (older episodes live on `vid3rb.com` /
+        //    `videos.vid3rb.com`, newer ones on `video.vid3rb.com`), so every
+        //    candidate is tried instead of only the first one.
+        val candidates = extractPlayerCandidates(html)
+        android.util.Log.i(TAG, "loadLinks candidates=${candidates.size}")
+        for (candidate in candidates) {
+            if (emitFromPlayer(candidate, episodeUrl, callback)) {
+                found = true
+                break
+            }
         }
         android.util.Log.i(TAG, "loadLinks streaming found=$found")
 
@@ -250,24 +279,37 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
         return found
     }
 
-    private fun extractVideoUrl(html: String): String? {
-        // The episode page embeds the vid3rb player URL inside the Livewire
-        // snapshot (JSON-escaped `https:\/\/...`). The URL contains a query with
-        // `&amp;expires=`; both quotes and the `&` must be kept, otherwise the
-        // token is truncated and the player rejects it (HTTP 403 -> 2004).
-        val direct = Regex("""https:(?:\\/|/){2}video\.vid3rb\.com(?:\\/|/)player(?:\\/|/)(?:(?!&quot;|\\"|\s).)+""")
-            .find(html)?.value
-        if (direct != null) return normalizeUrl(direct)
+    /**
+     * Every player-ish URL the episode page can offer, most specific first:
+     * the Livewire snapshot field `video_url`, any raw/escaped vid3rb player
+     * URL, the legacy `data-video-source` / `data-source` attributes and
+     * finally the site's own `/embed/` endpoint from the JSON-LD block.
+     */
+    private fun extractPlayerCandidates(html: String): List<String> {
+        val out = LinkedHashSet<String>()
+        val decoded = html
+            .replace("\\/", "/")
+            .replace("\\u0026", "&")
+            .replace("&quot;", "\"")
+            .replace("&amp;", "&")
 
-        val patterns = listOf(
-            Regex("""&quot;video_url&quot;:&quot;(https?:.+?)&quot;"""),
-            Regex(""""video_url"\s*:\s*"(https?:.+?)""""),
-        )
-        for (re in patterns) {
-            val m = re.find(html) ?: continue
-            return normalizeUrl(m.groupValues[1])
+        val videoUrlField = Regex("\"video_url\"\\s*:\\s*\"(https?://[^\"]+)\"")
+        for (m in videoUrlField.findAll(decoded)) out += normalizeUrl(m.groupValues[1])
+
+        val playerUrl = Regex("""https?://(?:[a-z0-9\-]+\.)*vid3rb\.com/player/[^"'\s<>]+""")
+        for (m in playerUrl.findAll(decoded)) out += normalizeUrl(m.groupValues[0])
+
+        for (re in listOf(
+            Regex("""data-video-source="(https?://[^"]+)""""),
+            Regex("""data-source="(https?://[^"]+)"""")
+        )) {
+            for (m in re.findAll(decoded)) out += normalizeUrl(m.groupValues[1])
         }
-        return null
+
+        val embedUrl = Regex("\"embedUrl\"\\s*:\\s*\"(https?://[^\"]+)\"")
+        for (m in embedUrl.findAll(decoded)) out += normalizeUrl(m.groupValues[1])
+
+        return out.toList()
     }
 
     /**
@@ -306,27 +348,49 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
         referer: String,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // Exactly mirrors the working reference implementation: fetch the vid3rb
-        // player page as an embedded iframe (site + cross-site) and read the
-        // `var video_sources = [...]` array. No extra cookies/headers.
-        val videoHeaders = mapOf(
-            "Host" to "video.vid3rb.com",
-            "User-Agent" to USER_AGENT,
-            "Referer" to "$mainUrl/",
-            "Sec-Fetch-Dest" to "iframe",
-            "Sec-Fetch-Site" to "cross-site",
-        )
+        // The player is loaded as a cross-site iframe. The Host header must
+        // match the host actually being requested, otherwise the request is
+        // answered by the wrong vhost and the player page never arrives.
+        val host = Regex("""https?://([^/]+)""").find(playerUrl)?.groupValues?.get(1)
+            ?: "video.vid3rb.com"
+        val isPlayer = host.endsWith("vid3rb.com")
 
-        val playerHtml = runCatching {
-            app.get(playerUrl, headers = videoHeaders).text
-        }.getOrNull() ?: return false
-        android.util.Log.i(TAG, "emitFromPlayer got ${playerHtml.length} chars, hasSources=${playerHtml.contains("video_sources")}")
+        val referers = if (isPlayer) listOf("$mainUrl/", referer) else listOf(referer, "$mainUrl/")
 
+        for (ref in referers) {
+            val headers = if (isPlayer) {
+                mapOf(
+                    "Host" to host,
+                    "User-Agent" to USER_AGENT,
+                    "Referer" to ref,
+                    "Sec-Fetch-Dest" to "iframe",
+                    "Sec-Fetch-Site" to "cross-site",
+                )
+            } else {
+                mapOf(
+                    "User-Agent" to USER_AGENT,
+                    "Referer" to ref,
+                )
+            }
+
+            val playerHtml = runCatching {
+                app.get(playerUrl, headers = headers).text
+            }.getOrNull() ?: continue
+            android.util.Log.i(TAG, "emitFromPlayer $playerUrl len=${playerHtml.length}")
+            if (emitSources(playerHtml, callback)) return true
+        }
+        return false
+    }
+
+    /**
+     * Reads the `var video_sources = [ ... ]` array of the player page and
+     * emits every non-premium source.
+     */
+    private suspend fun emitSources(playerHtml: String, callback: (ExtractorLink) -> Unit): Boolean {
         var any = false
 
-        // Primary format: `var video_sources = [ {"src":"...","label":"1080p","premium":false}, ... ];
         val arrayRe = Regex(
-            """var\s+video_sources\s*=\s*(\[.*?\]);""",
+            """video_sources\s*=\s*(\[.*?\])\s*;""",
             setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE)
         )
         for (arr in arrayRe.findAll(playerHtml)) {
@@ -341,13 +405,14 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
             for (item in items) {
                 val src = item["src"]?.toString()
                     ?.replace("\\/", "/")?.replace("&amp;", "&")?.replace("\\u0026", "&")
-                    ?.takeIf { it.startsWith("http") } ?: continue
+                    ?.trim().orEmpty()
+                if (!src.startsWith("http")) continue
                 if (item["premium"]?.toString() == "true") continue
                 val label = item["label"]?.toString()?.takeIf { it.isNotBlank() } ?: qualityLabel(src)
                 emitStream(src, label, callback)
                 any = true
             }
-            if (any) break
+            if (any) return true
         }
 
         // Fallback: bare `"src":"https://..."` entries.
