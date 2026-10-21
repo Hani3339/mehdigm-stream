@@ -210,8 +210,8 @@ class AnimeRift(private val context: android.content.Context) : MainAPI() {
         // المرحلة 1: طلبات البوابة (can_play + direct_link) — مُبعثرة داخلياً
         // بواسطة مُخمِّد البوابة نفسه فلا تتجاوز السقف أبداً.
         val pending = coroutineScope {
-            selected.map { item ->
-                async(Dispatchers.IO) { resolveSource(item, parsed, configs) }
+            selected.map { choice ->
+                async(Dispatchers.IO) { resolveSource(choice, parsed, configs) }
             }.awaitAll()
         }.flatten()
 
@@ -361,19 +361,19 @@ class AnimeRift(private val context: android.content.Context) : MainAPI() {
      * (`can_play`) ثم يطلب الرابط المباشر (`direct_link`).
      */
     private suspend fun resolveSource(
-        item: JSONObject,
+        choice: SourceSelector.Choice,
         episode: EpisodeRef,
         configs: Map<String, JSONObject>
     ): List<Pending> {
+        val item = choice.item
         val hostId = item.optString("_id")
         if (hostId.isBlank()) return emptyList()
         val provider = item.optString("provider")
         val server = item.optString("server_name").ifBlank { provider.uppercase() }
 
-        val qualities = item.optJSONArray("qualities").toStringList()
         // السيرفرات من نوع "realtime" لا تُحدَّد لها جودة، وتقبل الطلب بدون
         // حقل الجودة إطلاقاً.
-        val qualityList = if (qualities.isEmpty()) listOf("") else qualities
+        val qualityList = if (choice.qualities.isEmpty()) listOf("") else choice.qualities
 
         val config = configs[provider]
         val downloadAllowed = config?.optBoolean("in_app_download_disabled") != true
