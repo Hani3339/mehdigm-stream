@@ -371,20 +371,37 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
 
     private fun extractVideoUrl(html: String): String? {
         // The episode page embeds the vid3rb player URL inside the Livewire
-        // snapshot (JSON-escaped) and/or the Alpine block as `video_url`.
+        // snapshot (JSON-escaped `https:\/\/...`) and/or the Alpine block.
         val direct = Regex("""https:(?:\\/|/){2}video\.vid3rb\.com(?:\\/|/)player(?:\\/|/)[^"'&\s]+""")
             .find(html)?.value
-        if (direct != null) return direct.replace("\\", "").replace("&amp;", "&").trim()
+        if (direct != null) return normalizeUrl(direct)
 
         val patterns = listOf(
-            Regex("""&quot;video_url&quot;:&quot;(https?:\\?/\\?/[^&]+?)&quot;"""),
-            Regex(""""video_url"\s*:\s*"(https?:\\?/\\?/[^"]+?)""""),
+            Regex("""&quot;video_url&quot;:&quot;(https?:.+?)&quot;"""),
+            Regex(""""video_url"\s*:\s*"(https?:.+?)""""),
         )
         for (re in patterns) {
             val m = re.find(html) ?: continue
-            return m.groupValues[1].replace("\\/", "/").replace("&amp;", "&").trim()
+            return normalizeUrl(m.groupValues[1])
         }
         return null
+    }
+
+    /**
+     * JSON escaping turns `https://` into `https:\/\/`, and naive removal of the
+     * backslashes yields `https:////`. Unescape `\/` first, decode HTML entities,
+     * then collapse any duplicated slashes that follow the scheme.
+     */
+    private fun normalizeUrl(raw: String): String {
+        var u = raw
+            .replace("\\/", "/")
+            .replace("\\u0026", "&")
+            .replace("&amp;", "&")
+            .replace("\\", "")
+            .trim()
+        u = u.replace(Regex("""^https?:/+"""), "https://")
+        u = u.replace(Regex("""([^:])/{2,}"""), "$1/")
+        return u
     }
 
     private fun extractDownloads(html: String): List<Pair<String, String>> {
