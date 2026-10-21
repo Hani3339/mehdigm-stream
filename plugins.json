@@ -355,5 +355,29 @@
     "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/Anime3rb.cs3",
     "name": "أنمي عرب (Anime3rb)",
     "description": "أنمي عرب (Anime3rb) — مشاهدة وتحميل الأنمي المترجم بجودات متعددة."
+  },
+  {
+    "iconUrl": "https://www.anime-rift.com/logo.png",
+    "apiVersion": 1,
+    "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
+    "fileSize": 36482,
+    "status": 1,
+    "language": "ar",
+    "authors": [
+      "mehdigm4life"
+    ],
+    "tvTypes": [
+      "Anime",
+      "AnimeMovie",
+      "OVA",
+      "TvSeries",
+      "Movie",
+      "Cartoon"
+    ],
+    "version": 1,
+    "internalName": "AnimeRift",
+    "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/AnimeRift.cs3",
+    "name": "أنمي رِفت (AnimeRift)",
+    "description": "أنمي رِفت (AnimeRift) — التطبيق الرسمي: مترجم ومدبلج عربي بجميع الجودات ومصادر المشاهدة والتحميل."
   }
 ]
