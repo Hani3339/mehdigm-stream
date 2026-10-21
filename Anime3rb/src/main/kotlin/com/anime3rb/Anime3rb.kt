@@ -52,14 +52,16 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
 
     companion object {
         const val TAG = "Anime3rb"
+        // Must match the UA the WebView uses, because Cloudflare's `cf_clearance`
+        // is bound to the solving user-agent. Taken from a real device HAR.
         private const val UA =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            "Mozilla/5.0 (Linux; Android 14; M2006C3MG Build/UQ1A.240205.004) " +
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.7871.63 Mobile Safari/537.36"
     }
 
     private val headers = mapOf(
         "User-Agent" to UA,
-        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language" to "ar,en-US;q=0.9,en;q=0.8",
     )
 
@@ -520,7 +522,9 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ) {
         val isHls = url.contains(".m3u8")
-        val mediaReferer = if (url.contains("vid3rb")) "https://video.vid3rb.com/" else playerUrl
+        // The `/video/<uuid>` endpoint 302-redirects to files.vid3rb.com and
+        // validates the exact player URL (with token) as the Referer.
+        val mediaReferer = if (url.contains("vid3rb")) playerUrl else playerUrl
         callback(
             newExtractorLink(
                 source = name,
@@ -533,8 +537,10 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
                 this.headers = mapOf(
                     "User-Agent" to UA,
                     "Referer" to mediaReferer,
-                    "Origin" to "https://video.vid3rb.com",
                     "Accept" to "*/*",
+                    "Sec-Fetch-Dest" to "video",
+                    "Sec-Fetch-Mode" to "no-cors",
+                    "Sec-Fetch-Site" to "same-origin",
                 )
             }
         )
