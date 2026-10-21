@@ -312,7 +312,7 @@
     "iconUrl": "https://witanime.site/favicon.ico",
     "apiVersion": 1,
     "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-    "fileSize": 25282,
+    "fileSize": 52727,
     "status": 1,
     "language": "ar",
     "authors": [
@@ -326,11 +326,10 @@
       "Movie",
       "Cartoon"
     ],
-    "version": 13,
+    "version": 21,
     "internalName": "WitAnime",
     "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/WitAnime.cs3",
     "name": "ويت أنمي (WitAnime)",
-    "description": "ويت أنمي (WitAnime) — أنمي مترجم ومدبلج وأفلام أنمي بجودة عالية.",
-    "fileSize": 39094
+    "description": "ويت أنمي (WitAnime) — أنمي مترجم ومدبلج وأفلام أنمي بجودة عالية (نسخة witanime.site)."
   }
 ]
