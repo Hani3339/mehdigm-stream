@@ -50,26 +50,10 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
 
     companion object {
         const val TAG = "Anime3rb"
-        // Mobile UA; the site only serves the full HTML to a mobile browser UA.
+        // Mobile UA; the site serves the full HTML only to a mobile browser UA.
         private const val UA =
             "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 " +
                 "(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
-    }
-
-    /**
-     * Session cookies (XSRF-TOKEN + the Laravel session) are required by the
-     * Livewire endpoints: without the matching `XSRF-TOKEN` cookie the update
-     * request is rejected and the component re-renders its *unfiltered*
-     * (fixed) result list.
-     */
-    private val cookieJar = LinkedHashMap<String, String>()
-
-    private fun cookieHeader(): String =
-        cookieJar.entries.joinToString("; ") { "${it.key}=${it.value}" }
-
-    private fun storeCookies(cookies: Map<String, String>?) {
-        if (cookies.isNullOrEmpty()) return
-        cookieJar.putAll(cookies)
     }
 
     private val headers = mapOf(
@@ -88,31 +72,16 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
     )
 
     // =========================================================================
-    // Networking
+    // Networking (plain, mirrors the working reference implementation)
     // =========================================================================
 
-    private fun requestHeaders(extra: Map<String, String> = emptyMap()): Map<String, String> {
-        val h = LinkedHashMap(headers)
-        h.putAll(extra)
-        val cookie = cookieHeader()
-        if (cookie.isNotBlank()) h["Cookie"] = cookie
-        return h
-    }
-
     private suspend fun getDocument(url: String): Document? = runCatching {
-        val response = app.get(url, headers = requestHeaders())
-        storeCookies(response.cookies)
-        if (response.code !in 200..399) return null
-        response.document
+        app.get(url, headers = headers).document
     }.getOrNull()
 
     private suspend fun getText(url: String, referer: String? = null): String? {
-        val extra = if (referer != null) mapOf("Referer" to referer) else emptyMap()
-        return runCatching {
-            val response = app.get(url, headers = requestHeaders(extra))
-            storeCookies(response.cookies)
-            response.text
-        }.getOrNull()
+        val h = if (referer != null) headers + ("Referer" to referer) else headers
+        return runCatching { app.get(url, headers = h).text }.getOrNull()
     }
 
     // =========================================================================
@@ -159,43 +128,17 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
     // =========================================================================
 
     /**
-     * Search is rendered by a Livewire `search` component. The component lives
-     * in the homepage form, so we grab its `wire:snapshot` + CSRF token and
-     * POST the query to `/livewire/update`. The session cookies (XSRF-TOKEN +
-     * Laravel session) captured from the homepage response MUST be sent back,
-     * otherwise Livewire re-renders the component with its default (fixed) list.
-     * `/titles/list?search=` is used as a fallback.
+     * The site's `/search` route is Cloudflare-protected and renders results
+     * client-side via Livewire. The reliable, query-accurate endpoint is
+     * `/titles/list?search=`, which is server-rendered. We use it first and fall
+     * back to driving the homepage Livewire `search` component.
      */
     override suspend fun search(query: String): List<SearchResponse> {
-        // 1) Server-rendered list page (always reflects the query).
-        val list = parseTitleList(
-            getDocument("$mainUrl/titles/list?search=${URLEncoder.encode(query, "UTF-8")}")
-        )
-        android.util.Log.i(TAG, "search '$query' list results=${list.size}")
-        if (list.isNotEmpty() && looksLikeQueryResult(list, query)) return list
+        val url = "$mainUrl/titles/list?search=${URLEncoder.encode(query, "UTF-8")}"
+        val direct = parseTitleList(getDocument(url))
+        if (direct.isNotEmpty()) return direct
 
-        // 2) Livewire search component (needs the session cookies).
-        val livewire = searchViaLivewire(query)
-        android.util.Log.i(TAG, "search '$query' livewire results=${livewire.size}")
-        if (livewire.isNotEmpty() && looksLikeQueryResult(livewire, query)) return livewire
-
-        // 3) Never throw away results we do have.
-        if (list.isNotEmpty()) return list
-        return livewire
-    }
-
-    /**
-     * Guards against the Livewire component re-rendering its default list (which
-     * would look like a "fixed" result page): at least one returned title has to
-     * contain a word of the query.
-     */
-    private fun looksLikeQueryResult(results: List<SearchResponse>, query: String): Boolean {
-        val words = query.trim().split(Regex("\\s+"))
-            .map { it.trim().lowercase() }
-            .filter { it.length >= 3 }
-        if (words.isEmpty()) return true
-        val haystack = results.joinToString(" ") { it.name.lowercase() }
-        return words.any { haystack.contains(it) }
+        return searchViaLivewire(query)
     }
 
     private suspend fun searchViaLivewire(query: String): List<SearchResponse> {
@@ -221,28 +164,20 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
         )
 
         val text = runCatching {
-            val response = app.post(
+            app.post(
                 "$mainUrl/livewire/update",
-                headers = requestHeaders(
-                    mapOf(
-                        "Accept" to "*/*",
-                        "Content-Type" to "application/json",
-                        "Origin" to mainUrl,
-                        "Referer" to "$mainUrl/",
-                        "X-Livewire" to "",
-                    )
+                headers = headers + mapOf(
+                    "Content-Type" to "application/json",
+                    "Accept" to "*/*",
+                    "Origin" to mainUrl,
+                    "Referer" to "$mainUrl/",
+                    "X-Livewire" to "true",
                 ),
                 json = body
-            )
-            storeCookies(response.cookies)
-            android.util.Log.i(TAG, "livewire POST code=${response.code} cookies=${response.cookies?.keys}")
-            response.text
+            ).text
         }.getOrNull() ?: return emptyList()
 
-        if (!text.contains("\"html\"")) {
-            android.util.Log.i(TAG, "livewire response has no html: ${text.take(200)}")
-            return emptyList()
-        }
+        if (!text.contains("\"html\"")) return emptyList()
 
         val json = runCatching {
             com.lagradost.cloudstream3.utils.AppUtils.parseJson<Map<String, Any>>(text)
@@ -257,25 +192,25 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
         return parseTitleList(org.jsoup.Jsoup.parse(html, mainUrl))
     }
 
-    /** Parse the grid of search-result cards: `a.simple-title-card`. */
+    /** Parse a grid of anime cards: `a.simple-title-card` or `a[href*=/titles/]`. */
     private fun parseTitleList(doc: Document?): List<SearchResponse> {
         if (doc == null) return emptyList()
         val out = LinkedHashMap<String, SearchResponse>()
-        // Only the dedicated search-result cards are real results; generic
-        // `/titles/...` links are site navigation and would produce a fixed,
-        // image-less list.
-        val anchors = doc.select("a.simple-title-card")
+        // Prefer the dedicated search-result cards when present (they are more
+        // precise than the generic title anchors that may include navigation).
+        var anchors = doc.select("a.simple-title-card")
+        if (anchors.isEmpty()) anchors = doc.select("a[href*=/titles/]")
         for (a in anchors) {
             val href = absolute(a.attr("href"))
             val slug = titleSlug(href) ?: continue
             if (slug == "list" || slug.contains("/")) continue
             val img = a.selectFirst("img")
-            val title = a.selectFirst("h4")?.text()?.trim()
+            val title = a.selectFirst("h2, h3, h4, .title-name, .title, span")?.text()?.trim()
                 ?: img?.attr("alt")?.trim()?.removePrefix("بوستر ")?.trim()
                 ?: continue
             if (title.isBlank()) continue
             out[slug] = newAnimeSearchResponse(title, "$mainUrl/titles/$slug", TvType.Anime) {
-                this.posterUrl = img?.attr("src")?.takeIf { it.isNotBlank() }
+                this.posterUrl = img?.let { poster(it) }
                 this.posterHeaders = posterHeaders
             }
         }
@@ -293,14 +228,10 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
         val title = doc.selectFirst("meta[property=og:title]")?.attr("content")
             ?.let { cleanTitle(it) }
             ?: cleanTitle(doc.title())
-        // The site's own poster image (the one with the "بوستر <title>" alt).
-        // NOTE: `og:image` is a generic placeholder (figure-square.png) on list
-        // pages, so it must never win over the real poster image.
-        val poster = doc.selectFirst("img[alt*='بوستر']")?.attr("src")?.takeIf { it.isNotBlank() }
-            ?: doc.selectFirst("meta[property=og:image]")?.attr("content")
-                ?.takeIf { it.isNotBlank() && !it.contains("figure-square") }
-        val plot = doc.selectFirst("p.synopsis")?.text()
-            ?: doc.selectFirst("meta[name=description]")?.attr("content")?.substringBefore(" Anime3rb")?.trim()
+        val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
+            ?: doc.selectFirst("img[alt^=بوستر], div.poster img, img.poster, .anime-poster img")?.let { poster(it) }
+        val plot = doc.selectFirst("meta[name=description]")?.attr("content")
+            ?.substringBefore(" Anime3rb")?.trim()
         val tags = doc.select("a[href*=/genre/]").map { it.text().trim() }
             .filter { it.isNotBlank() }.distinct()
         val year = Regex("""\b(19|20)\d{2}\b""").find(doc.select(".anime-info, .details").text())
