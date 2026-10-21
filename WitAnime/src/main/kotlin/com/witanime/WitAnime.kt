@@ -20,12 +20,10 @@ import com.lagradost.cloudstream3.newEpisode
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newMovieLoadResponse
 import com.lagradost.cloudstream3.newMovieSearchResponse
-import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import okhttp3.Interceptor
 import org.json.JSONObject
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
@@ -61,10 +59,33 @@ class WitAnime(private val context: android.content.Context) : MainAPI() {
         TvType.Cartoon,
     )
 
-    // Solves the Cloudflare challenge in a hidden WebView and reuses the cleared
-    // cookies. Must be used sequentially (shared WebView cookie store).
-    private val cloudflareKiller by lazy { CloudflareKiller() }
-    private val cfInterceptor: Interceptor get() = cloudflareKiller
+    // Cloudflare clearance is handled by WitAnimeWebView, which shows a real,
+    // full-screen WebView only when a challenge is actually on screen (so it can
+    // be solved by hand if the automatic touch fails), then keeps the resulting
+    // `cf_clearance` cookie in the app-wide CookieManager and closes itself.
+    //
+    // The stock CloudflareKiller is deliberately NOT used: it wipes every cookie
+    // on construction (`removeAllCookies`) and only triggers on a Cloudflare
+    // 403/503, whereas this site answers with 404/429 challenge pages, so it
+    // never fires. Instead we read the persisted cookies back from CookieManager
+    // and attach them to every OkHttp request.
+    private fun persistedCookies(url: String): Map<String, String> = try {
+        android.webkit.CookieManager.getInstance().getCookie(url)
+            ?.split(";")
+            ?.mapNotNull { part ->
+                val kv = part.trim().split("=", limit = 2)
+                if (kv.size == 2) kv[0] to kv[1] else null
+            }?.toMap() ?: emptyMap()
+    } catch (_: Exception) {
+        emptyMap()
+    }
+
+    /**
+     * Reads the current Cloudflare clearance cookie (if any) so OkHttp requests
+     * can reuse a previously solved challenge without opening a WebView again.
+     */
+    private fun isCloudflareSolved(): Boolean =
+        persistedCookies(mainUrl).keys.any { it.contains("cf_clearance") }
 
     private val browserUa =
         "Mozilla/5.0 (Linux; Android 14; M2006C3MG Build/UQ1A.240205.004) " +
@@ -102,7 +123,7 @@ class WitAnime(private val context: android.content.Context) : MainAPI() {
             "schedule" -> "$mainUrl/schedule"
             else -> mainUrl
         }
-        val document = app.get(url, headers = pageHeaders, interceptor = cfInterceptor).document
+        val document = app.get(url, headers = pageHeaders, cookies = persistedCookies(url)).document
         val items = document.parseCards()
         return newHomePageResponse(request, items, hasNext = items.isNotEmpty() && request.data != "schedule")
     }
@@ -114,13 +135,13 @@ class WitAnime(private val context: android.content.Context) : MainAPI() {
             "$mainUrl/search",
             headers = pageHeaders,
             params = mapOf("q" to query),
-            interceptor = cfInterceptor
+            cookies = persistedCookies(mainUrl)
         ).document
         return document.parseCards()
     }
 
     override suspend fun load(url: String): LoadResponse {
-        val document = app.get(url, headers = pageHeaders, interceptor = cfInterceptor).document
+        val document = app.get(url, headers = pageHeaders, cookies = persistedCookies(url)).document
         val isMovie = url.contains("/movie/")
 
         val title = document.selectFirst("h1")?.text()?.trim()
@@ -371,9 +392,8 @@ class WitAnime(private val context: android.content.Context) : MainAPI() {
                         "Sec-Fetch-Dest" to "iframe",
                         "Upgrade-Insecure-Requests" to "1",
                     ),
-                    cookies = cookies,
-                    allowRedirects = false,
-                    interceptor = cfInterceptor
+                    cookies = cookies + persistedCookies(gate),
+                    allowRedirects = false
                 )
                 val loc = r.headers["Location"] ?: r.headers["location"]
                 println("[WitAnime] gateHTTP $token code=${r.code} location=$loc")
@@ -441,9 +461,8 @@ class WitAnime(private val context: android.content.Context) : MainAPI() {
                     "Referer" to watchUrl,
                     "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 ),
-                cookies = cookies,
-                allowRedirects = false,
-                interceptor = cfInterceptor
+                cookies = cookies + persistedCookies(gate),
+                allowRedirects = false
             )
             val loc = r.headers["Location"] ?: r.headers["location"]
             if (!loc.isNullOrBlank()) loc else null

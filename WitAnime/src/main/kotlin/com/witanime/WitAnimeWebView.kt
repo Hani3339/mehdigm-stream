@@ -92,6 +92,14 @@ object WitAnimeWebView {
             fun deliver(result: Result) {
                 if (finished) return
                 finished = true
+                // Persist any Cloudflare clearance cookie the page earned so later
+                // OkHttp requests (and future sessions) can reuse it without ever
+                // opening this WebView again.
+                runCatching {
+                    CookieManager.getInstance().flush()
+                    val c = CookieManager.getInstance().getCookie(watchUrl)
+                    println("[WitAnime][WebView] cookies after solve: ${c?.take(200)}")
+                }
                 runCatching { if (cont.isActive) cont.resume(result) }
                 cleanup()
             }
