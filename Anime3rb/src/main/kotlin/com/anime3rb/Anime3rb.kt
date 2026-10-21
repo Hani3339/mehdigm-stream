@@ -291,9 +291,11 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
         // 1) Streaming: the Livewire snapshot holds `video_url`, which points at
         //    the vid3rb player; the player page exposes direct MP4 sources.
         val playerUrl = extractVideoUrl(html)
+        android.util.Log.i(TAG, "loadLinks playerUrl=$playerUrl")
         if (playerUrl != null) {
             if (emitFromPlayer(playerUrl, episodeUrl, callback)) found = true
         }
+        android.util.Log.i(TAG, "loadLinks streaming found=$found")
 
         // 2) Downloads: `/download/<uuid>?expires=&signature=` per quality.
         //    Only offered when streaming is unavailable — these live on the
@@ -309,8 +311,10 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
 
     private fun extractVideoUrl(html: String): String? {
         // The episode page embeds the vid3rb player URL inside the Livewire
-        // snapshot (JSON-escaped `https:\/\/...`) and/or the Alpine block.
-        val direct = Regex("""https:(?:\\/|/){2}video\.vid3rb\.com(?:\\/|/)player(?:\\/|/)[^"'&\s]+""")
+        // snapshot (JSON-escaped `https:\/\/...`). The URL contains a query with
+        // `&amp;expires=`; both quotes and the `&` must be kept, otherwise the
+        // token is truncated and the player rejects it (HTTP 403 -> 2004).
+        val direct = Regex("""https:(?:\\/|/){2}video\.vid3rb\.com(?:\\/|/)player(?:\\/|/)(?:(?!&quot;|\\"|\s).)+""")
             .find(html)?.value
         if (direct != null) return normalizeUrl(direct)
 
@@ -375,6 +379,7 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
         val playerHtml = runCatching {
             app.get(playerUrl, headers = videoHeaders).text
         }.getOrNull() ?: return false
+        android.util.Log.i(TAG, "emitFromPlayer got ${playerHtml.length} chars, hasSources=${playerHtml.contains("video_sources")}")
 
         var any = false
 
@@ -426,20 +431,15 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
         label: String,
         callback: (ExtractorLink) -> Unit
     ) {
-        val isHls = url.contains(".m3u8")
+        // The working reference emits the source with no custom referer/headers;
+        // adding them (Host/Referer) makes ExoPlayer's request fail with 2004.
         callback(
             newExtractorLink(
                 source = name,
                 name = "$name - $label",
-                url = url,
-                type = if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                url = url
             ) {
-                this.referer = "https://video.vid3rb.com/"
                 this.quality = qualityValue(label, url)
-                this.headers = mapOf(
-                    "User-Agent" to UA,
-                    "Referer" to "https://video.vid3rb.com/",
-                )
             }
         )
     }
