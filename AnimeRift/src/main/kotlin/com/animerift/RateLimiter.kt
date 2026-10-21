@@ -81,10 +81,17 @@ class RateLimiter(
         const val KEY_HOUR_START = "hour_start"
 
         /**
-         * أقصى عدد طلبات في الساعة. بعدها نُبطئ الطلبات إلى الضعف بدل
-         * المخاطرة بحظر طويل (يبدو أن الحظر يدوم ساعة على الأقل).
+         * عدد الطلبات في الساعة التي نبدأ بعدها بتوسيع الفاصل (3x) — حد
+         * احترازي لتخفيف الحمل قبل الوصول للسقف.
          */
-        const val MAX_REQUESTS_PER_HOUR = 400
+        const val SOFT_REQUESTS_PER_HOUR = 250
+
+        /**
+         * السقف الصلب: بعده تتوقف الطلبات حتى تنتهي الساعة. التطبيق الرسمي
+         * يستهلك ~6 طلبات للحلقة، ونحن ~24، فالمستخدم النهم قد يتجاوز السقف.
+         * السقف الصلب أضمن من المخاطرة بحظر يدوم ساعة على الأقل.
+         */
+        const val MAX_REQUESTS_PER_HOUR = 350
     }
 
     private val lock = Mutex()
@@ -105,15 +112,19 @@ class RateLimiter(
         }
 
     /**
-     * الفاصل الفعّال: مضاعف عندما تُتجاوز الميزانية الساعية (شبكة أمان
+     * الفاصل الفعّال: ثلاثي عندما تُتجاوز الميزانية الساعية (شبكة أمان
      * إضافية ضد الحظر الطويل).
      */
     val effectiveIntervalMs: Long
         get() {
             val base = intervalMs
-            val over = hourlyCount > MAX_REQUESTS_PER_HOUR
-            return if (over) (base * 2).coerceAtMost(maxIntervalMs) else base
+            val over = hourlyCount >= SOFT_REQUESTS_PER_HOUR
+            return if (over) (base * 3).coerceAtMost(maxIntervalMs) else base
         }
+
+    /** هل تجاوزنا السقف الصلب للساعة؟ */
+    val overHardCap: Boolean
+        get() = hourlyCount >= MAX_REQUESTS_PER_HOUR
 
     /** هل ال�� IPcurrently محظور؟ */
     val isBanned: Boolean
@@ -186,11 +197,11 @@ class RateLimiter(
     }
 
     /**
-     * أثناء الحظر: هل حان وقت محاولة ف探测 واحدة (probe)؟ هذه المحاولة
-     * الوحيدة التي تُرسل أثناء الحظر، وتُعيد ضبط المؤقّت في كل مرة.
+     * أثناء الحظر أو تجاوز السقف الصلب: هل حان وقت محاولة واحدة (probe)؟
+     * هذه المحاولة الوحيدة التي تُرسل في تلك الحالة، وتُعيد ضبط المؤقّت
+     * في كل مرة — وبذلك يتعافى التطبيق تلقائياً.
      */
     fun shouldProbe(): Boolean {
-        if (!isBanned) return true
         val last = store.getLong(KEY_LAST_PROBE, 0L)
         if (now() - last < probeIntervalMs) return false
         store.putLong(KEY_LAST_PROBE, now())

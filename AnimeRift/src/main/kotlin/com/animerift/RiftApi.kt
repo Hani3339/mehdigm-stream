@@ -286,6 +286,14 @@ class RiftApi(context: Context) {
             android.util.Log.i(TAG, "الطلب $path متوقف بسبب حظر الـ IP")
             return null
         }
+        if (limiter.overHardCap && !limiter.shouldProbe()) {
+            android.util.Log.i(
+                TAG,
+                "الطلب $path متوقف: تجاوز السقف الساعي " +
+                    "(${limiter.hourlyCount} طلب/ساعة)"
+            )
+            return null
+        }
         if (!awaitCooldown()) return null
 
         val order = listOf(gatewayIndex) + GATEWAYS.indices.filter { it != gatewayIndex }

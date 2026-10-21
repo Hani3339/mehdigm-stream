@@ -3,7 +3,7 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-version = 2
+version = 3
 
 cloudstream {
     description = "أنمي رِفت (AnimeRift) — التطبيق الرسمي: مترجم ومدبلج عربي بجميع الجودات ومصادر المشاهدة والتحميل."
