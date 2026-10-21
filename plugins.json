@@ -331,5 +331,29 @@
     "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/WitAnime.cs3",
     "name": "ويت أنمي (WitAnime)",
     "description": "ويت أنمي (WitAnime) — أنمي مترجم ومدبلج وأفلام أنمي بجودة عالية."
+  },
+  {
+    "iconUrl": "https://images.anime3rb.com/favicon/apple-touch-icon.png",
+    "apiVersion": 1,
+    "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
+    "fileSize": 27816,
+    "status": 1,
+    "language": "ar",
+    "authors": [
+      "mehdigm4life"
+    ],
+    "tvTypes": [
+      "Anime",
+      "AnimeMovie",
+      "OVA",
+      "TvSeries",
+      "Movie",
+      "Cartoon"
+    ],
+    "version": 1,
+    "internalName": "Anime3rb",
+    "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/Anime3rb.cs3",
+    "name": "أنمي عرب (Anime3rb)",
+    "description": "أنمي عرب (Anime3rb) — مشاهدة وتحميل الأنمي المترجم بجودات متعددة."
   }
 ]
