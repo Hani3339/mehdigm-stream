@@ -1,6 +1,5 @@
 package com.anime3rb
 
-import android.util.Log
 import com.lagradost.cloudstream3.Actor
 import com.lagradost.cloudstream3.ActorData
 import com.lagradost.cloudstream3.DubStatus
@@ -24,7 +23,6 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import com.lagradost.cloudstream3.network.CloudflareKiller
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
@@ -52,106 +50,29 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
 
     companion object {
         const val TAG = "Anime3rb"
-        // Must match the UA the WebView uses, because Cloudflare's `cf_clearance`
-        // is bound to the solving user-agent. Taken from a real device HAR.
+        // Mobile UA; the site serves the full HTML only to a mobile browser UA.
         private const val UA =
-            "Mozilla/5.0 (Linux; Android 14; M2006C3MG Build/UQ1A.240205.004) " +
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.7871.63 Mobile Safari/537.36"
+            "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
     }
 
     private val headers = mapOf(
         "User-Agent" to UA,
-        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language" to "ar,en-US;q=0.9,en;q=0.8",
     )
 
     // =========================================================================
-    // Cloudflare handling
+    // Networking (plain, mirrors the working reference implementation)
     // =========================================================================
 
-    /**
-     * Cloudflare's managed challenge blocks plain OkHttp requests (HTTP 403 +
-     * `cf-mitigated: challenge`). The built-in [CloudflareKiller] interceptor
-     * drives a real WebView to solve it and replays the request with the solved
-     * cookies, keeping them cached for subsequent calls.
-     */
-    private val cfInterceptor = CloudflareKiller()
-
-    private fun persistedCookies(url: String): Map<String, String> = try {
-        val raw = buildString {
-            append(Anime3rbWebView.loadSavedCookie(context) ?: "")
-            val live = android.webkit.CookieManager.getInstance().getCookie(url)
-            if (!live.isNullOrBlank()) {
-                if (isNotEmpty()) append("; ")
-                append(live)
-            }
-        }
-        raw.split(";")
-            .mapNotNull { part ->
-                val idx = part.indexOf('=')
-                if (idx <= 0) null
-                else part.substring(0, idx).trim() to part.substring(idx + 1).trim()
-            }
-            .toMap()
-    } catch (_: Throwable) {
-        emptyMap()
-    }
-
-    private fun looksLikeChallenge(html: String): Boolean =
-        html.contains("Just a moment") ||
-            html.contains("cf-mitigated") ||
-            html.contains("challenge-platform") && html.contains("ch_retry")
-
-    /**
-     * GET a page. Tries OkHttp (with the Cloudflare interceptor and any cookies
-     * already solved); if that still returns a challenge it drives a real,
-     * off-screen WebView (attached to the activity) to clear Cloudflare and read
-     * the rendered HTML back.
-     */
-    private suspend fun getDocument(url: String): Document? {
-        val direct = runCatching {
-            app.get(
-                url,
-                headers = headers,
-                cookies = persistedCookies(url),
-                interceptor = cfInterceptor
-            ).text
-        }.getOrNull()
-
-        if (direct != null && !looksLikeChallenge(direct)) {
-            return runCatching { org.jsoup.Jsoup.parse(direct, url) }.getOrNull()
-        }
-
-        Log.i(TAG, "challenge on $url, solving via WebView")
-        val solved = Anime3rbCloudflareSolver.solve(context as? android.app.Activity, url, UA)
-        if (solved != null) return solved
-
-        val html = Anime3rbWebView.fetch(context, url, headers) ?: direct
-        return html?.let { runCatching { org.jsoup.Jsoup.parse(it, url) }.getOrNull() }
-    }
+    private suspend fun getDocument(url: String): Document? = runCatching {
+        app.get(url, headers = headers).document
+    }.getOrNull()
 
     private suspend fun getText(url: String, referer: String? = null): String? {
         val h = if (referer != null) headers + ("Referer" to referer) else headers
-
-        // The media/player host (vid3rb) is not behind the managed challenge and
-        // is IP/token bound; a plain request keeps playback fast (no 60s WebView).
-        val isMediaHost = url.contains("vid3rb")
-        val direct = runCatching {
-            app.get(
-                url,
-                headers = h,
-                cookies = persistedCookies(url),
-                interceptor = if (isMediaHost) null else cfInterceptor
-            ).text
-        }.getOrNull()
-        if (direct != null && !looksLikeChallenge(direct)) return direct
-        if (isMediaHost) return direct
-
-        Log.i(TAG, "challenge on $url, solving via WebView")
-        Anime3rbCloudflareSolver.solve(context as? android.app.Activity, url, UA)?.let {
-            return it.outerHtml()
-        }
-        return Anime3rbWebView.fetch(context, url, h) ?: direct
+        return runCatching { app.get(url, headers = h).text }.getOrNull()
     }
 
     // =========================================================================
@@ -244,7 +165,6 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
                     "Referer" to "$mainUrl/",
                     "X-Livewire" to "true",
                 ),
-                cookies = persistedCookies(mainUrl),
                 json = body
             ).text
         }.getOrNull() ?: return emptyList()
@@ -441,42 +361,29 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
         referer: String,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // vid3rb validates the request context (referer + iframe semantics) and
-        // the token is bound to the session that produced `video_url`. Fetch it
-        // as an embedded frame would, and fall back to the real WebView (which
-        // keeps the solved Cloudflare session on the device's real IP).
-        val frameHeaders = headers + mapOf(
+        // Exactly mirrors the working reference implementation: fetch the vid3rb
+        // player page as an embedded iframe (site + cross-site) and read the
+        // `var video_sources = [...]` array. No extra cookies/headers.
+        val videoHeaders = mapOf(
+            "Host" to "video.vid3rb.com",
+            "User-Agent" to UA,
             "Referer" to "$mainUrl/",
             "Sec-Fetch-Dest" to "iframe",
-            "Sec-Fetch-Mode" to "navigate",
             "Sec-Fetch-Site" to "cross-site",
-            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         )
 
-        var playerHtml = runCatching {
-            app.get(
-                playerUrl,
-                headers = frameHeaders,
-                cookies = persistedCookies(mainUrl) + persistedCookies(playerUrl)
-            ).text
-        }.getOrNull()
-
-        if (playerHtml == null || !playerHtml.contains("video_sources")) {
-            Log.i(TAG, "player plain fetch failed, trying WebView for $playerUrl")
-            Anime3rbCloudflareSolver.solve(context as? android.app.Activity, playerUrl, UA)?.let {
-                playerHtml = it.outerHtml()
-            }
-        }
-        val html = playerHtml ?: return false
+        val playerHtml = runCatching {
+            app.get(playerUrl, headers = videoHeaders).text
+        }.getOrNull() ?: return false
 
         var any = false
 
         // Primary format: `var video_sources = [ {"src":"...","label":"1080p","premium":false}, ... ];
         val arrayRe = Regex(
-            """video_sources\s*=\s*(\[.*?\])\s*;""",
+            """var\s+video_sources\s*=\s*(\[.*?\]);""",
             setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE)
         )
-        for (arr in arrayRe.findAll(html)) {
+        for (arr in arrayRe.findAll(playerHtml)) {
             val json = arr.groupValues[1]
                 .replace("\\/", "/")
                 .replace("&amp;", "&")
@@ -492,7 +399,7 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
                     ?.takeIf { it.startsWith("http") } ?: continue
                 if (item["premium"]?.toString() == "true") continue
                 val label = item["label"]?.toString()?.takeIf { it.isNotBlank() } ?: qualityLabel(src)
-                emitStream(src, label, playerUrl, referer, callback)
+                emitStream(src, label, callback)
                 any = true
             }
             if (any) break
@@ -504,10 +411,10 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
                 """"src"\s*:\s*"(https://[^"]+\.(?:mp4|m3u8)[^"]*)"""",
                 RegexOption.IGNORE_CASE
             )
-            for (m in re.findAll(html)) {
+            for (m in re.findAll(playerHtml)) {
                 val src = m.groupValues[1].replace("\\/", "/").replace("&amp;", "&")
                 if (src.isBlank()) continue
-                emitStream(src, qualityLabel(src), playerUrl, referer, callback)
+                emitStream(src, qualityLabel(src), callback)
                 any = true
             }
         }
@@ -517,14 +424,9 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
     private suspend fun emitStream(
         url: String,
         label: String,
-        playerUrl: String,
-        referer: String,
         callback: (ExtractorLink) -> Unit
     ) {
         val isHls = url.contains(".m3u8")
-        // The `/video/<uuid>` endpoint 302-redirects to files.vid3rb.com and
-        // validates the exact player URL (with token) as the Referer.
-        val mediaReferer = if (url.contains("vid3rb")) playerUrl else playerUrl
         callback(
             newExtractorLink(
                 source = name,
@@ -532,15 +434,11 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
                 url = url,
                 type = if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
             ) {
-                this.referer = mediaReferer
+                this.referer = "https://video.vid3rb.com/"
                 this.quality = qualityValue(label, url)
                 this.headers = mapOf(
                     "User-Agent" to UA,
-                    "Referer" to mediaReferer,
-                    "Accept" to "*/*",
-                    "Sec-Fetch-Dest" to "video",
-                    "Sec-Fetch-Mode" to "no-cors",
-                    "Sec-Fetch-Site" to "same-origin",
+                    "Referer" to "https://video.vid3rb.com/",
                 )
             }
         )
@@ -552,8 +450,6 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
         referer: String,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val cookieHeader = persistedCookies(mainUrl)
-            .entries.joinToString("; ") { "${it.key}=${it.value}" }
         callback(
             newExtractorLink(
                 source = name,
@@ -563,12 +459,11 @@ class Anime3rb(private val context: android.content.Context) : MainAPI() {
             ) {
                 this.referer = referer
                 this.quality = qualityValue(label, downloadUrl)
-                this.headers = buildMap {
-                    put("User-Agent", UA)
-                    put("Referer", referer)
-                    put("Accept", "*/*")
-                    if (cookieHeader.isNotBlank()) put("Cookie", cookieHeader)
-                }
+                this.headers = mapOf(
+                    "User-Agent" to UA,
+                    "Referer" to referer,
+                    "Accept" to "*/*",
+                )
             }
         )
         return true
