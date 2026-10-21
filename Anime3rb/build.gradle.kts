@@ -3,7 +3,7 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-version = 2
+version = 3
 
 cloudstream {
     description = "أنمي عرب (Anime3rb) — مشاهدة وتحميل الأنمي المترجم بجودات متعددة."
