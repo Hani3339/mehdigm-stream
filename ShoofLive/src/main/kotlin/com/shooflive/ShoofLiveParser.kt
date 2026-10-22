@@ -95,6 +95,20 @@ object ShoofLiveParser {
     fun clean(input: String): String =
         decodeEntities(input.replace(Regex("<[^>]*>"), " ")).replace(Regex("\\s+"), " ").trim()
 
+    /**
+     * Normalises a URL taken out of the markup.
+     *
+     * The theme sometimes leaves stray whitespace (spaces, newlines) inside the
+     * `src` attribute — e.g. `https://anafast.cyou/embed-xxx.html\n\n`. OkHttp
+     * refuses such a URL (illegal characters), so the request would fail with
+     * an exception instead of a normal 404. Every whitespace character is
+     * therefore removed before the URL is used.
+     */
+    fun normalizeUrl(input: String): String {
+        val cleaned = decodeEntities(input).filterNot { it.isWhitespace() }
+        return if (cleaned.startsWith("//")) "https:$cleaned" else cleaned
+    }
+
     fun slugToTitle(url: String): String {
         val slug = url.substringAfterLast("/").trimEnd('/')
         return runCatching { URLDecoder.decode(slug, "UTF-8") }
@@ -200,11 +214,15 @@ object ShoofLiveParser {
     }
 
     fun firstIframe(html: String): String? =
-        IFRAME_RE.find(html)?.groupValues?.get(1)?.let { decodeEntities(it) }
+        IFRAME_RE.find(html)?.groupValues?.get(1)?.let { normalizeUrl(it) }
+            ?.takeIf { it.startsWith("http") }
 
     /** Every iframe of the page (in document order). */
     fun allIframes(html: String): List<String> =
-        IFRAME_RE.findAll(html).map { decodeEntities(it.groupValues[1]) }.toList()
+        IFRAME_RE.findAll(html)
+            .map { normalizeUrl(it.groupValues[1]) }
+            .filter { it.startsWith("http") }
+            .toList()
 
     /** The `embedUrl` of the JSON-LD block (`/embed/<id>/` of the site). */
     fun ldEmbedUrl(html: String): String? =
@@ -215,7 +233,7 @@ object ShoofLiveParser {
     /** The AlbaPlayer iframe of an item page. */
     fun albaBase(html: String): String? {
         for (m in IFRAME_RE.findAll(html)) {
-            val src = decodeEntities(m.groupValues[1])
+            val src = normalizeUrl(m.groupValues[1])
             if (src.contains(ALBA_HOST) && src.contains("/albaplayer/")) return src
         }
         return null
@@ -227,7 +245,7 @@ object ShoofLiveParser {
             .map {
                 Server(
                     clean(it.groupValues[2]).ifBlank { "سيرفر" },
-                    decodeEntities(it.groupValues[1])
+                    normalizeUrl(it.groupValues[1])
                 )
             }
             .toList()

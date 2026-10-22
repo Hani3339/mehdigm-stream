@@ -384,7 +384,7 @@
         "iconUrl": "https://shooflive.watch/wp-content/uploads/2026/09/favicon.png",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-        "fileSize": 44282,
+        "fileSize": 44893,
         "status": 1,
         "language": "ar",
         "authors": [
@@ -394,7 +394,7 @@
             "TvSeries",
             "Movie"
         ],
-        "version": 1,
+        "version": 2,
         "internalName": "ShoofLive",
         "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/ShoofLive.cs3",
         "name": "شوف لايف (ShoofLive)",

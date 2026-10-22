@@ -3,7 +3,7 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-version = 1
+version = 2
 
 cloudstream {
     description = "شوف لايف (ShoofLive) — مسلسلات وأفلام وحلقات مترجمة مع كل السيرفرات وروابط التحميل."

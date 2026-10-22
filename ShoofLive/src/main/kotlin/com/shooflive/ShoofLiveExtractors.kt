@@ -71,13 +71,21 @@ object ShoofLiveExtractors {
     ) {
         val clean = url.replace("&amp;", "&").replace("\\/", "/").trim()
         if (!clean.startsWith("http")) return
+
+        // The CDNs behind the embed hosts (cdnz.quest, …) only answer to a
+        // browser User-Agent: with the default "NiceHttp"/okhttp agent their
+        // m3u8 endpoints answer 403 — both while CloudStream resolves the
+        // playlist and while the player streams it. So the browser headers are
+        // attached to every link we hand over.
+        val requestHeaders = pageHeaders(referer).apply { putAll(headers) }
+
         if (clean.contains(".m3u8")) {
             val generated = runCatching {
                 M3u8Helper.generateM3u8(
                     label,
                     clean,
                     referer ?: "",
-                    headers = headers + mapOf("Referer" to (referer ?: ""))
+                    headers = requestHeaders
                 )
             }.getOrNull()
             if (!generated.isNullOrEmpty()) {
@@ -93,7 +101,7 @@ object ShoofLiveExtractors {
                 if (clean.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
             ) {
                 if (!referer.isNullOrBlank()) this.referer = referer
-                if (headers.isNotEmpty()) this.headers = headers.toMutableMap()
+                this.headers = requestHeaders.toMutableMap()
                 if (quality != null) this.quality = quality
             }
         )
