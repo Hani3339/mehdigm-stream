@@ -1,7 +1,7 @@
-version = 3
+version = 4
 
 cloudstream {
-    description = "تحديث الدومين إلى shaheid4u.name ودعم البنية الجديدة للمواسم/الحلقات واستخراج سيرفرات المشاهدة"
+    description = "إعادة بناء كاملة لدومين shaahidd4u.net: استخراج سيرفرات المشاهدة عبر /watch/resolve، كل المواسم والحلقات، حماية من الحظر وتحديد الطلبات"
     authors = listOf("mehdigm4life")
     language = "ar"
 
@@ -13,5 +13,5 @@ cloudstream {
         "Anime"
     )
 
-    iconUrl = "https://shaheid4u.name/faveicon.ico?v=33"
+    iconUrl = "https://shaahidd4u.net/faveicon.ico?v=33"
 }

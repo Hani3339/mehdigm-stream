@@ -1,378 +1,547 @@
 package com.shahid4u
 
-import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.utils.*
-import org.jsoup.nodes.Element
 import android.util.Log
-import com.lagradost.cloudstream3.amap
+import com.lagradost.cloudstream3.ErrorLoadingException
+import com.lagradost.cloudstream3.HomePageList
+import com.lagradost.cloudstream3.HomePageResponse
+import com.lagradost.cloudstream3.LoadResponse
+import com.lagradost.cloudstream3.MainAPI
+import com.lagradost.cloudstream3.MainPageRequest
+import com.lagradost.cloudstream3.SearchResponse
+import com.lagradost.cloudstream3.SubtitleFile
+import com.lagradost.cloudstream3.TvType
+import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.mainPageOf
 import com.lagradost.cloudstream3.network.CloudflareKiller
+import com.lagradost.cloudstream3.newEpisode
+import com.lagradost.cloudstream3.newHomePageResponse
+import com.lagradost.cloudstream3.newMovieLoadResponse
+import com.lagradost.cloudstream3.newMovieSearchResponse
+import com.lagradost.cloudstream3.newTvSeriesLoadResponse
+import com.lagradost.cloudstream3.newTvSeriesSearchResponse
+import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.loadExtractor
+import com.lagradost.cloudstream3.utils.newExtractorLink
+import com.lagradost.nicehttp.NiceResponse
 import okhttp3.Interceptor
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
+import org.json.JSONObject
+import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
 import java.net.URI
 import java.net.URLEncoder
+import java.util.concurrent.ConcurrentHashMap
 
 class Shahid4u : MainAPI() {
-    override var mainUrl = "https://shaheid4u.name/"
+    override var mainUrl = "https://shaahidd4u.net/"
     override var name = "شاهد فور يو (Shahid4u)"
     override val hasMainPage = true
     override var lang = "ar"
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime)
 
-    private val logTag = "Shahid4uProvider"
-    private var resolvedReferer: String? = null
+    private val logTag = "Shahid4u"
 
-    private val TRANSPARENT_PNG_DATA_URI =
-        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg=="
-    override var sequentialMainPage = true
-    override var sequentialMainPageDelay = 50L
-    override var sequentialMainPageScrollDelay = 50L
+    override val mainPage = mainPageOf(
+        "" to "الرئيسية",
+        "$mainUrl/category/افلام-اجنبي" to "أفلام أجنبي",
+        "$mainUrl/category/افلام-هندي" to "أفلام هندي",
+        "$mainUrl/category/افلام-انمي" to "أفلام أنمي",
+        "$mainUrl/category/مسلسلات-اجنبي" to "مسلسلات أجنبي",
+        "$mainUrl/category/مسلسلات-تركية" to "مسلسلات تركية",
+        "$mainUrl/category/مسلسلات-عربي" to "مسلسلات عربي",
+        "$mainUrl/category/مسلسلات-مدبلجة" to "مسلسلات مدبلجة",
+        "$mainUrl/category/مسلسلات-انمي" to "مسلسلات أنمي",
+        "$mainUrl/category/مسلسلات-هندية" to "مسلسلات هندية",
+        "$mainUrl/category/مسلسلات-رمضان-2026" to "مسلسلات رمضان 2026",
+        "$mainUrl/category/برامج-تلفزيونية" to "برامج تلفزيونية",
+        "$mainUrl/category/عروض-مصارعة" to "عروض مصارعة"
+    )
 
     private val cloudflareKiller by lazy { CloudflareKiller() }
     private val cfInterceptor: Interceptor get() = cloudflareKiller
-    private fun encodeUri(url: String): String {
-        return try {
-            url.toCharArray().joinToString("") { char ->
-                if (char.code <= 127) char.toString() else URLEncoder.encode(
-                    char.toString(),
-                    "UTF-8"
-                )
-            }
-        } catch (e: Exception) {
-            mainUrl
-        }
-    }
+    private val earnVids by lazy { ExternalEarnVidsExtractor() }
 
-    private fun buildBrowserHeaders(referer: String? = null): Map<String, String> {
-        val ref = referer ?: resolvedReferer ?: mainUrl
-        val safeRef = encodeUri(ref) // <-- تنظيف الرابط هنا
+    private val docCache = ConcurrentHashMap<String, Pair<Long, Document>>()
+    private val loadCache = ConcurrentHashMap<String, Pair<Long, LoadResponse>>()
+    private val seriesCache =
+        ConcurrentHashMap<String, Pair<Long, List<com.lagradost.cloudstream3.Episode>>>()
+    private val watchCache = ConcurrentHashMap<String, Pair<Long, WatchData>>()
+    private val resolveCache = ConcurrentHashMap<String, Pair<Long, String>>()
+    private val cookieStore =
+        ConcurrentHashMap<String, MutableMap<String, String>>()
 
-        return mapOf(
-            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-            "Accept-Language" to "ar,en-US;q=0.9,en;q=0.8",
-            "Referer" to safeRef, // <-- استخدام الرابط الآمن
-            "Connection" to "keep-alive",
-            "Upgrade-Insecure-Requests" to "1",
-            "Sec-Fetch-Site" to "same-origin",
-            "Sec-Fetch-Mode" to "navigate",
-            "Sec-Fetch-Dest" to "document"
-        )
-    }
+    private val jsonMediaType = "application/json".toMediaType()
 
-    private fun posterheader(referer: String? = null): Map<String, String> {
-        val ref = referer ?: resolvedReferer ?: mainUrl
-        val safeRef = encodeUri(ref) // <-- تنظيف الرابط هنا
+    private data class ServerEntry(
+        val name: String,
+        val token: String,
+        val rank: Int
+    )
 
-        return mapOf(
-            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-            "Accept-Language" to "ar,en-US;q=0.9,en;q=0.8",
-            "Referer" to safeRef, // <-- استخدام الرابط الآمن
-            "Connection" to "keep-alive",
-            "Upgrade-Insecure-Requests" to "1",
-            "Sec-Fetch-Site" to "same-origin",
-            "Sec-Fetch-Mode" to "navigate",
-            "Sec-Fetch-Dest" to "document"
-        )
-    }
+    private data class WatchData(
+        val watchUrl: String,
+        val servers: List<ServerEntry>,
+        val key: String,
+        val csrf: String,
+        val resolveUrl: String,
+        val cookies: Map<String, String>
+    )
 
-    private fun buildMergedHeaders(url: String, referer: String? = null): Map<String, String> {
-        val base = buildBrowserHeaders(referer).toMutableMap()
+    // =====================================================================
+    // Helpers
+    // =====================================================================
 
-        return try {
-            val cloudHeaders = cloudflareKiller.getCookieHeaders(url).toMultimap()
-                .mapValues { entry -> entry.value.joinToString("; ") }
-            base.putAll(cloudHeaders)
-            base
-        } catch (e: Exception) {
-            Log.w(logTag, "buildMergedHeaders -> failed to get cloudflare headers: ${e.message}")
-            base
-        }
-    }
+    private fun now() = System.currentTimeMillis()
+
+    private fun isFresh(at: Long, ttl: Long) = now() - at in 0 until ttl
+
+    private fun ua() = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+
+    /** ترميز آمن لقيم الترويسات (Referer قد يحتوي عربياً). */
+    private fun headerSafe(url: String): String =
+        runCatching { URI(url).toASCIIString() }.getOrDefault(url)
+
+    private fun browserHeaders(referer: String? = null): Map<String, String> = mapOf(
+        "User-Agent" to ua(),
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9," +
+                "image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language" to "ar,en-US;q=0.9,en;q=0.8",
+        "Referer" to headerSafe(referer ?: mainUrl),
+        "Sec-Fetch-Site" to "same-origin",
+        "Sec-Fetch-Mode" to "navigate",
+        "Sec-Fetch-Dest" to "document",
+        "Upgrade-Insecure-Requests" to "1"
+    )
+
+    private fun posterHeaders(): Map<String, String> = mapOf(
+        "User-Agent" to ua(),
+        "Referer" to headerSafe(mainUrl),
+        "Accept" to "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"
+    )
 
     private fun makeAbsoluteUrl(url: String?): String? {
-        if (url.isNullOrBlank()) return null
-        val p = url.trim()
+        val p = url?.trim().orEmpty()
+        if (p.isBlank()) return null
         return when {
             p.startsWith("http://", true) || p.startsWith("https://", true) -> p
             p.startsWith("//") -> "https:$p"
             p.startsWith("/") -> mainUrl.trimEnd('/') + p
-            else -> {
-                mainUrl + p
+            else -> mainUrl + p
+        }
+    }
+
+    private fun hostOf(url: String): String? =
+        runCatching { URI(url).host?.lowercase() }.getOrNull()
+
+    private fun isSameSite(url: String): Boolean {
+        val host = hostOf(url) ?: return false
+        val mainHost = hostOf(mainUrl) ?: return false
+        return host == mainHost || host.endsWith(".$mainHost")
+    }
+
+    private fun withPage(url: String, page: Int): String =
+        if (page <= 1) url else "$url${if (url.contains('?')) '&' else '?'}page=$page"
+
+    private fun cookieDomain(url: String): String = hostOf(url) ?: "shaahidd4u.net"
+
+    private fun cookiesFor(url: String): Map<String, String> =
+        cookieStore[cookieDomain(url)]?.toMap().orEmpty()
+
+    private fun rememberCookies(url: String, res: NiceResponse) {
+        if (res.cookies.isEmpty()) return
+        cookieStore.getOrPut(cookieDomain(url)) { ConcurrentHashMap() }.putAll(res.cookies)
+    }
+
+    // =====================================================================
+    // HTTP + Cloudflare + rate limiting
+    // =====================================================================
+
+    private fun isChallenge(res: NiceResponse): Boolean {
+        if (res.code != 403) return false
+        if (res.headers["cf-mitigated"]?.contains("challenge", true) == true) return true
+        val body = runCatching { res.text }.getOrDefault("")
+        return body.contains("Just a moment", true) ||
+                body.contains("challenge-platform", true) ||
+                body.contains("cf_chl_opt", true)
+    }
+
+    private suspend fun siteGet(
+        url: String,
+        referer: String? = null,
+        allowRedirects: Boolean = true
+    ): NiceResponse {
+        val res = try {
+            SiteGate.run {
+                app.get(
+                    url,
+                    headers = browserHeaders(referer),
+                    referer = headerSafe(referer ?: mainUrl),
+                    cookies = cookiesFor(url),
+                    interceptor = cfInterceptor,
+                    allowRedirects = allowRedirects,
+                    timeout = 60L
+                )
+            }
+        } catch (e: SiteCooldownException) {
+            throw ErrorLoadingException(
+                "الموقع يحظر الطلبات مؤقتاً. أعد المحاولة بعد ${e.remainingMs / 1000} ثانية."
+            )
+        }
+
+        rememberCookies(url, res)
+
+        if (res.code == 429) {
+            SiteGate.penalize(false)
+            throw ErrorLoadingException("تم تقييد الطلبات (429). أعد المحاولة بعد قليل.")
+        }
+        if (isChallenge(res) || res.code == 403) {
+            SiteGate.penalize(true)
+            throw ErrorLoadingException("الموقع يحظر الطلبات (Cloudflare). أعد المحاولة بعد قليل.")
+        }
+        if (res.code >= 400) {
+            throw ErrorLoadingException("فشل الطلب (HTTP ${res.code}).")
+        }
+        return res
+    }
+
+    private suspend fun getDocument(
+        url: String,
+        referer: String? = null,
+        allowCache: Boolean = true
+    ): Document {
+        if (allowCache) {
+            docCache[url]?.let { (at, doc) ->
+                if (isFresh(at, 5 * 60_000L)) return doc
             }
         }
+        val doc = siteGet(url, referer).document
+        if (allowCache) docCache[url] = now() to doc
+        return doc
     }
 
-    private suspend fun httpGet(url: String, referer: String? = null): org.jsoup.nodes.Document {
-        val headers = buildMergedHeaders(url, referer)
-        val safeRef = encodeUri(referer ?: mainUrl) // <-- تنظيف الرابط هنا
-
-        val response = app.get(
-            url,
-            referer = safeRef, // <-- استخدام الرابط الآمن
-            headers = headers,
-            interceptor = cfInterceptor
-        )
-        if (resolvedReferer == null) {
-            val finalUrl = response.url
-            val match = Regex("^(https?://[^/]+/)").find(finalUrl)
-            resolvedReferer = match?.value ?: mainUrl
-            Log.d(logTag, "تم التقاط الرابط النهائي للصور (Referer): $resolvedReferer")
-        }
-
-        return response.document
-    }
+    // =====================================================================
+    // Cards / search
+    // =====================================================================
 
     private fun parseCard(element: Element): SearchResponse? {
-        val linkElement = element.selectFirst("a.show-card, a.glide_post, a.glide-item, a")
+        val a = if (element.tagName() == "a" && element.hasAttr("href")) {
+            element
+        } else {
+            element.selectFirst("a.show-card[href]")
+                ?: element.selectFirst("a[href*='/episode/'], a[href*='/film/'], a[href*='/series/']")
+                ?: return null
+        }
+
+        val href = makeAbsoluteUrl(a.attr("href")) ?: return null
+        if (href.contains("/m/")) return null
+
+        val title = a.selectFirst("p.title")?.text()?.trim()?.takeIf { it.isNotBlank() }
+            ?: a.selectFirst(".card-content .title")?.text()?.trim()?.takeIf { it.isNotBlank() }
+            ?: a.selectFirst("img")?.attr("alt")?.trim()?.takeIf { it.isNotBlank() }
             ?: return null
 
-        val href = linkElement.attr("href").ifBlank { linkElement.absUrl("href") }
-        if (href.isBlank()) return null
-
-        val mainTitle = element.selectFirst("p.title")?.text()?.trim()
-            ?: linkElement.selectFirst("p.title")?.text()?.trim()
-        val description = element.selectFirst("p.description")?.text()?.trim()
-        val title = if (!mainTitle.isNullOrBlank()) {
-            if (!description.isNullOrBlank()) "$mainTitle - $description" else mainTitle
-        } else {
-            element.selectFirst("div.card-content")?.text()?.trim()
-                ?: element.selectFirst("h3")?.text()?.trim()
-                ?: element.selectFirst("img")?.attr("alt")?.trim()
+        var poster = a.selectFirst("img[src]")?.attr("src")
+        if (poster.isNullOrBlank() || !isSafeImage(poster)) {
+            poster = a.selectFirst("img[data-src]")?.attr("data-src")
         }
-        if (title.isNullOrBlank()) return null
+        val posterUrl = makeAbsoluteUrl(poster)
+            ?.takeIf { isSafeImage(it) }
+            ?: TRANSPARENT_PNG
 
-        val posterStyle = linkElement.attr("style")
-        var posterUrl = Regex("""(?:--background-image-url|background-image)\s*:\s*url\(['"]?(.*?)['"]?\)""")
-            .find(posterStyle)?.groupValues?.get(1)
-        if (posterUrl.isNullOrBlank()) posterUrl = Regex("""url\(['"]?(.*?)['"]?\)""")
-            .find(posterStyle)?.groupValues?.get(1)
-        if (posterUrl.isNullOrBlank()) posterUrl = element.selectFirst("img")?.attr("data-src")
-        if (posterUrl.isNullOrBlank()) posterUrl = element.selectFirst("img")?.attr("src")
-        posterUrl = makeAbsoluteUrl(posterUrl) ?: TRANSPARENT_PNG_DATA_URI
+        val decoded = runCatching { java.net.URLDecoder.decode(href, "UTF-8") }.getOrDefault(href)
+        val isAnime = decoded.contains("انمي") || decoded.contains("anime", true)
+        val type = when {
+            isAnime -> TvType.Anime
+            href.contains("/episode/") || href.contains("/series/") || href.contains("/season/") ->
+                TvType.TvSeries
+            else -> TvType.Movie
+        }
 
-        val isTvSeries = href.contains("/episode/") || href.contains("/series/") ||
-                href.contains("/season/") || element.selectFirst(".ep_num, .ep, .الحلقة") != null
-
-        return if (isTvSeries) {
-            newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
+        return if (type == TvType.Movie) {
+            newMovieSearchResponse(title, href, type) {
                 this.posterUrl = posterUrl
-                this.posterHeaders = posterheader()
+                this.posterHeaders = posterHeaders()
             }
         } else {
-            newMovieSearchResponse(title, href, TvType.Movie) {
+            newTvSeriesSearchResponse(title, href, type) {
                 this.posterUrl = posterUrl
-                this.posterHeaders = posterheader()
+                this.posterHeaders = posterHeaders()
             }
         }
     }
 
-    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        if (request.data.isNotEmpty()) {
-            val categoryUrl = "${request.data}?page=$page"
-            val document = httpGet(categoryUrl, referer = mainUrl)
-            val items = document.select("div.shows-container.row div[class*=col-]").mapNotNull {
-                parseCard(it)
-            }
-            val hasNext =
-                document.selectFirst("ul.pagination li.page-item.active + li.page-item a") != null
-            return newHomePageResponse(request.name, items, hasNext)
-        }
-
-        if (page > 1) return newHomePageResponse(emptyList())
-
-        val homePageList = mutableListOf<HomePageList>()
-        val document = httpGet(mainUrl, referer = mainUrl)
-
-        try {
-            val sliderItems =
-                document.select("div.glide li.glide__slide:not(.glide__slide--clone)").mapNotNull {
-                    parseCard(it)
-                }
-            if (sliderItems.isNotEmpty()) {
-                homePageList.add(HomePageList("أبرز العروض", sliderItems))
-            }
-        } catch (e: Exception) {
-            Log.e(logTag, "Error parsing slider items: ${e.message}")
-        }
-
-        val categories = listOf(
-            "مسلسلات أجنبي" to "${mainUrl}category/مسلسلات-اجنبي",
-            "مسلسلات عربي" to "${mainUrl}category/مسلسلات-عربي",
-            "مسلسلات تركية" to "${mainUrl}category/مسلسلات-تركية",
-            "مسلسلات انمي" to "${mainUrl}category/مسلسلات-انمي",
-        )
-
-        for ((title, url) in categories) {
-            try {
-                val doc = httpGet(url, referer = mainUrl)
-                val items =
-                    doc.select("div.shows-container.row div[class*=col-]").take(40).mapNotNull {
-                        parseCard(it)
-                    }
-                if (items.isNotEmpty()) homePageList.add(HomePageList(title, items, true))
-            } catch (e: Exception) {
-                Log.e(logTag, "Failed to load category '$title': ${e.message}")
-            }
-        }
-
-        return newHomePageResponse(homePageList)
-    }
+    private fun parseCards(doc: Document, selector: String): List<SearchResponse> =
+        doc.select(selector)
+            .mapNotNull { parseCard(it) }
+            .distinctBy { it.url }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val encoded = URLEncoder.encode(query, "UTF-8")
-        val searchUrl = "${mainUrl}search?s=$encoded"
-
+        val encoded = URLEncoder.encode(query, "UTF-8").replace("+", "%20")
         return try {
-            val document = httpGet(searchUrl, referer = mainUrl)
-            val resultItems = document.select("div.shows-container.row div[class*=col-]")
-
-            if (resultItems.isEmpty()) return emptyList()
-
-            resultItems.mapIndexedNotNull { index, element ->
-                try {
-                    parseCard(element)
-                } catch (e: Exception) {
-                    null
-                }
-            }
+            val doc = getDocument("${mainUrl}search?s=$encoded", referer = mainUrl, allowCache = false)
+            parseCards(doc, "div.shows-container.row a.show-card[href]")
         } catch (e: Exception) {
+            Log.w(logTag, "search failed: ${e.message}")
             emptyList()
         }
     }
 
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        val url = if (request.data.isBlank()) withPage(mainUrl, page) else withPage(request.data, page)
+        val doc = getDocument(url, referer = mainUrl, allowCache = false)
+        val lists = ArrayList<HomePageList>()
+
+        if (request.data.isBlank() && page <= 1) {
+            val featured = parseCards(
+                doc,
+                "div.glide li.glide__slide:not(.glide__slide--clone) a.show-card[href]"
+            )
+            if (featured.isNotEmpty()) {
+                lists.add(HomePageList("أبرز العروض", featured, false))
+            }
+        }
+
+        val latest = parseCards(doc, "div.shows-container.row a.show-card[href]")
+        if (latest.isNotEmpty()) {
+            lists.add(HomePageList(request.name, latest, hasNextPage(doc)))
+        }
+
+        if (lists.isEmpty()) throw ErrorLoadingException("لا توجد نتائج في هذه الصفحة.")
+        return newHomePageResponse(lists)
+    }
+
+    private fun hasNextPage(doc: Document): Boolean =
+        doc.selectFirst("ul.pagination li.page-item.active + li.page-item a") != null ||
+                doc.selectFirst("ul.pagination a[rel=next]") != null
+
+    // =====================================================================
+    // Load (series / season / episode / film)
+    // =====================================================================
+
+    private data class Info(
+        val title: String,
+        val poster: String?,
+        val plot: String?,
+        val tags: List<String>,
+        val isAnime: Boolean
+    )
+
+    private fun parseInfo(doc: Document, url: String): Info {
+        val title = doc.select("h1.title")
+            .firstOrNull { !it.hasAttr("data-href") && it.text().trim() != "title" }
+            ?.text()?.trim()?.takeIf { it.isNotBlank() }
+            ?: doc.selectFirst("meta[property=og:title]")?.attr("content")
+                ?.trim()?.takeIf { it.isNotBlank() && it != "title" }
+            ?: doc.title().substringBefore(" - ").trim().takeIf { it.isNotBlank() }
+            ?: "غير متوفر"
+
+        val style = doc.selectFirst("div.poster-side div.poster")?.attr("style").orEmpty()
+        val fromStyle = Regex("""url\(\s*['"]?(.*?)['"]?\s*\)""")
+            .find(style)?.groupValues?.get(1)
+        val poster = sequenceOf(
+            fromStyle,
+            doc.selectFirst("meta[property=og:image]")?.attr("content"),
+            doc.selectFirst("div.poster-side img[src]")?.attr("src")
+        ).mapNotNull { makeAbsoluteUrl(it) }.firstOrNull { isSafeImage(it) }
+
+        val plot = doc.select("div.description")
+            .firstOrNull { !it.hasAttr("data-href") && it.text().trim().length > 5 }
+            ?.text()?.trim()
+            ?: doc.selectFirst("meta[name=description]")?.attr("content")?.trim()
+
+        val tags = doc.select(".info-side a[href*='/genre/'], .info-side a[href*='/category/']")
+            .map { it.text().trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .take(12)
+
+        val decoded = runCatching { java.net.URLDecoder.decode(url, "UTF-8") }.getOrDefault(url)
+        val isAnime = decoded.contains("انمي") || decoded.contains("anime", true) ||
+                title.contains("انمي")
+
+        return Info(title, poster, plot, tags, isAnime)
+    }
 
     override suspend fun load(url: String): LoadResponse {
-        val document = httpGet(url)
+        loadCache[url]?.let { (at, value) ->
+            if (isFresh(at, 30 * 60_000L)) return value
+        }
 
-        val title = document.selectFirst("span.title")?.text()?.trim()
-            ?: document.selectFirst("h1")?.text()?.trim()
-            ?: document.selectFirst("meta[property='og:title']")?.attr("content")?.trim()
-            ?: document.title().trim().ifBlank { null }
-            ?: "غير متوفر"
-        val posterStyle = document.selectFirst("div.poster-side div.poster")?.attr("style").orEmpty()
-        val poster = Regex("""(?:--background-image-url|background-image)\s*:\s*url\(['"]?(.*?)['"]?\)""")
-            .find(posterStyle)?.groupValues?.get(1)
-            ?: document.selectFirst("div.poster-side img")?.attr("src")
-            ?: document.selectFirst("meta[property='og:image']")?.attr("content")
-        val plot = document.selectFirst("span.description")?.text()?.trim()
-            ?: document.selectFirst("div.description")?.text()?.trim()
-        val tags = document.select("span.qualities a, div.qualities a, a.btn.btn-gray")
-            .map { it.text().trim() }.filter { it.isNotBlank() }.distinct()
-        val isAnime = url.contains("انمي") || title.contains("انمي") ||
-                url.contains("anime", ignoreCase = true)
+        val doc = getDocument(url)
+        val info = parseInfo(doc, url)
 
-        val base = url.trimEnd('/')
-        val episodes: List<Episode> = when {
-            url.contains("/series/") -> collectSeriesEpisodes(base, poster)
+        val episodes = when {
+            url.contains("/series/") || url.contains("/season/") ->
+                collectSeriesEpisodes(url, info.poster)
 
-            url.contains("/season/") -> {
-                val seasonNumber = parseSeasonNumber(title, url)
-                collectSeasonEpisodes(base, seasonNumber, poster)
-            }
-
-            url.contains("/episode/") -> {
-                val seriesLink = document.selectFirst("a[href*='/series/']")
-                    ?.let { absHref(it) }
-                val fromSeries = if (!seriesLink.isNullOrBlank()) {
-                    collectSeriesEpisodes(seriesLink.trimEnd('/'), poster)
-                } else emptyList()
-
-                if (fromSeries.isNotEmpty()) fromSeries
-                else {
-                    val episodeNumber = Regex("""(?:الحلقة|حلقة|Episode)\s*([0-9٠-٩]+)""")
-                        .find(title)?.groupValues?.get(1)?.let { toIntLoose(it) }
-                    listOf(newEpisode(url) {
-                        this.name = title
-                        this.episode = episodeNumber
-                        this.posterUrl = poster
-                    })
-                }
-            }
+            url.contains("/episode/") ->
+                collectAroundEpisode(url, doc, info.poster)
 
             else -> emptyList()
         }
 
-        val sortedEpisodes = episodes.sortedWith(compareBy({ it.season }, { it.episode }))
+        val sorted = episodes
+            .distinctBy { it.data }
+            .sortedWith(compareBy({ it.season ?: 0 }, { it.episode ?: 0 }))
 
-        return if (sortedEpisodes.isNotEmpty()) {
-            newTvSeriesLoadResponse(title, url, if (isAnime) TvType.Anime else TvType.TvSeries, sortedEpisodes) {
-                this.posterUrl = poster
-                this.posterHeaders = posterheader()
-                this.plot = plot
-                this.tags = tags
+        val response: LoadResponse = if (sorted.isNotEmpty()) {
+            newTvSeriesLoadResponse(
+                info.title,
+                url,
+                if (info.isAnime) TvType.Anime else TvType.TvSeries,
+                sorted
+            ) {
+                this.posterUrl = info.poster
+                this.posterHeaders = posterHeaders()
+                this.plot = info.plot
+                this.tags = info.tags
             }
         } else {
-            newMovieLoadResponse(title, url, if (isAnime) TvType.Anime else TvType.Movie, url) {
-                this.posterUrl = poster
-                this.posterHeaders = posterheader()
-                this.plot = plot
-                this.tags = tags
+            newMovieLoadResponse(
+                info.title,
+                url,
+                if (info.isAnime) TvType.Anime else TvType.Movie,
+                url
+            ) {
+                this.posterUrl = info.poster
+                this.posterHeaders = posterHeaders()
+                this.plot = info.plot
+                this.tags = info.tags
             }
         }
+
+        loadCache[url] = now() to response
+        return response
     }
 
-    /**
-     * يجمع كل حلقات المسلسل عبر صفحة المواسم [seriesUrl]/seasons ثم [seasonUrl]/episodes.
-     */
-    private suspend fun collectSeriesEpisodes(seriesUrl: String, poster: String?): List<Episode> {
-        val seasonsDoc = httpGet(seriesUrl.trimEnd('/') + "/seasons", referer = seriesUrl)
-        val seasonAnchors = seasonsDoc.select("a.show-card[href*='/season/']").ifEmpty {
-            seasonsDoc.select("a[href*='/season/']")
-        }
-        val seen = HashSet<String>()
-        val seasonCards = seasonAnchors.filter { a ->
-            val h = absHref(a) ?: return@filter false
-            seen.add(h)
+    private suspend fun collectAroundEpisode(
+        episodeUrl: String,
+        doc: Document,
+        poster: String?
+    ): List<com.lagradost.cloudstream3.Episode> {
+        val seriesUrl = doc.selectFirst("a[href*='/series/']")
+            ?.let { makeAbsoluteUrl(it.attr("href")) }
+
+        if (seriesUrl != null) {
+            val all = collectSeriesEpisodes(seriesUrl, poster)
+            if (all.isNotEmpty()) return all
         }
 
-        val perSeason = seasonCards.amap { a ->
-            val seasonUrl = absHref(a) ?: return@amap emptyList()
-            val seasonTitle = a.selectFirst("p.title")?.text()?.trim() ?: a.text().trim()
-            val seasonNumber = parseSeasonNumber(seasonTitle, seasonUrl)
-            collectSeasonEpisodes(seasonUrl, seasonNumber, poster)
-        }
-        return perSeason.flatten()
+        val seasonNumber = currentSeasonNumber(doc)
+        return parseEpisodeAnchors(doc, seasonNumber, poster)
     }
 
-    /**
-     * يجمع حلقات موسم واحد عبر صفحة [seasonUrl]/episodes.
-     */
-    private suspend fun collectSeasonEpisodes(
-        seasonUrl: String,
+    private suspend fun collectSeriesEpisodes(
+        startUrl: String,
+        poster: String?
+    ): List<com.lagradost.cloudstream3.Episode> {
+        val startDoc = getDocument(startUrl)
+
+        val seriesUrl = if (startUrl.contains("/series/")) {
+            startUrl
+        } else {
+            startDoc.selectFirst("a[href*='/series/']")
+                ?.let { makeAbsoluteUrl(it.attr("href")) }
+                ?: return parseEpisodeAnchors(startDoc, currentSeasonNumber(startDoc), poster)
+        }
+
+        seriesCache[seriesUrl]?.let { (at, eps) ->
+            if (isFresh(at, 30 * 60_000L)) return eps
+        }
+
+        val seriesDoc = if (startUrl == seriesUrl) startDoc else getDocument(seriesUrl)
+        val seasonAnchors = seriesDoc.select("a.epss[href*='/season/']")
+            .distinctBy { it.attr("href") }
+
+        val result = ArrayList<com.lagradost.cloudstream3.Episode>()
+
+        if (seasonAnchors.isEmpty()) {
+            result.addAll(parseEpisodeAnchors(seriesDoc, 1, poster))
+        } else {
+            for (anchor in seasonAnchors) {
+                val seasonUrl = makeAbsoluteUrl(anchor.attr("href")) ?: continue
+                val seasonNumber = anchorNumber(anchor)
+                    ?: parseSeasonNumber(anchor.text(), seasonUrl)
+                val seasonDoc = getDocument(seasonUrl, referer = seriesUrl)
+
+                var episodes = parseEpisodeAnchors(seasonDoc, seasonNumber, poster)
+                if (episodes.isEmpty()) {
+                    val allEpisodesUrl = seasonUrl.trimEnd('/') + "/episodes"
+                    val allDoc = getDocument(allEpisodesUrl, referer = seasonUrl)
+                    episodes = parseEpisodeCards(allDoc, seasonNumber, poster)
+                }
+                result.addAll(episodes)
+            }
+        }
+
+        val sorted = result
+            .distinctBy { it.data }
+            .sortedWith(compareBy({ it.season ?: 0 }, { it.episode ?: 0 }))
+
+        if (sorted.isNotEmpty()) {
+            seriesCache[seriesUrl] = now() to sorted
+        }
+        return sorted
+    }
+
+    private fun currentSeasonNumber(doc: Document): Int? {
+        val active = doc.selectFirst("a.epss.active[href*='/season/']")
+            ?: doc.selectFirst("a.epss.active")
+        return active?.let { anchorNumber(it) }
+    }
+
+    private fun anchorNumber(anchor: Element): Int? =
+        anchor.selectFirst("span.fs-2")?.text()?.trim()?.let { toIntLoose(it) }
+
+    private fun episodeNumber(text: String?): Int? {
+        val value = text.orEmpty()
+        Regex("""(?:الحلقة|حلقة|Episode)\s*([0-9٠-٩]+)""", RegexOption.IGNORE_CASE)
+            .find(value)?.groupValues?.get(1)?.let { return toIntLoose(it) }
+        return Regex("""(?:الحلقة|حلقة)[-_ ]?([0-9٠-٩]+)""")
+            .find(value)?.groupValues?.get(1)?.let { toIntLoose(it) }
+    }
+
+    private fun parseEpisodeAnchors(
+        doc: Document,
         seasonNumber: Int?,
         poster: String?
-    ): List<Episode> {
-        val doc = httpGet(seasonUrl.trimEnd('/') + "/episodes", referer = seasonUrl)
-        val anchors = doc.select("a.show-card[href*='/episode/']").ifEmpty {
-            doc.select("a[href*='/episode/']")
-        }
-        val seen = HashSet<String>()
-        return anchors.mapNotNull { a ->
-            val epUrl = absHref(a) ?: return@mapNotNull null
-            if (!seen.add(epUrl)) return@mapNotNull null
-            val epTitle = a.selectFirst("p.title")?.text()?.trim()
-                ?: a.selectFirst("img")?.attr("alt")?.trim()
-            val name = epTitle?.takeIf { it.isNotBlank() } ?: "حلقة"
-            val episodeNumber = Regex("""(?:الحلقة|حلقة|Episode)\s*([0-9٠-٩]+)""")
-                .find(name)?.groupValues?.get(1)?.let { toIntLoose(it) }
-            newEpisode(epUrl) {
-                this.name = name
-                this.episode = episodeNumber
+    ): List<com.lagradost.cloudstream3.Episode> =
+        doc.select("a.epss[href*='/episode/']").mapNotNull { anchor ->
+            val href = makeAbsoluteUrl(anchor.attr("href")) ?: return@mapNotNull null
+            val number = anchorNumber(anchor)
+                ?: episodeNumber(anchor.text())
+                ?: episodeNumber(href)
+            newEpisode(href) {
+                this.name = if (number != null) "الحلقة $number" else "حلقة"
+                this.episode = number
                 this.season = seasonNumber
                 this.posterUrl = poster
             }
         }
-    }
 
-    private fun absHref(a: Element?): String? {
-        if (a == null) return null
-        val abs = a.absUrl("href")
-        return when {
-            abs.isNotBlank() -> abs
-            else -> makeAbsoluteUrl(a.attr("href"))
+    private fun parseEpisodeCards(
+        doc: Document,
+        seasonNumber: Int?,
+        poster: String?
+    ): List<com.lagradost.cloudstream3.Episode> =
+        doc.select("div.shows-container.row a.show-card[href*='/episode/']").mapNotNull { anchor ->
+            val href = makeAbsoluteUrl(anchor.attr("href")) ?: return@mapNotNull null
+            val name = anchor.selectFirst("p.title")?.text()?.trim()
+                ?.takeIf { it.isNotBlank() }
+                ?: "حلقة"
+            val number = episodeNumber(name) ?: episodeNumber(href)
+            newEpisode(href) {
+                this.name = name
+                this.episode = number
+                this.season = seasonNumber
+                this.posterUrl = poster
+            }
         }
-    }
 
     private fun parseSeasonNumber(title: String?, url: String): Int? {
         val text = "${title.orEmpty()} $url"
@@ -380,17 +549,282 @@ class Shahid4u : MainAPI() {
             .find(text)?.groupValues?.get(1)?.let { return toIntLoose(it) }
         val ordinals = listOf(
             "الاول" to 1, "الأول" to 1, "الثاني" to 2, "الثالث" to 3, "الرابع" to 4,
-            "الخامس" to 5, "السادس" to 6, "السابع" to 7, "الثامن" to 8, "التاسع" to 9,
-            "العاشر" to 10
+            "الخامس" to 5, "السادس" to 6, "السابع" to 7, "الثامن" to 8,
+            "التاسع" to 9, "العاشر" to 10
         )
-        for ((k, v) in ordinals) if (text.contains(k)) return v
+        for ((key, value) in ordinals) if (text.contains(key)) return value
         return null
     }
 
     private fun toIntLoose(value: String): Int? {
-        val normalized = value.map { c -> if (c in '\u0660'..'\u0669') ('0' + (c - '\u0660')) else c }
-            .joinToString("")
+        val normalized = value.map { c ->
+            if (c in '\u0660'..'\u0669') '0' + (c - '\u0660') else c
+        }.joinToString("")
         return normalized.toIntOrNull()
+    }
+
+    // =====================================================================
+    // Links (watch servers + download fallback)
+    // =====================================================================
+
+    private fun toWatchUrl(url: String): String = url.trim()
+        .replace("/download/", "/watch/")
+        .replace("/film/", "/watch/")
+        .replace("/episode/", "/watch/")
+
+    private suspend fun getWatchData(watchUrl: String): WatchData? {
+        watchCache[watchUrl]?.let { (at, value) ->
+            if (isFresh(at, 12 * 60_000L)) return value
+        }
+
+        val res = siteGet(watchUrl, referer = watchUrl)
+        val html = res.text
+
+        val servers = parseServers(html)
+        if (servers.isEmpty()) {
+            Log.w(logTag, "no servers on $watchUrl")
+            return null
+        }
+
+        val key = Regex("""watchResolveKey\s*=\s*["']([^"']+)["']""")
+            .find(html)?.groupValues?.get(1)
+        val csrf = Regex("""csrfToken\s*=\s*["']([^"']+)["']""")
+            .find(html)?.groupValues?.get(1)
+            ?: Regex("""<meta\s+name=["']csrf-token["']\s+content=["']([^"']+)["']""")
+                .find(html)?.groupValues?.get(1)
+        val resolveUrl = Regex("""resolveUrl\s*=\s*["']([^"']+)["']""")
+            .find(html)?.groupValues?.get(1)
+            ?.replace("\\/", "/")
+            ?.let { makeAbsoluteUrl(it) }
+            ?: "${mainUrl}watch/resolve"
+
+        if (key.isNullOrBlank() || csrf.isNullOrBlank()) {
+            Log.w(logTag, "missing resolve key/csrf on $watchUrl")
+            return null
+        }
+
+        val data = WatchData(
+            watchUrl = watchUrl,
+            servers = servers,
+            key = key,
+            csrf = csrf,
+            resolveUrl = resolveUrl,
+            cookies = cookiesFor(watchUrl)
+        )
+        watchCache[watchUrl] = now() to data
+        return data
+    }
+
+    private fun parseServers(html: String): List<ServerEntry> {
+        val cleaned = html
+            .replace("&quot;", "\"")
+            .replace("&#039;", "'")
+            .replace("&amp;", "&")
+
+        val block = Regex("""(?:const|let|var)\s+servers\s*=\s*(\[[\s\S]*?])\s*;""")
+            .find(cleaned)?.groupValues?.get(1)
+
+        val out = LinkedHashMap<String, ServerEntry>()
+
+        if (block != null) {
+            runCatching {
+                val array = JSONArray(block.replace("\\/", "/"))
+                for (i in 0 until array.length()) {
+                    val obj = array.optJSONObject(i) ?: continue
+                    val token = obj.optString("resolve_token")
+                    if (token.isBlank()) continue
+                    val serverName = obj.optString("name").ifBlank { "Server ${i + 1}" }
+                    val rank = obj.optInt("rank", i)
+                    out[token] = ServerEntry(serverName, token, rank)
+                }
+            }.onFailure { Log.w(logTag, "servers JSON: ${it.message}") }
+        }
+
+        if (out.isEmpty()) {
+            Regex("""data-token=["']([^"']+)["']""").findAll(cleaned).forEachIndexed { i, m ->
+                val token = m.groupValues[1]
+                if (token.isNotBlank()) out[token] = ServerEntry("Server ${i + 1}", token, i)
+            }
+        }
+
+        return out.values.sortedBy { it.rank }
+    }
+
+    private suspend fun resolveServer(watch: WatchData, server: ServerEntry): String? {
+        val cacheKey = "${watch.watchUrl}#${server.token}"
+        resolveCache[cacheKey]?.let { (at, url) ->
+            if (isFresh(at, 30 * 60_000L)) return url
+        }
+
+        val body = JSONObject().apply {
+            put("key", watch.key)
+            put("token", server.token)
+            put("human_signal", JSONObject.NULL)
+        }.toString()
+
+        val headers = mapOf(
+            "User-Agent" to ua(),
+            "Accept" to "application/json, text/plain, */*",
+            "Accept-Language" to "ar,en-US;q=0.9,en;q=0.8",
+            "Content-Type" to "application/json",
+            "X-CSRF-TOKEN" to watch.csrf,
+            "X-Requested-With" to "XMLHttpRequest",
+            "X-FP-Event-ID" to "",
+            "Origin" to mainUrl.trimEnd('/'),
+            "Referer" to headerSafe(watch.watchUrl),
+            "Sec-Fetch-Site" to "same-origin",
+            "Sec-Fetch-Mode" to "cors",
+            "Sec-Fetch-Dest" to "empty"
+        )
+
+        val res = try {
+            SiteGate.run {
+                app.post(
+                    watch.resolveUrl,
+                    headers = headers,
+                    cookies = watch.cookies,
+                    referer = headerSafe(watch.watchUrl),
+                    requestBody = body.toRequestBody(jsonMediaType),
+                    interceptor = cfInterceptor,
+                    timeout = 60L
+                )
+            }
+        } catch (e: SiteCooldownException) {
+            return null
+        } catch (e: Exception) {
+            Log.w(logTag, "resolve '${server.name}' transport: ${e.message}")
+            return null
+        }
+
+        rememberCookies(watch.resolveUrl, res)
+
+        val text = runCatching { res.text }.getOrDefault("")
+        if (res.code == 429) {
+            SiteGate.penalize(false)
+            return null
+        }
+        if (res.code == 403 || text.contains("Just a moment", true) ||
+            text.contains("challenge-platform", true)
+        ) {
+            SiteGate.penalize(true)
+            return null
+        }
+        if (res.code >= 400) {
+            Log.w(logTag, "resolve '${server.name}' HTTP ${res.code}")
+            return null
+        }
+
+        val json = runCatching { JSONObject(text) }.getOrNull()
+        if (json == null) {
+            Log.w(logTag, "resolve '${server.name}' non-JSON response")
+            return null
+        }
+        if (!json.optBoolean("ok")) {
+            Log.w(logTag, "resolve '${server.name}' refused: ${json.optString("message")}")
+            return null
+        }
+
+        val raw = json.optString("url").trim()
+        if (raw.isBlank()) return null
+
+        val resolved = followInternalRedirect(makeAbsoluteUrl(raw) ?: return null, watch.watchUrl)
+            ?: return null
+
+        resolveCache[cacheKey] = now() to resolved
+        return resolved
+    }
+
+    /**
+     * بعض السيرفرات تُرجع رابط `/m/<hash>` داخلي (نفس أسلوب أزرار التحميل)؛
+     * نتبعه مرة واحدة كي نصل إلى رابط المضيف الخارجي.
+     */
+    private suspend fun followInternalRedirect(url: String, referer: String): String? {
+        if (!isSameSite(url) || !url.contains("/m/")) return url
+        return try {
+            val res = SiteGate.run {
+                app.get(
+                    url,
+                    headers = browserHeaders(referer),
+                    referer = headerSafe(referer),
+                    cookies = cookiesFor(url),
+                    interceptor = cfInterceptor,
+                    allowRedirects = false,
+                    timeout = 60L
+                )
+            }
+            rememberCookies(url, res)
+            when {
+                res.code == 403 || res.code == 429 -> {
+                    SiteGate.penalize(res.code == 403)
+                    null
+                }
+                res.code in 300..399 -> {
+                    val location = res.headers["Location"] ?: res.headers["location"]
+                    if (!location.isNullOrBlank()) {
+                        makeAbsoluteUrl(location)?.takeIf { !isSameSite(it) }
+                    } else {
+                        null
+                    }
+                }
+                else -> null
+            }
+        } catch (e: Exception) {
+            Log.w(logTag, "internal redirect failed: ${e.message}")
+            null
+        }
+    }
+
+    private fun isDirectVideo(url: String): Boolean {
+        val lower = url.lowercase()
+        return lower.contains(".m3u8") || lower.contains(".mp4") ||
+                lower.contains(".mkv") || lower.contains(".webm") ||
+                lower.contains("/hls/")
+    }
+
+    private fun isEarnVidsHost(url: String): Boolean {
+        val host = hostOf(url).orEmpty()
+        return host.contains("earnvids") || host.contains("fastvid") ||
+                host.contains("fastved") || host.contains("fdewsdc")
+    }
+
+    private suspend fun emitLink(
+        url: String,
+        serverName: String,
+        referer: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        if (isDirectVideo(url)) {
+            callback(
+                newExtractorLink(
+                    source = this.name,
+                    name = "$serverName • مباشر",
+                    url = url
+                ) {
+                    this.referer = referer
+                    this.quality = Qualities.Unknown.value
+                    this.headers = browserHeaders(referer).toMutableMap()
+                    this.type = if (url.contains(".m3u8", true)) {
+                        ExtractorLinkType.M3U8
+                    } else {
+                        ExtractorLinkType.VIDEO
+                    }
+                }
+            )
+            return true
+        }
+
+        return try {
+            if (isEarnVidsHost(url)) {
+                earnVids.getUrl(url, referer, subtitleCallback, callback)
+                true
+            } else {
+                loadExtractor(url, referer, subtitleCallback, callback)
+            }
+        } catch (e: Exception) {
+            Log.w(logTag, "extract '$serverName' failed: ${e.message}")
+            false
+        }
     }
 
     override suspend fun loadLinks(
@@ -400,184 +834,126 @@ class Shahid4u : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val watchUrl = toWatchUrl(data)
-        val browserHeaders = buildBrowserHeaders(watchUrl)
 
-        // تمريرة أولى: جلب السيرفرات ثم حلّها بالتتابع (وليس بالتوازي).
-        // CloudflareKiller يستخدم WebView وذاكرة كوكيز مشتركة غير آمنة للتوازي،
-        // لذا الحل المتوازي يسبب فشل/challenge لمعظم السيرفرات.
-        var anyEmitted = resolveAllServers(watchUrl, browserHeaders, subtitleCallback, callback)
-
-        // تمريرة ثانية بجلسة/توكنات جديدة إذا لم يُستخرج أي رابط.
-        if (!anyEmitted) {
-            Log.w(logTag, "loadLinks -> first pass yielded nothing, retrying with a fresh watch page")
-            anyEmitted = resolveAllServers(watchUrl, browserHeaders, subtitleCallback, callback)
-        }
-
-        return anyEmitted
-    }
-
-    private suspend fun resolveAllServers(
-        watchUrl: String,
-        browserHeaders: Map<String, String>,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ): Boolean {
-        val servers: List<ServerEntry>
-        val cookies: Map<String, String>
-        try {
-            val watchResponse = app.get(
-                watchUrl,
-                headers = browserHeaders,
-                interceptor = cfInterceptor,
-                timeout = 60L
-            )
-            cookies = watchResponse.cookies
-            servers = parseServers(watchResponse.text)
-        } catch (e: Exception) {
-            Log.e(logTag, "loadLinks -> failed to fetch watch page $watchUrl: ${e.message}")
-            return false
-        }
-
-        if (servers.isEmpty()) {
-            Log.e(logTag, "loadLinks -> no servers found on $watchUrl")
-            return false
-        }
-
-        var any = false
-        for (server in servers) {
-            if (resolveServer(server, watchUrl, browserHeaders, cookies, subtitleCallback, callback)) {
-                any = true
-            }
-        }
-        return any
-    }
-
-    private suspend fun resolveServer(
-        server: ServerEntry,
-        watchUrl: String,
-        browserHeaders: Map<String, String>,
-        cookies: Map<String, String>,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ): Boolean {
         return try {
-            val mUrl = makeAbsoluteUrl(server.url) ?: return false
-            val resp = app.get(
-                mUrl,
-                headers = browserHeaders,
-                cookies = cookies,
-                interceptor = cfInterceptor,
-                timeout = 90L
-            )
-            val finalUrl = resp.url
-            if (finalUrl.isBlank() || sameHost(finalUrl, mainUrl)) {
-                Log.w(logTag, "server '${server.name}' did not resolve (final=$finalUrl)")
-                false
-            } else {
-                emitServerLink(server.name, finalUrl, watchUrl, subtitleCallback, callback)
+            val watch = getWatchData(watchUrl) ?: return false
+            val seen = HashSet<String>()
+            var emitted = 0
+
+            for (server in watch.servers) {
+                if (SiteGate.isCoolingDown()) {
+                    Log.w(logTag, "stop resolving: ${SiteGate.describe()}")
+                    break
+                }
+                val resolved = resolveServer(watch, server) ?: continue
+                if (!seen.add(resolved)) continue
+                if (emitLink(resolved, server.name, watchUrl, subtitleCallback, callback)) {
+                    emitted++
+                }
             }
+
+            if (emitted == 0) {
+                emitted += resolveDownloadFallback(data, watchUrl, seen, subtitleCallback, callback)
+            }
+
+            emitted > 0
+        } catch (e: ErrorLoadingException) {
+            Log.w(logTag, "loadLinks: ${e.message}")
+            false
         } catch (e: Exception) {
-            Log.w(logTag, "server '${server.name}' failed: ${e.message}")
+            Log.w(logTag, "loadLinks failed: ${e.message}")
             false
         }
     }
 
-    private fun toWatchUrl(url: String): String = url
-        .replace("/film/", "/watch/")
-        .replace("/episode/", "/watch/")
-        .replace("/series/", "/watch/")
-        .replace("/season/", "/watch/")
-        .replace("/download/", "/watch/")
-
-    private fun sameHost(a: String, b: String): Boolean {
-        val ha = runCatching { URI(a).host }.getOrNull() ?: return false
-        val hb = runCatching { URI(b).host }.getOrNull() ?: return false
-        return ha.equals(hb, ignoreCase = true)
-    }
-
-    private data class ServerEntry(val name: String, val url: String, val rank: Int)
-
     /**
-     * استخراج مصفوفة السيرفرات `let servers = [...]` من صفحة المشاهدة.
-     * كل عنصر: {"name":"earnvids","url":"/m/<hash>","rank":2,...}
+     * خطة احتياطية فقط (حين تفشل سيرفرات المشاهدة): نقرأ صفحة التحميل ونتبع
+     * عدداً محدوداً من أزرارها المرئية. نتجاهل تماماً:
+     *   - `#download-primary-server` (فخ canary يُحذف بـJS).
+     *   - أي رابط من `<template>` أو خصائص `data-*`.
+     * نحدّ العدد بـ6 طلبات لتقليل الضغط على الموقع.
      */
-    private fun parseServers(html: String): List<ServerEntry> {
-        val out = LinkedHashMap<String, ServerEntry>()
-        val cleaned = html
-            .replace("&quot;", "\"")
-            .replace("&#039;", "'")
-            .replace("&amp;", "&")
-
-        val blockRegex = Regex("""(?:let|var|const)\s+servers\s*=\s*(\[[\s\S]*?\])\s*;""")
-        val block = blockRegex.find(cleaned)?.groupValues?.get(1)
-
-        if (block != null) {
-            try {
-                val array = JSONArray(block.replace("\\/", "/"))
-                for (i in 0 until array.length()) {
-                    val obj = array.optJSONObject(i) ?: continue
-                    val url = obj.optString("url").ifBlank { obj.optString("src") }
-                    if (url.isBlank()) continue
-                    val name = obj.optString("name").ifBlank { "Server ${i + 1}" }
-                    val rank = obj.optInt("rank", i)
-                    if (!isCanaryServer(rank, name, url)) out[url] = ServerEntry(name, url, rank)
-                }
-            } catch (e: Exception) {
-                Log.w(logTag, "parseServers -> JSON parse failed: ${e.message}")
-            }
-        }
-
-        if (out.isEmpty()) {
-            Regex("""["']url["']\s*:\s*["']((?:\\.|[^"'\\])+)["']""")
-                .findAll(cleaned)
-                .forEachIndexed { index, m ->
-                    val u = m.groupValues[1].replace("\\/", "/")
-                    if (u.isNotBlank()) out[u] = ServerEntry("Server ${index + 1}", u, index)
-                }
-        }
-
-        return out.values.sortedBy { it.rank }
-    }
-
-    /**
-     * فحص إدخالات سيرفرات الفخ (canary) التي يضيفها الموقع ولا تمثل سيرفراً حقيقياً.
-     */
-    private fun isCanaryServer(rank: Int, name: String?, url: String?): Boolean {
-        if (rank >= 900000) return true
-        val n = (name ?: "").lowercase()
-        if (n.contains("backup") || n.contains("mirror") || n.contains("cdn player")) return true
-        val u = (url ?: "").lowercase()
-        return u.contains("/media/watch/") || u.contains("/media/api/") || u.contains("/media/page/")
-    }
-
-    /**
-     * إرسال رابط السيرفر النهائي: رابط m3u8/mp4 مباشر، أو تمريره إلى loadExtractor
-     * (مثل fastvid.cam عبر ExternalEarnVidsExtractor).
-     */
-    private suspend fun emitServerLink(
-        serverName: String,
-        target: String,
-        referer: String,
+    private suspend fun resolveDownloadFallback(
+        episodeOrFilmUrl: String,
+        watchUrl: String,
+        seen: MutableSet<String>,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
-    ): Boolean {
-        val lower = target.lowercase()
-        val isM3u8 = lower.contains(".m3u8") || lower.contains("/hls/")
-        val isVideo = lower.contains(".mp4") || lower.contains(".mkv") || lower.contains(".webm")
-        if (isM3u8 || isVideo) {
-            callback(
-                newExtractorLink(
-                    source = this.name,
-                    name = serverName.ifBlank { "مباشر" },
-                    url = target,
-                ) {
-                    this.referer = referer
-                    this.quality = -1
-                    type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                }
-            )
-            return true
+    ): Int {
+        val downloadUrl = episodeOrFilmUrl
+            .replace("/watch/", "/download/")
+            .replace("/episode/", "/download/")
+            .replace("/film/", "/download/")
+        if (downloadUrl == episodeOrFilmUrl && !downloadUrl.contains("/download/")) return 0
+
+        val doc = try {
+            getDocument(downloadUrl, referer = watchUrl)
+        } catch (e: Exception) {
+            Log.w(logTag, "download page failed: ${e.message}")
+            return 0
         }
-        return loadExtractor(target, referer, subtitleCallback, callback)
+
+        data class Entry(val name: String, val quality: Int, val href: String)
+
+        val entries = doc.select("div.down-container a.btn-down[href]")
+            .mapNotNull { anchor ->
+                if (anchor.id() == "download-primary-server") return@mapNotNull null
+                val href = makeAbsoluteUrl(anchor.attr("href")) ?: return@mapNotNull null
+                val info = anchor.selectFirst(".info")?.text().orEmpty()
+                val name = anchor.selectFirst(".info span")?.text()?.trim()
+                    ?.takeIf { it.isNotBlank() } ?: "تحميل"
+                val quality = Regex("""\b(1080|720|480|360)\b""")
+                    .find(info)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                Entry(name, quality, href)
+            }
+            .sortedByDescending { it.quality }
+            .distinctBy { it.name.lowercase() }
+            .take(6)
+
+        var emitted = 0
+        for (entry in entries) {
+            if (SiteGate.isCoolingDown()) break
+            val location = try {
+                val res = SiteGate.run {
+                    app.get(
+                        entry.href,
+                        headers = browserHeaders(downloadUrl),
+                        referer = headerSafe(downloadUrl),
+                        cookies = cookiesFor(entry.href),
+                        interceptor = cfInterceptor,
+                        allowRedirects = false,
+                        timeout = 60L
+                    )
+                }
+                rememberCookies(entry.href, res)
+                if (res.code == 403 || res.code == 429) {
+                    SiteGate.penalize(res.code == 403)
+                    null
+                } else {
+                    val loc = res.headers["Location"] ?: res.headers["location"]
+                    loc?.let { makeAbsoluteUrl(it) }?.takeIf { !isSameSite(it) }
+                }
+            } catch (e: Exception) {
+                Log.w(logTag, "download '${entry.name}' redirect failed: ${e.message}")
+                null
+            } ?: continue
+
+            if (!seen.add(location)) continue
+            val label = if (entry.quality > 0) "${entry.name} • ${entry.quality}p" else entry.name
+            if (emitLink(location, label, downloadUrl, subtitleCallback, callback)) emitted++
+        }
+        return emitted
+    }
+
+    companion object {
+        private val TRANSPARENT_PNG =
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg=="
+
+        private fun isSafeImage(url: String): Boolean {
+            if (url.isBlank()) return false
+            if (url.contains("/m/")) return false
+            if (url.startsWith("data:", true)) return false
+            return url.startsWith("http://", true) || url.startsWith("https://", true)
+        }
     }
 }
