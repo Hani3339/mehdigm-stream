@@ -30,7 +30,7 @@ import kotlin.random.Random
 
 class WitAnime : MainAPI() {
     override var mainUrl = "https://witanime.site"
-    override var name = "WitAnime"
+    override var name = "ويت أنمي (WitAnime)"
     override val hasMainPage = true
     override var lang = "ar"
 
