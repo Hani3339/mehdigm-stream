@@ -613,13 +613,27 @@ class Shahid4u : MainAPI() {
         }
 
     private fun parseSeasonNumber(title: String?, url: String): Int? {
-        val text = "${title.orEmpty()} $url"
+        val decodedUrl = decodeUrl(url)
+        val path = when {
+            decodedUrl.contains("/episode/") ->
+                decodedUrl.substringAfter("/episode/").substringBefore("-الحلقة-")
+            decodedUrl.contains("/season/") -> decodedUrl.substringAfter("/season/")
+            else -> decodedUrl
+        }
+        // Never mix the episode title into the season match: titles contain
+        // episode ordinals such as "العشرون" that are not season numbers.
+        val text = (if (path != decodedUrl) path else "${title.orEmpty()} $path")
+            .replace('-', ' ').replace('_', ' ')
         Regex("""(?:الموسم|season)\s*([0-9٠-٩]+)""", RegexOption.IGNORE_CASE)
             .find(text)?.groupValues?.get(1)?.let { return toIntLoose(it) }
         val ordinals = listOf(
+            "الخامس عشر" to 15, "الرابع عشر" to 14, "الثالث عشر" to 13,
+            "الثاني عشر" to 12, "الحادي عشر" to 11,
+            "التاسع عشر" to 19, "الثامن عشر" to 18, "السابع عشر" to 17,
+            "السادس عشر" to 16, "العشرون" to 20,
             "الاول" to 1, "الأول" to 1, "الثاني" to 2, "الثالث" to 3, "الرابع" to 4,
             "الخامس" to 5, "السادس" to 6, "السابع" to 7, "الثامن" to 8,
-            "التاسع" to 9, "العاشر" to 10
+            "التاسع" to 9, "العاشر" to 10, "الحادي" to 11
         )
         for ((key, value) in ordinals) if (text.contains(key)) return value
         return null
