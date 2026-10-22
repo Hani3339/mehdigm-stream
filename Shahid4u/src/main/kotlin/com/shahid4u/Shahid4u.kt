@@ -47,18 +47,18 @@ class Shahid4u : MainAPI() {
 
     override val mainPage = mainPageOf(
         "" to "الرئيسية",
-        "$mainUrl/category/افلام-اجنبي" to "أفلام أجنبي",
-        "$mainUrl/category/افلام-هندي" to "أفلام هندي",
-        "$mainUrl/category/افلام-انمي" to "أفلام أنمي",
-        "$mainUrl/category/مسلسلات-اجنبي" to "مسلسلات أجنبي",
-        "$mainUrl/category/مسلسلات-تركية" to "مسلسلات تركية",
-        "$mainUrl/category/مسلسلات-عربي" to "مسلسلات عربي",
-        "$mainUrl/category/مسلسلات-مدبلجة" to "مسلسلات مدبلجة",
-        "$mainUrl/category/مسلسلات-انمي" to "مسلسلات أنمي",
-        "$mainUrl/category/مسلسلات-هندية" to "مسلسلات هندية",
-        "$mainUrl/category/مسلسلات-رمضان-2026" to "مسلسلات رمضان 2026",
-        "$mainUrl/category/برامج-تلفزيونية" to "برامج تلفزيونية",
-        "$mainUrl/category/عروض-مصارعة" to "عروض مصارعة"
+        "${mainUrl}category/افلام-اجنبي" to "أفلام أجنبي",
+        "${mainUrl}category/افلام-هندي" to "أفلام هندي",
+        "${mainUrl}category/افلام-انمي" to "أفلام أنمي",
+        "${mainUrl}category/مسلسلات-اجنبي" to "مسلسلات أجنبي",
+        "${mainUrl}category/مسلسلات-تركية" to "مسلسلات تركية",
+        "${mainUrl}category/مسلسلات-عربي" to "مسلسلات عربي",
+        "${mainUrl}category/مسلسلات-مدبلجة" to "مسلسلات مدبلجة",
+        "${mainUrl}category/مسلسلات-انمي" to "مسلسلات أنمي",
+        "${mainUrl}category/مسلسلات-هندية" to "مسلسلات هندية",
+        "${mainUrl}category/مسلسلات-رمضان-2026" to "مسلسلات رمضان 2026",
+        "${mainUrl}category/برامج-تلفزيونية" to "برامج تلفزيونية",
+        "${mainUrl}category/عروض-مصارعة" to "عروض مصارعة"
     )
 
     private val cloudflareKiller by lazy { CloudflareKiller() }
@@ -204,7 +204,8 @@ class Shahid4u : MainAPI() {
             throw ErrorLoadingException("الموقع يحظر الطلبات (Cloudflare). أعد المحاولة بعد قليل.")
         }
         if (res.code >= 400) {
-            throw ErrorLoadingException("فشل الطلب (HTTP ${res.code}).")
+            Log.w(logTag, "HTTP ${res.code} for $url")
+            throw ErrorLoadingException("فشل الطلب (HTTP ${res.code}) على $url")
         }
         return res
     }

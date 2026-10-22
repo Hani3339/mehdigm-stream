@@ -1,4 +1,4 @@
-version = 4
+version = 5
 
 cloudstream {
     description = "إعادة بناء كاملة لدومين shaahidd4u.net: استخراج سيرفرات المشاهدة عبر /watch/resolve، كل المواسم والحلقات، حماية من الحظر وتحديد الطلبات"
@@ -13,5 +13,5 @@ cloudstream {
         "Anime"
     )
 
-    iconUrl = "https://shaahidd4u.net/faveicon.ico?v=33"
+    iconUrl = "https://shaahidd4u.net/favicon.ico?v=33"
 }
