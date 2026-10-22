@@ -378,7 +378,7 @@
         "internalName": "AnimeRift",
         "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/AnimeRift.cs3",
         "name": "أنمي رِفت (AnimeRift)",
-        "description": "أنمي رِفت (AnimeRift) — التطبيق الرسمي: مترجم ومدبلج عربي بجميع الجودات ومصادر المشاهدة والتحميل. مع حماية من حد الطلبات لمنع حظر الـ IP."
+        "description": "أنمي رِفت (AnimeRift) — التطبيق الرسمي: مترجم ومدبلج عربي بجميع الجودات ومصادر المشاهدة والتحميل."
     },
     {
         "iconUrl": "https://shooflive.watch/wp-content/uploads/2026/09/favicon.png",
@@ -398,6 +398,6 @@
         "internalName": "ShoofLive",
         "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/ShoofLive.cs3",
         "name": "شوف لايف (ShoofLive)",
-        "description": "شوف لايف — مسلسلات وأفلام وحلقات مترجمة مع كل سيرفرات المشاهدة (AnaFast, Voe, MP4Plus, VidSpeed, CDNPlus) وروابط التحميل."
+        "description": "شوف لايف — مسلسلات وأفلام وحلقات مترجمة مع كل سيرفرات المشاهدة وروابط التحميل."
     }
 ]
