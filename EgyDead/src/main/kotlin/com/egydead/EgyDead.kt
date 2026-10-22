@@ -27,8 +27,10 @@ import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
-import java.net.URLEncoder
 import java.net.URL
+import java.net.URLEncoder
+import com.egydead.EgyDeadPrefsEncoder
+import com.egydead.EgyDeadPrefs
 
 /**
  * EgyDead (إيجي ديد) provider.
@@ -76,6 +78,7 @@ class EgyDead : MainAPI() {
     private fun buildHeaders(referer: String?): MutableMap<String, String> {
         val headers = mutableMapOf("User-Agent" to USER_AGENT, "Referer" to (referer ?: mainUrl), "Accept-Language" to "ar,en-US;q=0.9")
         savedCookies?.let { headers["Cookie"] = it }
+            ?: EgyDeadPrefs.loadCookies()?.let { headers["Cookie"] = it }
         return headers
     }
 
@@ -94,7 +97,7 @@ class EgyDead : MainAPI() {
                     if (activity != null) {
                         val solver = CloudflareSolver.solve(activity, currentUrl, USER_AGENT)
                         if (solver != null) {
-                            if (!solver.cookies.isNullOrEmpty()) savedCookies = solver.cookies
+                            if (!solver.cookies.isNullOrEmpty()) { savedCookies = solver.cookies; EgyDeadPrefs.saveCookies(solver.cookies) }
                             if (solver.finalUrl != currentUrl) {
                                 try {
                                     val nh = URL(solver.finalUrl).host
@@ -127,7 +130,7 @@ class EgyDead : MainAPI() {
                     if (activity != null) {
                         val solver = CloudflareSolver.solve(activity, currentUrl, USER_AGENT)
                         if (solver != null) {
-                            if (!solver.cookies.isNullOrEmpty()) savedCookies = solver.cookies
+                            if (!solver.cookies.isNullOrEmpty()) { savedCookies = solver.cookies; EgyDeadPrefs.saveCookies(solver.cookies) }
                             if (solver.finalUrl != currentUrl) {
                                 try {
                                     val nh = URL(solver.finalUrl).host

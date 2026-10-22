@@ -54,6 +54,10 @@ object CloudflareSolver {
                     this.userAgentString = userAgent
                     useWideViewPort = true
                     loadWithOverviewMode = true
+                    mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                    loadsImagesAutomatically = true
+                    blockNetworkImage = false
+                    cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
                 }
 
                 val cookieManager = CookieManager.getInstance()
@@ -73,6 +77,7 @@ object CloudflareSolver {
                         val finalCookies = cookieManager.getCookie(finalUrl)
                         if (!finalCookies.isNullOrEmpty()) {
                             Log.w(TAG, "🍪 تم صيد الكوكيز بنجاح في الخلفية: $finalCookies")
+                            try { com.egydead.EgyDeadPrefsEncoder.saveCookies(finalCookies) } catch (e: Exception) {}
                         } else {
                             Log.e(TAG, "⚠️ انتهت العملية ولم يتم العثور على أي كوكيز!")
                         }
