@@ -47,8 +47,12 @@ name: 🧬 OpenCode v2 AI Cloud — 4Life Full Persistence
 #  v2-specific notes:
 #    • `opencode serve` is the v2 API + web server (there is no
 #      separate `opencode web` subcommand in v2).
-#    • The server password comes from OPENCODE_SERVER_PASSWORD.
-#      The v2 basic-auth username is fixed to `opencode`.
+#    • The v2 process itself listens only on 127.0.0.1 with a
+#      random internal password (fixed username `opencode`).
+#    • A small nginx reverse proxy exposes the public web login
+#      and enforces the OPENCODE_WEB_USERNAME/PASSWORD secrets,
+#      exactly like the v1 workflow did. The public credentials
+#      are never written to the job summary or logs.
 #    • v2 permissions use an ordered `permissions` ruleset with
 #      actions such as `shell`/`subagent` (not v1 `permission`).
 #    • The live service registration file
@@ -164,12 +168,12 @@ env:
   OPENCODE_DISABLE_AUTOUPDATE: "1"
 
   # ============================================================
-  # OpenCode v2 Web authentication
+  # Public OpenCode web login (basic auth)
   # ------------------------------------------------------------
-  # v2 reads OPENCODE_SERVER_PASSWORD (OPENCODE_PASSWORD is the
-  # legacy fallback). Its HTTP basic-auth username is always
-  # `opencode`, so OPENCODE_WEB_USERNAME is kept only for
-  # documentation/backwards compatibility; it is not sent to v2.
+  # These are the credentials users type in the browser login
+  # prompt. They are enforced by the nginx reverse proxy, while
+  # the v2 process uses its own random internal password. Neither
+  # value is ever printed to the summary or logs.
   # ============================================================
 
   OPENCODE_WEB_USERNAME: ${{ secrets.OPENCODE_WEB_USERNAME }}
@@ -252,6 +256,7 @@ jobs:
             ca-certificates \
             procps \
             openssl \
+            nginx \
             sqlite3 \
             zstd \
             rsync \
@@ -815,20 +820,23 @@ jobs:
         uses: AnimMouse/setup-cloudflared@v2
 
       # ============================================================
-      # 12. Start OpenCode v2 server (foreground)
+      # 12. Start OpenCode v2 server (internal only)
       #
       # v2 ships a single `opencode serve` command (it serves both
-      # the API and the web UI); there is no `opencode web`. The
-      # server password is read from OPENCODE_SERVER_PASSWORD and
-      # basic auth always uses the fixed username `opencode`.
-      # Readiness is verified against the authenticated `/api/info`
-      # endpoint, not the old v1 `/global/health` route.
+      # the API and the web UI); there is no `opencode web`. The v2
+      # process keeps its fixed internal basic-auth username
+      # `opencode` and a random internal password. It listens only
+      # on loopback so the public login is enforced by nginx below.
+      # Readiness is verified against authenticated `/api/info`.
       # ============================================================
 
       - name: 🚀 Start OpenCode v2 server
         timeout-minutes: 5
         run: |
           set -euo pipefail
+
+          : "${OPENCODE_WEB_USERNAME:?OPENCODE_WEB_USERNAME secret is required}"
+          : "${OPENCODE_WEB_PASSWORD:?OPENCODE_WEB_PASSWORD secret is required}"
 
           export PATH="$HOME/.opencode/bin:$PATH"
 
@@ -844,29 +852,21 @@ jobs:
             exit 1
           fi
 
-          # v2 basic auth: username is fixed to `opencode`; only the
-          # password is configurable. Generate a strong session
-          # password when the secret is missing.
-          SERVER_PASSWORD="${OPENCODE_WEB_PASSWORD:-}"
-          GENERATED="false"
+          # Random internal password for the loopback v2 process.
+          # It is never shown in the summary or logs; only nginx uses
+          # it when forwarding authenticated requests.
+          INTERNAL_PASSWORD="$(openssl rand -base64 32 | tr -d '\n=' | tr '+/' '-_')"
 
-          if [ -z "$SERVER_PASSWORD" ]; then
-            SERVER_PASSWORD="$(openssl rand -base64 32 | tr -d '\n=' | tr '+/' '-_')"
-            GENERATED="true"
-            echo "⚠️ OPENCODE_WEB_PASSWORD is not configured — generated a session password."
-          fi
-
-          export OPENCODE_SERVER_PASSWORD="$SERVER_PASSWORD"
+          export OPENCODE_SERVER_PASSWORD="$INTERNAL_PASSWORD"
           export OPENCODE_SERVER_USERNAME="opencode"
 
-          echo "OPENCODE_SERVER_PASSWORD=$SERVER_PASSWORD" >> "$GITHUB_ENV"
-          echo "OPENCODE_WEB_PASSWORD_GENERATED=$GENERATED" >> "$GITHUB_ENV"
+          echo "OPENCODE_SERVER_PASSWORD=$INTERNAL_PASSWORD" >> "$GITHUB_ENV"
 
-          echo "🚀 Starting OpenCode v2: opencode serve --hostname 0.0.0.0 --port 4096"
+          echo "🚀 Starting OpenCode v2 on 127.0.0.1:4096"
 
           setsid bash -c \
             "opencode serve \
-              --hostname 0.0.0.0 \
+              --hostname 127.0.0.1 \
               --port 4096 \
               </dev/null \
               >>'$LOG_FILE' 2>&1" &
@@ -889,7 +889,7 @@ jobs:
                 -s \
                 -o /dev/null \
                 --max-time 2 \
-                -u "opencode:${SERVER_PASSWORD}" \
+                -u "opencode:${INTERNAL_PASSWORD}" \
                 -w '%{http_code}' \
                 http://127.0.0.1:4096/api/info \
                 2>/dev/null || echo '000'
@@ -931,10 +931,168 @@ jobs:
 
           # Store server info for diagnostics/summary (best effort).
           curl -fsS \
-            -u "opencode:${SERVER_PASSWORD}" \
+            -u "opencode:${INTERNAL_PASSWORD}" \
             --max-time 5 \
             http://127.0.0.1:4096/api/info \
             > "$RUNNER_TEMP/opencode-logs/server-info.json" 2>/dev/null || true
+
+      # ============================================================
+      # 13. Public login reverse proxy (same behavior as v1)
+      #
+      # v2 hard-codes the basic-auth username to `opencode`, so a
+      # tiny nginx proxy in front of it enforces the v1-style
+      # OPENCODE_WEB_USERNAME / OPENCODE_WEB_PASSWORD secrets and
+      # rewrites the upstream Authorization header to the internal
+      # v2 credentials. Browser login therefore looks exactly like
+      # the old workflow, and the public credentials never appear in
+      # the summary. WebSocket/SSE traffic is forwarded as-is.
+      # ============================================================
+
+      - name: 🛡️ Start public login proxy
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+
+          : "${OPENCODE_WEB_USERNAME:?OPENCODE_WEB_USERNAME secret is required}"
+          : "${OPENCODE_WEB_PASSWORD:?OPENCODE_WEB_PASSWORD secret is required}"
+          : "${OPENCODE_SERVER_PASSWORD:?internal OpenCode password is missing}"
+
+          PROXY_PORT=8080
+          PROXY_LOG="$RUNNER_TEMP/opencode-logs/proxy.log"
+          HTPASSWD="$RUNNER_TEMP/opencode-proxy.htpasswd"
+          NGINX_CONF="$RUNNER_TEMP/opencode-proxy.conf"
+
+          : > "$PROXY_LOG"
+
+          # Nginx supports the apr1 hash produced by OpenSSL, so no
+          # extra apache2-utils dependency is needed.
+          HASH="$(openssl passwd -apr1 "$OPENCODE_WEB_PASSWORD")"
+          printf '%s:%s\n' "$OPENCODE_WEB_USERNAME" "$HASH" > "$HTPASSWD"
+          chmod 600 "$HTPASSWD"
+
+          INTERNAL_AUTH="$(
+            printf 'opencode:%s' "$OPENCODE_SERVER_PASSWORD" |
+            base64 -w0
+          )"
+
+          cat > "$NGINX_CONF" <<EOF
+          user $(id -un);
+          worker_processes 1;
+          pid $RUNNER_TEMP/opencode-proxy.pid;
+          error_log stderr warn;
+
+          events {
+            worker_connections 1024;
+          }
+
+          http {
+            access_log off;
+
+            map \$http_upgrade \$connection_upgrade {
+              default upgrade;
+              ''      close;
+            }
+
+            server {
+              listen 127.0.0.1:$PROXY_PORT;
+              server_name _;
+
+              auth_basic "OpenCode";
+              auth_basic_user_file $HTPASSWD;
+
+              location / {
+                proxy_pass http://127.0.0.1:4096;
+                proxy_http_version 1.1;
+
+                proxy_set_header Host \$host;
+                proxy_set_header X-Real-IP \$remote_addr;
+                proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto \$scheme;
+                proxy_set_header Upgrade \$http_upgrade;
+                proxy_set_header Connection \$connection_upgrade;
+
+                # Replace the public login with the internal v2 auth.
+                proxy_set_header Authorization "Basic $INTERNAL_AUTH";
+
+                proxy_buffering off;
+                proxy_cache off;
+                proxy_connect_timeout 10s;
+                proxy_read_timeout 86400s;
+                proxy_send_timeout 86400s;
+              }
+            }
+          }
+          EOF
+
+          sudo nginx -t -c "$NGINX_CONF"
+
+          setsid sudo nginx \
+            -c "$NGINX_CONF" \
+            -g 'daemon off;' \
+            </dev/null \
+            >> "$PROXY_LOG" 2>&1 &
+
+          PID=$!
+
+          echo "$PID" > "$RUNNER_TEMP/nginx.pid"
+
+          disown || true
+
+          echo "Proxy PID=$PID"
+
+          UP=0
+          LAST_CODE="000"
+
+          for _ in $(seq 1 30); do
+
+            LAST_CODE="$(
+              curl \
+                -s \
+                -o /dev/null \
+                --max-time 2 \
+                -u "${OPENCODE_WEB_USERNAME}:${OPENCODE_WEB_PASSWORD}" \
+                -w '%{http_code}' \
+                http://127.0.0.1:${PROXY_PORT}/api/info \
+                2>/dev/null || echo '000'
+            )"
+
+            if [ "$LAST_CODE" = "200" ]; then
+              UP=1
+              break
+            fi
+
+            if ! kill -0 "$PID" 2>/dev/null; then
+              echo "❌ nginx proxy exited."
+              cat "$PROXY_LOG" || true
+              exit 1
+            fi
+
+            sleep 1
+
+          done
+
+          if [ "$UP" -ne 1 ]; then
+            echo "❌ Public login proxy did not become ready (last HTTP $LAST_CODE)."
+            cat "$PROXY_LOG" || true
+            exit 1
+          fi
+
+          UNAUTH_CODE="$(
+            curl \
+              -s \
+              -o /dev/null \
+              --max-time 2 \
+              -w '%{http_code}' \
+              http://127.0.0.1:${PROXY_PORT}/api/info \
+              2>/dev/null || echo '000'
+          )"
+
+          if [ "$UNAUTH_CODE" = "401" ]; then
+            echo "✅ Public login proxy is ready; unauthenticated requests receive 401."
+          else
+            echo "❌ Unexpected unauthenticated response: $UNAUTH_CODE"
+            exit 1
+          fi
 
       # ============================================================
       # 13. Cloudflare Tunnel
@@ -957,7 +1115,7 @@ jobs:
           setsid bash -c \
             "cloudflared tunnel \
               --no-autoupdate \
-              --url http://127.0.0.1:4096 \
+              --url http://127.0.0.1:8080 \
               </dev/null \
               >>'$LOG_FILE' 2>&1" &
 
@@ -1008,17 +1166,16 @@ jobs:
 
           echo "PUBLIC_URL=$PUBLIC_URL" >> "$GITHUB_ENV"
 
-          # Best-effort end-to-end check through the tunnel. Basic auth
-          # must survive the Cloudflare hop; do not fail the job here
-          # because quick tunnels can take a few extra seconds to
-          # propagate.
+          # Best-effort end-to-end check through the tunnel. The public
+          # login uses OPENCODE_WEB_USERNAME/PASSWORD enforced by nginx;
+          # the job must never print them.
           TUNNEL_OK=0
           for _ in $(seq 1 15); do
             TUNNEL_CODE="$(
               curl -s \
                 -o /dev/null \
                 --max-time 5 \
-                -u "opencode:${OPENCODE_SERVER_PASSWORD}" \
+                -u "${OPENCODE_WEB_USERNAME}:${OPENCODE_WEB_PASSWORD}" \
                 -w '%{http_code}' \
                 "$PUBLIC_URL/api/info" \
                 2>/dev/null || echo '000'
@@ -1031,16 +1188,15 @@ jobs:
           done
 
           if [ "$TUNNEL_OK" -eq 1 ]; then
-            echo "✅ Public v2 API verified through the Cloudflare tunnel."
+            echo "✅ Public v2 login verified through the Cloudflare tunnel."
           else
-            echo "⚠️ Tunnel is up but the public health check has not returned 200 yet."
+            echo "⚠️ Tunnel is up but the public login has not returned 200 yet."
           fi
 
           echo "=============================================="
           echo "🧬 OpenCode v2 4Life Web is LIVE"
           echo ""
           echo "$PUBLIC_URL"
-          echo "Username: opencode"
           echo "=============================================="
 
       # ============================================================
@@ -1056,12 +1212,8 @@ jobs:
             echo ""
             echo "### [$PUBLIC_URL]($PUBLIC_URL)"
             echo ""
-            echo "- Username: \`opencode\`"
-            if [ "${OPENCODE_WEB_PASSWORD_GENERATED:-false}" = "true" ]; then
-              echo "- Password (generated for this run): \`$OPENCODE_SERVER_PASSWORD\`"
-            else
-              echo "- Password: the \`OPENCODE_WEB_PASSWORD\` repository secret"
-            fi
+            echo "- Login: protected by the \`OPENCODE_WEB_USERNAME\` / \`OPENCODE_WEB_PASSWORD\` repository secrets (same as the v1 workflow)."
+            echo "- Credentials are never printed here for security."
             echo ""
             echo "## 📦 Persistence"
             echo ""
@@ -1877,3 +2029,18 @@ jobs:
         if: always()
         continue-on-error: true
         uses: AnimMouse/setup-cloudflared/shutdown@v2
+
+      - name: 🧹 Shutdown public proxy
+        if: always()
+        continue-on-error: true
+        run: |
+          sudo nginx -s quit 2>/dev/null || true
+          if [ -f "$RUNNER_TEMP/nginx.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/nginx.pid")" 2>/dev/null || true
+            rm -f "$RUNNER_TEMP/nginx.pid"
+          fi
+          if [ -f "$RUNNER_TEMP/opencode-proxy.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/opencode-proxy.pid")" 2>/dev/null || true
+            rm -f "$RUNNER_TEMP/opencode-proxy.pid"
+          fi
+          rm -f "$RUNNER_TEMP/opencode-proxy.conf" "$RUNNER_TEMP/opencode-proxy.htpasswd" 2>/dev/null || true
