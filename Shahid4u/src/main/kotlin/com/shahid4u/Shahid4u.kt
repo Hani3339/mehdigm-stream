@@ -137,6 +137,9 @@ class Shahid4u : MainAPI() {
         }
     }
 
+    private fun decodeUrl(url: String): String =
+        runCatching { java.net.URLDecoder.decode(url, "UTF-8") }.getOrDefault(url)
+
     private fun hostOf(url: String): String? =
         runCatching { URI(url).host?.lowercase() }.getOrNull()
 
@@ -411,9 +414,17 @@ class Shahid4u : MainAPI() {
             }
 
             url.contains("/episode/") -> {
-                val seasonNumber = currentSeasonNumber(doc) ?: parseSeasonNumber(info.title, url)
-                parseEpisodeAnchors(doc, seasonNumber, info.poster).ifEmpty {
-                    collectAroundEpisode(url, doc, info.poster)
+                val seasonAnchors = doc.select("a.epss[href*='/season/']")
+                    .distinctBy { it.attr("href") }
+                val currentSeason = currentSeasonNumber(doc) ?: parseSeasonNumber(info.title, url)
+                if (seasonAnchors.isNotEmpty()) {
+                    val cacheKey = doc.selectFirst("a[href*='/series/']")
+                        ?.let { makeAbsoluteUrl(it.attr("href")) } ?: url
+                    collectSeasons(seasonAnchors, cacheKey, info.poster).ifEmpty {
+                        parseEpisodeAnchors(doc, currentSeason, info.poster)
+                    }
+                } else {
+                    parseEpisodeAnchors(doc, currentSeason, info.poster)
                 }
             }
 
@@ -454,73 +465,92 @@ class Shahid4u : MainAPI() {
         return response
     }
 
-    private suspend fun collectAroundEpisode(
-        episodeUrl: String,
-        doc: Document,
-        poster: String?
-    ): List<com.lagradost.cloudstream3.Episode> {
-        val seriesUrl = doc.selectFirst("a[href*='/series/']")
-            ?.let { makeAbsoluteUrl(it.attr("href")) }
-
-        if (seriesUrl != null) {
-            val all = collectSeriesEpisodes(seriesUrl, poster)
-            if (all.isNotEmpty()) return all
-        }
-
-        val seasonNumber = currentSeasonNumber(doc)
-        return parseEpisodeAnchors(doc, seasonNumber, poster)
-    }
-
     private suspend fun collectSeriesEpisodes(
-        startUrl: String,
+        seriesUrl: String,
         poster: String?
     ): List<com.lagradost.cloudstream3.Episode> {
-        val startDoc = getDocument(startUrl)
-
-        val seriesUrl = if (startUrl.contains("/series/")) {
-            startUrl
-        } else {
-            startDoc.selectFirst("a[href*='/series/']")
-                ?.let { makeAbsoluteUrl(it.attr("href")) }
-                ?: return parseEpisodeAnchors(startDoc, currentSeasonNumber(startDoc), poster)
-        }
-
         seriesCache[seriesUrl]?.let { (at, eps) ->
             if (isFresh(at, 120 * 60_000L)) return eps
         }
 
-        val seriesDoc = if (startUrl == seriesUrl) startDoc else getDocument(seriesUrl)
-        val seasonAnchors = seriesDoc.select("a.epss[href*='/season/']")
+        val seriesDoc = try {
+            getDocument(seriesUrl)
+        } catch (e: SiteCooldownException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(logTag, "series page failed: ${e.message}")
+            return emptyList()
+        }
+
+        val anchors = seriesDoc.select("a.epss[href*='/season/']")
             .distinctBy { it.attr("href") }
+        if (anchors.isEmpty()) {
+            return parseEpisodeAnchors(seriesDoc, 1, poster)
+        }
+        return collectSeasons(anchors, seriesUrl, poster)
+    }
+
+    /**
+     * يجلب كل المواسم بالتوالي (طلب واحد لكل موسم) ويعيد الحلقات موسومة
+     * برقم الموسم. الجلب متسلسل عبر SiteGate؛ والنتيجة تُخزَّن 2 ساعة حتى
+     * لا يتكرر الجلب عند فتح حلقة أخرى من نفس المسلسل.
+     */
+    private suspend fun collectSeasons(
+        anchors: List<Element>,
+        cacheKey: String,
+        poster: String?
+    ): List<com.lagradost.cloudstream3.Episode> {
+        seriesCache[cacheKey]?.let { (at, eps) ->
+            if (isFresh(at, 120 * 60_000L)) return eps
+        }
 
         val result = ArrayList<com.lagradost.cloudstream3.Episode>()
+        var complete = true
 
-        if (seasonAnchors.isEmpty()) {
-            result.addAll(parseEpisodeAnchors(seriesDoc, 1, poster))
-        } else {
-            for (anchor in seasonAnchors) {
-                val seasonUrl = makeAbsoluteUrl(anchor.attr("href")) ?: continue
-                val seasonNumber = anchorNumber(anchor)
-                    ?: parseSeasonNumber(anchor.text(), seasonUrl)
-                val seasonDoc = getDocument(seasonUrl, referer = seriesUrl)
+        for (anchor in anchors) {
+            if (SiteGate.isCoolingDown()) {
+                Log.w(logTag, "stop fetching seasons: ${SiteGate.describe()}")
+                complete = false
+                break
+            }
+            val seasonUrl = makeAbsoluteUrl(anchor.attr("href")) ?: continue
+            val seasonNumber = anchorNumber(anchor)
+                ?: parseSeasonNumber(anchor.text(), seasonUrl)
+            val seasonDoc = try {
+                getDocument(seasonUrl, referer = cacheKey)
+            } catch (e: SiteCooldownException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(logTag, "season failed $seasonUrl: ${e.message}")
+                complete = false
+                continue
+            }
 
-                var episodes = parseEpisodeAnchors(seasonDoc, seasonNumber, poster)
-                if (episodes.isEmpty()) {
-                    val allEpisodesUrl = seasonUrl.trimEnd('/') + "/episodes"
+            var episodes = parseEpisodeAnchors(seasonDoc, seasonNumber, poster)
+            if (episodes.isEmpty()) {
+                val allEpisodesUrl = seasonUrl.trimEnd('/') + "/episodes"
+                try {
                     val allDoc = getDocument(allEpisodesUrl, referer = seasonUrl)
                     episodes = parseEpisodeCards(allDoc, seasonNumber, poster)
+                } catch (e: SiteCooldownException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(logTag, "season episodes failed: ${e.message}")
+                    complete = false
                 }
-                result.addAll(episodes)
             }
+            if (episodes.isEmpty()) complete = false
+            result.addAll(episodes)
         }
 
         val sorted = result
             .distinctBy { it.data }
             .sortedWith(compareBy({ it.season ?: 0 }, { it.episode ?: 0 }))
 
-        if (sorted.isNotEmpty()) {
-            seriesCache[seriesUrl] = now() to sorted
+        if (sorted.isNotEmpty() && complete) {
+            seriesCache[cacheKey] = now() to sorted
         }
+        Log.d(logTag, "seasons=${sorted.mapNotNull { it.season }.distinct().sorted()} episodes=${sorted.size} complete=$complete")
         return sorted
     }
 
@@ -548,13 +578,15 @@ class Shahid4u : MainAPI() {
     ): List<com.lagradost.cloudstream3.Episode> =
         doc.select("a.epss[href*='/episode/']").mapNotNull { anchor ->
             val href = makeAbsoluteUrl(anchor.attr("href")) ?: return@mapNotNull null
+            val decoded = decodeUrl(href)
+            val season = parseSeasonNumber(null, decoded) ?: seasonNumber
             val number = anchorNumber(anchor)
                 ?: episodeNumber(anchor.text())
-                ?: episodeNumber(href)
+                ?: episodeNumber(decoded)
             newEpisode(href) {
                 this.name = if (number != null) "الحلقة $number" else "حلقة"
                 this.episode = number
-                this.season = seasonNumber
+                this.season = season
                 this.posterUrl = poster
             }
         }
@@ -569,11 +601,13 @@ class Shahid4u : MainAPI() {
             val name = anchor.selectFirst("p.title")?.text()?.trim()
                 ?.takeIf { it.isNotBlank() }
                 ?: "حلقة"
-            val number = episodeNumber(name) ?: episodeNumber(href)
+            val decoded = decodeUrl(href)
+            val season = parseSeasonNumber(null, decoded) ?: seasonNumber
+            val number = episodeNumber(name) ?: episodeNumber(decoded)
             newEpisode(href) {
                 this.name = name
                 this.episode = number
-                this.season = seasonNumber
+                this.season = season
                 this.posterUrl = poster
             }
         }

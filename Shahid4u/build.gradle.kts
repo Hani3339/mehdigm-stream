@@ -1,4 +1,4 @@
-version = 6
+version = 7
 
 cloudstream {
     description = "إعادة بناء كاملة لدومين shaahidd4u.net: استخراج سيرفرات المشاهدة عبر /watch/resolve، كل المواسم والحلقات، حماية من الحظر وتحديد الطلبات"

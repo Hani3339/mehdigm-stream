@@ -26,8 +26,8 @@ object SiteGate {
     private const val MIN_INTERVAL_MS = 1_200L
     private const val SLOW_INTERVAL_MS = 4_000L
     private const val MAX_BLOCKING_WAIT_MS = 8_000L
-    private const val BURST_WINDOW_MS = 15_000L
-    private const val BURST_LIMIT = 6
+    private const val BURST_WINDOW_MS = 20_000L
+    private const val BURST_LIMIT = 12
     private const val SUCCESS_BEFORE_RELAX = 10
 
     private val mutex = Mutex()
