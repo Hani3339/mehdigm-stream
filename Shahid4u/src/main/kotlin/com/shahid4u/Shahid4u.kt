@@ -71,6 +71,8 @@ class Shahid4u : MainAPI() {
         ConcurrentHashMap<String, Pair<Long, List<com.lagradost.cloudstream3.Episode>>>()
     private val watchCache = ConcurrentHashMap<String, Pair<Long, WatchData>>()
     private val resolveCache = ConcurrentHashMap<String, Pair<Long, String>>()
+    private val linkCache =
+        ConcurrentHashMap<String, Pair<Long, List<Triple<String, String, String>>>>()
     private val cookieStore =
         ConcurrentHashMap<String, MutableMap<String, String>>()
 
@@ -175,6 +177,7 @@ class Shahid4u : MainAPI() {
         referer: String? = null,
         allowRedirects: Boolean = true
     ): NiceResponse {
+        Log.d(logTag, "GET $url")
         val res = try {
             SiteGate.run {
                 app.get(
@@ -184,12 +187,14 @@ class Shahid4u : MainAPI() {
                     cookies = cookiesFor(url),
                     interceptor = cfInterceptor,
                     allowRedirects = allowRedirects,
-                    timeout = 60L
+                    timeout = 25L
                 )
             }
         } catch (e: SiteCooldownException) {
+            val minutes = (e.remainingMs + 59_999L) / 60_000L
             throw ErrorLoadingException(
-                "الموقع يحظر الطلبات مؤقتاً. أعد المحاولة بعد ${e.remainingMs / 1000} ثانية."
+                "تم إيقاف الطلبات مؤقتاً بسبب حد الموقع (باقٍ ${minutes} دقيقة). " +
+                        "لا تعِد المحاولة الآن كي لا يطول الحظر."
             )
         }
 
@@ -197,11 +202,21 @@ class Shahid4u : MainAPI() {
 
         if (res.code == 429) {
             SiteGate.penalize(false)
-            throw ErrorLoadingException("تم تقييد الطلبات (429). أعد المحاولة بعد قليل.")
+            throw ErrorLoadingException(
+                "الموقع رفض الطلبات (429: تجاوز الحد). تم إيقاف الطلبات مؤقتاً لحماية الـIP."
+            )
         }
         if (isChallenge(res) || res.code == 403) {
-            SiteGate.penalize(true)
-            throw ErrorLoadingException("الموقع يحظر الطلبات (Cloudflare). أعد المحاولة بعد قليل.")
+            val challenge = isChallenge(res)
+            SiteGate.penalize(challenge)
+            throw ErrorLoadingException(
+                if (challenge) {
+                    "حماية Cloudflare رفضت الطلب. أعد المحاولة بعد دقيقتين."
+                } else {
+                    "الموقع رفض الطلب (403). غالباً حظر مؤقت للـIP بسبب حد الطلبات؛ " +
+                            "تم إيقاف الطلبات الآن. استخدم VPN أو انتظر انتهاء الحظر."
+                }
+            )
         }
         if (res.code >= 400) {
             Log.w(logTag, "HTTP ${res.code} for $url")
@@ -217,7 +232,7 @@ class Shahid4u : MainAPI() {
     ): Document {
         if (allowCache) {
             docCache[url]?.let { (at, doc) ->
-                if (isFresh(at, 5 * 60_000L)) return doc
+                if (isFresh(at, 10 * 60_000L)) return doc
             }
         }
         val doc = siteGet(url, referer).document
@@ -282,10 +297,18 @@ class Shahid4u : MainAPI() {
             .distinctBy { it.url }
 
     override suspend fun search(query: String): List<SearchResponse> {
+        if (SiteGate.isCoolingDown()) {
+            val minutes = (SiteGate.cooldownRemaining() + 59_999L) / 60_000L
+            throw ErrorLoadingException(
+                "تم إيقاف الطلبات مؤقتاً بسبب حد الموقع (باقٍ $minutes دقيقة)."
+            )
+        }
         val encoded = URLEncoder.encode(query, "UTF-8").replace("+", "%20")
         return try {
-            val doc = getDocument("${mainUrl}search?s=$encoded", referer = mainUrl, allowCache = false)
+            val doc = getDocument("${mainUrl}search?s=$encoded", referer = mainUrl)
             parseCards(doc, "div.shows-container.row a.show-card[href]")
+        } catch (e: ErrorLoadingException) {
+            throw e
         } catch (e: Exception) {
             Log.w(logTag, "search failed: ${e.message}")
             emptyList()
@@ -293,8 +316,11 @@ class Shahid4u : MainAPI() {
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        if (SiteGate.isCoolingDown()) {
+            throw ErrorLoadingException("تم إيقاف الطلبات مؤقتاً بسبب حد الموقع. أعد المحاولة لاحقاً.")
+        }
         val url = if (request.data.isBlank()) withPage(mainUrl, page) else withPage(request.data, page)
-        val doc = getDocument(url, referer = mainUrl, allowCache = false)
+        val doc = getDocument(url, referer = mainUrl)
         val lists = ArrayList<HomePageList>()
 
         if (request.data.isBlank() && page <= 1) {
@@ -370,18 +396,26 @@ class Shahid4u : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse {
         loadCache[url]?.let { (at, value) ->
-            if (isFresh(at, 30 * 60_000L)) return value
+            if (isFresh(at, 60 * 60_000L)) return value
         }
 
         val doc = getDocument(url)
         val info = parseInfo(doc, url)
 
         val episodes = when {
-            url.contains("/series/") || url.contains("/season/") ->
-                collectSeriesEpisodes(url, info.poster)
+            url.contains("/series/") -> collectSeriesEpisodes(url, info.poster)
 
-            url.contains("/episode/") ->
-                collectAroundEpisode(url, doc, info.poster)
+            url.contains("/season/") -> {
+                val seasonNumber = currentSeasonNumber(doc) ?: parseSeasonNumber(info.title, url)
+                parseEpisodeAnchors(doc, seasonNumber, info.poster)
+            }
+
+            url.contains("/episode/") -> {
+                val seasonNumber = currentSeasonNumber(doc) ?: parseSeasonNumber(info.title, url)
+                parseEpisodeAnchors(doc, seasonNumber, info.poster).ifEmpty {
+                    collectAroundEpisode(url, doc, info.poster)
+                }
+            }
 
             else -> emptyList()
         }
@@ -452,7 +486,7 @@ class Shahid4u : MainAPI() {
         }
 
         seriesCache[seriesUrl]?.let { (at, eps) ->
-            if (isFresh(at, 30 * 60_000L)) return eps
+            if (isFresh(at, 120 * 60_000L)) return eps
         }
 
         val seriesDoc = if (startUrl == seriesUrl) startDoc else getDocument(seriesUrl)
@@ -575,7 +609,7 @@ class Shahid4u : MainAPI() {
 
     private suspend fun getWatchData(watchUrl: String): WatchData? {
         watchCache[watchUrl]?.let { (at, value) ->
-            if (isFresh(at, 12 * 60_000L)) return value
+            if (isFresh(at, 30 * 60_000L)) return value
         }
 
         val res = siteGet(watchUrl, referer = watchUrl)
@@ -654,7 +688,7 @@ class Shahid4u : MainAPI() {
     private suspend fun resolveServer(watch: WatchData, server: ServerEntry): String? {
         val cacheKey = "${watch.watchUrl}#${server.token}"
         resolveCache[cacheKey]?.let { (at, url) ->
-            if (isFresh(at, 30 * 60_000L)) return url
+            if (isFresh(at, 60 * 60_000L)) return url
         }
 
         val body = JSONObject().apply {
@@ -687,7 +721,7 @@ class Shahid4u : MainAPI() {
                     referer = headerSafe(watch.watchUrl),
                     requestBody = body.toRequestBody(jsonMediaType),
                     interceptor = cfInterceptor,
-                    timeout = 60L
+                    timeout = 25L
                 )
             }
         } catch (e: SiteCooldownException) {
@@ -707,7 +741,9 @@ class Shahid4u : MainAPI() {
         if (res.code == 403 || text.contains("Just a moment", true) ||
             text.contains("challenge-platform", true)
         ) {
-            SiteGate.penalize(true)
+            val challenge = text.contains("Just a moment", true) ||
+                    text.contains("challenge-platform", true)
+            SiteGate.penalize(challenge)
             return null
         }
         if (res.code >= 400) {
@@ -750,13 +786,13 @@ class Shahid4u : MainAPI() {
                     cookies = cookiesFor(url),
                     interceptor = cfInterceptor,
                     allowRedirects = false,
-                    timeout = 60L
+                    timeout = 25L
                 )
             }
             rememberCookies(url, res)
             when {
                 res.code == 403 || res.code == 429 -> {
-                    SiteGate.penalize(res.code == 403)
+                    SiteGate.penalize(false)
                     null
                 }
                 res.code in 300..399 -> {
@@ -793,17 +829,24 @@ class Shahid4u : MainAPI() {
         serverName: String,
         referer: String,
         subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
+        callback: (ExtractorLink) -> Unit,
+        quality: Int? = null
     ): Boolean {
+        var produced = false
+        val deliver: (ExtractorLink) -> Unit = {
+            produced = true
+            callback(it)
+        }
+
         if (isDirectVideo(url)) {
-            callback(
+            deliver(
                 newExtractorLink(
                     source = this.name,
                     name = "$serverName • مباشر",
                     url = url
                 ) {
                     this.referer = referer
-                    this.quality = Qualities.Unknown.value
+                    this.quality = quality ?: Qualities.Unknown.value
                     this.headers = browserHeaders(referer).toMutableMap()
                     this.type = if (url.contains(".m3u8", true)) {
                         ExtractorLinkType.M3U8
@@ -817,11 +860,11 @@ class Shahid4u : MainAPI() {
 
         return try {
             if (isEarnVidsHost(url)) {
-                earnVids.getUrl(url, referer, subtitleCallback, callback)
-                true
+                earnVids.getUrl(url, referer, subtitleCallback, deliver)
             } else {
-                loadExtractor(url, referer, subtitleCallback, callback)
+                loadExtractor(url, referer, subtitleCallback, deliver)
             }
+            produced
         } catch (e: Exception) {
             Log.w(logTag, "extract '$serverName' failed: ${e.message}")
             false
@@ -834,114 +877,136 @@ class Shahid4u : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val watchUrl = toWatchUrl(data)
-
-        return try {
-            val watch = getWatchData(watchUrl) ?: return false
-            val seen = HashSet<String>()
-            var emitted = 0
-
-            for (server in watch.servers) {
-                if (SiteGate.isCoolingDown()) {
-                    Log.w(logTag, "stop resolving: ${SiteGate.describe()}")
-                    break
+        linkCache[data]?.let { (at, links) ->
+            if (isFresh(at, 45 * 60_000L)) {
+                var ok = 0
+                for ((label, url, referer) in links) {
+                    if (emitLink(url, label, referer, subtitleCallback, callback)) ok++
                 }
-                val resolved = resolveServer(watch, server) ?: continue
-                if (!seen.add(resolved)) continue
-                if (emitLink(resolved, server.name, watchUrl, subtitleCallback, callback)) {
-                    emitted++
-                }
+                if (ok > 0) return true
             }
+            linkCache.remove(data)
+        }
 
-            if (emitted == 0) {
-                emitted += resolveDownloadFallback(data, watchUrl, seen, subtitleCallback, callback)
+        if (SiteGate.isCoolingDown()) return false
+
+        val emitted = try {
+            emitFromDownloadPage(data, subtitleCallback, callback).ifEmpty {
+                if (SiteGate.isCoolingDown()) emptyList()
+                else emitFromWatchPage(data, subtitleCallback, callback)
             }
-
-            emitted > 0
-        } catch (e: ErrorLoadingException) {
-            Log.w(logTag, "loadLinks: ${e.message}")
-            false
+        } catch (e: SiteCooldownException) {
+            Log.w(logTag, "loadLinks cooldown")
+            emptyList()
         } catch (e: Exception) {
             Log.w(logTag, "loadLinks failed: ${e.message}")
-            false
+            emptyList()
         }
+
+        if (emitted.isNotEmpty()) {
+            linkCache[data] = now() to emitted
+            return true
+        }
+        return false
     }
 
+    private fun toDownloadUrl(url: String): String = url.trim()
+        .replace("/watch/", "/download/")
+        .replace("/episode/", "/download/")
+        .replace("/film/", "/download/")
+
     /**
-     * خطة احتياطية فقط (حين تفشل سيرفرات المشاهدة): نقرأ صفحة التحميل ونتبع
-     * عدداً محدوداً من أزرارها المرئية. نتجاهل تماماً:
-     *   - `#download-primary-server` (فخ canary يُحذف بـJS).
-     *   - أي رابط من `<template>` أو خصائص `data-*`.
-     * نحدّ العدد بـ6 طلبات لتقليل الضغط على الموقع.
+     * المسار الأساسي: صفحة التحميل (طلب GET واحد) ثم متابعة أول زر مرئي ناجح
+     * عبر /m/<hash>. لا POST ولا بصمة إصبع هنا، ولذلك لا يُعتبر بوت.
+     * نتجاهل #download-primary-server وأي رابط من خصائص data أو template (فخ canary).
      */
-    private suspend fun resolveDownloadFallback(
-        episodeOrFilmUrl: String,
-        watchUrl: String,
-        seen: MutableSet<String>,
+    private suspend fun emitFromDownloadPage(
+        data: String,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
-    ): Int {
-        val downloadUrl = episodeOrFilmUrl
-            .replace("/watch/", "/download/")
-            .replace("/episode/", "/download/")
-            .replace("/film/", "/download/")
-        if (downloadUrl == episodeOrFilmUrl && !downloadUrl.contains("/download/")) return 0
+    ): List<Triple<String, String, String>> {
+        val downloadUrl = toDownloadUrl(data)
+        if (downloadUrl == data && !data.contains("/download/")) return emptyList()
 
         val doc = try {
-            getDocument(downloadUrl, referer = watchUrl)
+            getDocument(downloadUrl, referer = data)
+        } catch (e: SiteCooldownException) {
+            throw e
         } catch (e: Exception) {
             Log.w(logTag, "download page failed: ${e.message}")
-            return 0
+            return emptyList()
         }
 
         data class Entry(val name: String, val quality: Int, val href: String)
+
+        val streamingHosts = listOf(
+            "earnvids", "fastvid", "fastved", "fdewsdc", "vinovo", "vidaraa",
+            "doodstream", "voe", "streamtape", "mixdrop", "m1xdrop", "luluvdo", "ok"
+        )
 
         val entries = doc.select("div.down-container a.btn-down[href]")
             .mapNotNull { anchor ->
                 if (anchor.id() == "download-primary-server") return@mapNotNull null
                 val href = makeAbsoluteUrl(anchor.attr("href")) ?: return@mapNotNull null
+                if (!isSameSite(href) || !href.contains("/m/")) return@mapNotNull null
                 val info = anchor.selectFirst(".info")?.text().orEmpty()
                 val name = anchor.selectFirst(".info span")?.text()?.trim()
-                    ?.takeIf { it.isNotBlank() } ?: "تحميل"
+                    .orEmpty().ifBlank { "سيرفر" }
                 val quality = Regex("""\b(1080|720|480|360)\b""")
                     .find(info)?.groupValues?.get(1)?.toIntOrNull() ?: 0
                 Entry(name, quality, href)
             }
-            .sortedByDescending { it.quality }
-            .distinctBy { it.name.lowercase() }
-            .take(6)
+            .filter { !it.name.contains("usersdrive", true) }
+            .sortedWith(
+                compareByDescending<Entry> { it.quality }.thenBy { entry ->
+                    val i = streamingHosts.indexOfFirst { entry.name.contains(it, true) }
+                    if (i < 0) 99 else i
+                }
+            )
 
-        var emitted = 0
+        val emitted = ArrayList<Triple<String, String, String>>()
+        var attempts = 0
         for (entry in entries) {
-            if (SiteGate.isCoolingDown()) break
-            val location = try {
-                val res = SiteGate.run {
-                    app.get(
-                        entry.href,
-                        headers = browserHeaders(downloadUrl),
-                        referer = headerSafe(downloadUrl),
-                        cookies = cookiesFor(entry.href),
-                        interceptor = cfInterceptor,
-                        allowRedirects = false,
-                        timeout = 60L
-                    )
-                }
-                rememberCookies(entry.href, res)
-                if (res.code == 403 || res.code == 429) {
-                    SiteGate.penalize(res.code == 403)
-                    null
-                } else {
-                    val loc = res.headers["Location"] ?: res.headers["location"]
-                    loc?.let { makeAbsoluteUrl(it) }?.takeIf { !isSameSite(it) }
-                }
-            } catch (e: Exception) {
-                Log.w(logTag, "download '${entry.name}' redirect failed: ${e.message}")
-                null
-            } ?: continue
-
-            if (!seen.add(location)) continue
+            if (attempts >= 3 || emitted.isNotEmpty() || SiteGate.isCoolingDown()) break
+            attempts++
+            val location = followInternalRedirect(entry.href, downloadUrl) ?: continue
             val label = if (entry.quality > 0) "${entry.name} • ${entry.quality}p" else entry.name
-            if (emitLink(location, label, downloadUrl, subtitleCallback, callback)) emitted++
+            val quality = entry.quality.takeIf { it > 0 }
+            if (emitLink(location, label, downloadUrl, subtitleCallback, callback, quality)) {
+                emitted.add(Triple(label, location, downloadUrl))
+            }
+        }
+        return emitted
+    }
+
+    /**
+     * احتياطي فقط إن فشلت صفحة التحميل: سيرفرات صفحة المشاهدة، بحد أقصى
+     * سيرفرين وبالتسلسل (طلب GET + POST واحد لكل محاولة). الوقوف عند أول نجاح.
+     */
+    private suspend fun emitFromWatchPage(
+        data: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): List<Triple<String, String, String>> {
+        val watchUrl = toWatchUrl(data)
+        val watch = try {
+            getWatchData(watchUrl)
+        } catch (e: SiteCooldownException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(logTag, "watch page failed: ${e.message}")
+            null
+        } ?: return emptyList()
+
+        val emitted = ArrayList<Triple<String, String, String>>()
+        var attempts = 0
+        for (server in watch.servers) {
+            if (attempts >= 2 || emitted.isNotEmpty() || SiteGate.isCoolingDown()) break
+            attempts++
+            val resolved = resolveServer(watch, server) ?: continue
+            if (emitLink(resolved, server.name, watchUrl, subtitleCallback, callback)) {
+                emitted.add(Triple(server.name, resolved, watchUrl))
+            }
         }
         return emitted
     }
