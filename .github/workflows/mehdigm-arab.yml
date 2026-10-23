@@ -1,0 +1,1998 @@
+name: 🧬 OpenCode AI Cloud — MEHDIGM ARAB (Optimized Tunnel)
+
+# ================================================================
+#  mehdigm-arab.yml
+# ----------------------------------------------------------------
+#  Optimized fork of opencode-mehdigm4life.yml to fix tunnel/SSE
+#  live UI issues (lag/freezing, events not showing in realtime).
+#
+#  Improvements:
+#    • Stronger nginx SSE proxy with zero buffering, chunked encoding
+#    • Client shim rewritten for POST/GET event streaming compatibility
+#    • Faster health checks and longer keepalive
+#    • Uses Cloudflare quick tunnel to 127.0.0.1:8080 with tuned timeouts
+#    • Persists same state under opencode-mehdigm4life-state (compatible)
+# ================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: "مدة تشغيل OpenCode بالدقائق"
+        required: true
+        default: "340"
+        type: string
+
+      auto_commit:
+        description: "Commit + push تلقائي لتعديلات المشروع"
+        required: true
+        default: true
+        type: boolean
+
+      commit_interval_seconds:
+        description: "الفاصل بين عمليات فحص Git"
+        required: true
+        default: "60"
+        type: string
+
+      backup_interval_minutes:
+        description: "حفظ كامل حالة OpenCode كل كم دقيقة"
+        required: true
+        default: "5"
+        type: string
+
+      extra_backup_paths:
+        description: "مسارات نظام إضافية تُحفظ كاملة (مفصولة بمسافة)"
+        required: false
+        default: "/opt /tmp"
+        type: string
+
+      extra_exclude_paths:
+        description: "مجلدات نظام يجب استثناؤها من النسخ الاحتياطي"
+        required: false
+        default: "/opt/hostedtoolcache /opt/runner-cache /opt/actionarchivecache /opt/az /opt/microsoft /opt/google /opt/pipx /opt/pipx_bin /opt/containerd /opt/primer /opt/hca /opt/post-generation"
+        type: string
+
+      extra_system_dirs:
+        description: "مسارات نظام تُلتقط بنظام الدلتا (مفصولة بمسافة؛ اتركها فارغة للافتراضي)"
+        required: false
+        default: ""
+        type: string
+
+      include_credentials:
+        description: "تضمين ملفات الأسرار/التوكنات داخل النسخة الاحتياطية (غير آمن)"
+        required: true
+        default: false
+        type: boolean
+
+      restore_system_packages:
+        description: "إعادة تثبيت حزم النظام الناقصة (apt/pip/npm) بعد الاستعادة"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+# يمنع تشغيل جلستين لنفس المستودع في الوقت نفسه.
+concurrency:
+  group: opencode-mehdigm4life-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  # ============================================================
+  # 4Life persistence (same state tag for compatibility)
+  # ============================================================
+
+  PERSIST_RELEASE_TAG: opencode-mehdigm4life-state
+
+  PERSIST_INCLUDE_CREDENTIALS: ${{ github.event.inputs.include_credentials }}
+
+  PERSIST_EXTRA_PATHS: ${{ github.event.inputs.extra_backup_paths }}
+
+  PERSIST_EXTRA_EXCLUDES: ${{ github.event.inputs.extra_exclude_paths }}
+
+  PERSIST_SYSTEM_DIRS: ${{ github.event.inputs.extra_system_dirs }}
+
+  # ============================================================
+  # Full permissions ("Allow Always") — no manual approvals
+  # ------------------------------------------------------------
+  # OPENCODE_PERMISSION is parsed as JSON and deep-merged into config.permission.
+  # OPENCODE_CONFIG_CONTENT is injected as a final local-scope config merge,
+  # so it wins over project/global files. Together they grant the agent every
+  # permission by default (bash, edit, read, webfetch, external_directory, ...)
+  # so nothing ever needs an "Allow once / Allow always" click.
+  # ============================================================
+
+  OPENCODE_PERMISSION: '{"*":"allow","read":"allow","edit":"allow","glob":"allow","grep":"allow","list":"allow","bash":"allow","task":"allow","skill":"allow","lsp":"allow","question":"allow","webfetch":"allow","websearch":"allow","external_directory":"allow","doom_loop":"allow"}'
+
+  OPENCODE_CONFIG_CONTENT: '{"permission":{"*":"allow","read":"allow","edit":"allow","glob":"allow","grep":"allow","list":"allow","bash":"allow","task":"allow","skill":"allow","lsp":"allow","question":"allow","webfetch":"allow","websearch":"allow","external_directory":"allow","doom_loop":"allow"}}'
+
+  # ============================================================
+  # OpenCode Web authentication
+  # ============================================================
+
+  OPENCODE_WEB_USERNAME: ${{ secrets.OPENCODE_WEB_USERNAME }}
+  OPENCODE_WEB_PASSWORD: ${{ secrets.OPENCODE_WEB_PASSWORD }}
+
+  # ============================================================
+  # AI providers
+  # ============================================================
+
+  OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+
+  ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+  GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
+  GOOGLE_GENERATIVE_AI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
+  OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+
+  GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+
+  DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+
+  MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+
+  XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+
+  COHERE_API_KEY: ${{ secrets.COHERE_API_KEY }}
+
+  TOGETHER_API_KEY: ${{ secrets.TOGETHER_API_KEY }}
+
+  PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
+
+jobs:
+  opencode-web-4life:
+
+    name: 🧬 OpenCode Web + MEHDIGM ARAB (Optimized)
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 358
+
+    steps:
+
+      # ============================================================
+      # 1. Checkout repository
+      # ============================================================
+
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ============================================================
+      # 2. Node.js
+      # ============================================================
+
+      - name: ⚙️ Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # ============================================================
+      # 3. System dependencies
+      # ============================================================
+
+      - name: 🛠️ Install dependencies
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update -qq
+
+          sudo apt-get install -y -qq \
+            curl \
+            jq \
+            git \
+            ca-certificates \
+            procps \
+            openssl \
+            nginx \
+            sqlite3 \
+            zstd \
+            rsync \
+            tar \
+            gzip \
+            xz-utils
+
+      # ============================================================
+      # 4. Create OpenCode directories
+      # ============================================================
+
+      - name: 📁 Prepare OpenCode directories
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$HOME/.config/opencode"
+          mkdir -p "$HOME/.local/share/opencode"
+          mkdir -p "$HOME/.opencode-persistence/manifests"
+
+      # ============================================================
+      # 5. Install OpenCode (fresh binary every run)
+      #
+      # The persistent backup intentionally does NOT include
+      # ~/.opencode (the installer + native binary); it is restored
+      # from the upstream installer so we never run a stale or
+      # partially-restored executable. Everything else is restored.
+      # ============================================================
+
+      - name: 🤖 Install OpenCode
+        run: |
+          set -euo pipefail
+
+          curl -fsSL https://opencode.ai/install | bash
+
+          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+
+          export PATH="$HOME/.opencode/bin:$PATH"
+
+          echo "=========================================="
+          echo "OpenCode version"
+          echo "=========================================="
+
+          opencode --version
+
+      # ============================================================
+      # 6. Discover OpenCode paths (tolerant across versions)
+      # ============================================================
+
+      - name: 🔎 Discover OpenCode paths
+        run: |
+          set -uo pipefail
+
+          export PATH="$HOME/.opencode/bin:$PATH"
+
+          CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+          DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/opencode"
+          DB_PATH="$DATA_DIR/opencode.db"
+
+          echo "===== OpenCode paths ====="
+
+          if opencode debug paths > "$RUNNER_TEMP/oc-paths.txt" 2>&1; then
+
+            cat "$RUNNER_TEMP/oc-paths.txt"
+
+            CLI_DATA="$(sed -n 's/^data[[:space:]]\+//p' "$RUNNER_TEMP/oc-paths.txt" | head -n1)"
+
+            if [ -n "${CLI_DATA:-}" ]; then
+              DATA_DIR="$CLI_DATA"
+              DB_PATH="$DATA_DIR/opencode.db"
+            fi
+
+          else
+
+            echo "ℹ️ 'opencode debug paths' is not available in this OpenCode version."
+            echo "ℹ️ Falling back to standard XDG paths."
+
+          fi
+
+          echo ""
+          echo "===== Resolved paths ====="
+          echo "Config: $CONFIG_DIR"
+          echo "Data:   $DATA_DIR"
+          echo "DB:     $DB_PATH"
+
+          echo "OPENCODE_CONFIG_DIR=$CONFIG_DIR" >> "$GITHUB_ENV"
+          echo "OPENCODE_DATA_DIR=$DATA_DIR"     >> "$GITHUB_ENV"
+          echo "OPENCODE_DB_PATH=$DB_PATH"       >> "$GITHUB_ENV"
+
+          # --------------------------------------------------------
+          # System-dir delta baseline (captured on the FRESH runner,
+          # BEFORE any restore). At backup time we archive only the
+          # files that are NEW compared to this baseline, so tools
+          # installed by the agent into system paths (raw binaries in
+          # /usr/local/bin, /usr/bin, /usr/share, ...) are preserved
+          # WITHOUT re-archiving the huge, already-present base image.
+          # --------------------------------------------------------
+
+          SYS_CAPTURE_DIRS="${PERSIST_SYSTEM_DIRS:-/usr/local /usr/bin /usr/sbin /usr/share /root /etc/profile.d /etc/environment}"
+          SYS_BASELINE_DIR="$RUNNER_TEMP/oc4life-sys-baseline"
+          SYS_DELTA_LIST="$RUNNER_TEMP/oc4life-system-delta.list"
+
+          rm -rf "$SYS_BASELINE_DIR"
+          mkdir -p "$SYS_BASELINE_DIR"
+          : > "$SYS_DELTA_LIST"
+
+          for d in $SYS_CAPTURE_DIRS; do
+            [ -e "$d" ] || continue
+            key="$(printf '%s' "$d" | sed 's#^/##; s#/#_#g')"
+            rel="${d#/}"
+            ( cd / && find "$rel" -printf '%p\t%s\t%T@\n' 2>/dev/null | LC_ALL=C sort ) \
+              > "$SYS_BASELINE_DIR/$key.list" 2>/dev/null || true
+          done
+
+          echo "SYS_CAPTURE_DIRS=$SYS_CAPTURE_DIRS" >> "$GITHUB_ENV"
+          echo "SYS_BASELINE_DIR=$SYS_BASELINE_DIR" >> "$GITHUB_ENV"
+          echo "SYS_DELTA_LIST=$SYS_DELTA_LIST"     >> "$GITHUB_ENV"
+
+          echo "🧭 System delta capture dirs: $SYS_CAPTURE_DIRS"
+
+      # ============================================================
+      # 7. Restore full persistent state
+      #
+      # The archive was written with `tar -C /` and members relative
+      # to `/` (home/..., opt/..., tmp/..., ...), so it is extracted
+      # back to `/` with sudo. A `--transform` keeps the home path
+      # correct even if the runner user/home ever changes.
+      # ============================================================
+
+      - name: ♻️ Restore OpenCode 4Life state
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STATE_KEY: ${{ secrets.OPENCODE_STATE_KEY }}
+        run: |
+          set -uo pipefail
+
+          if [ -z "${STATE_KEY:-}" ]; then
+            echo "⚠️ OPENCODE_STATE_KEY is not configured — skipping state restore."
+            exit 0
+          fi
+
+          RELEASE_TAG="${PERSIST_RELEASE_TAG:-opencode-mehdigm4life-state}"
+
+          echo "🔎 Looking for previous 4Life state..."
+
+          RELEASE_JSON="$(
+            gh api \
+              "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" \
+              2>/dev/null || true
+          )"
+
+          if [ -z "$RELEASE_JSON" ]; then
+            echo "ℹ️ No previous 4Life state found — starting fresh."
+            exit 0
+          fi
+
+          BODY="$(echo "$RELEASE_JSON" | jq -r '.body // ""')"
+
+          GENERATION="$(
+            echo "$BODY" |
+            sed -n 's/^CURRENT_GENERATION=//p' |
+            head -n1
+          )"
+
+          EXPECTED_SHA="$(
+            echo "$BODY" |
+            sed -n 's/^SHA256=//p' |
+            head -n1
+          )"
+
+          if [ -z "$GENERATION" ]; then
+            echo "ℹ️ Release exists but has no valid generation — starting fresh."
+            exit 0
+          fi
+
+          echo "📦 Restoring generation: $GENERATION"
+
+          mkdir -p "$RUNNER_TEMP/state-parts"
+
+          rm -f "$RUNNER_TEMP/state-parts"/* 2>/dev/null || true
+
+          echo "$RELEASE_JSON" |
+          jq -r --arg prefix "state-${GENERATION}-" '
+            .assets[]
+            | select(.name | startswith($prefix))
+            | .name
+          ' |
+          sort |
+          while read -r ASSET; do
+
+            [ -z "$ASSET" ] && continue
+
+            echo "⬇️ Downloading: $ASSET"
+
+            gh release download "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --pattern "$ASSET" \
+              --dir "$RUNNER_TEMP/state-parts" \
+              --clobber || echo "⚠️ Failed to download $ASSET"
+
+          done
+
+          PARTS="$(
+            find "$RUNNER_TEMP/state-parts" \
+              -type f \
+              -name "state-${GENERATION}-*.part" |
+            sort
+          )"
+
+          if [ -z "$PARTS" ]; then
+            echo "⚠️ No state parts found for generation $GENERATION — starting fresh."
+            exit 0
+          fi
+
+          echo "🔗 Reassembling encrypted state..."
+
+          # shellcheck disable=SC2086
+          cat $PARTS > "$RUNNER_TEMP/oc4life-restore.enc"
+
+          echo "🔐 Decrypting..."
+
+          if ! openssl enc \
+            -d \
+            -aes-256-cbc \
+            -pbkdf2 \
+            -iter 200000 \
+            -pass env:STATE_KEY \
+            -in "$RUNNER_TEMP/oc4life-restore.enc" \
+            -out "$RUNNER_TEMP/oc4life-restore.tar.zst"; then
+
+            echo "⚠️ Decryption failed (wrong OPENCODE_STATE_KEY?) — starting fresh."
+            exit 0
+
+          fi
+
+          if [ -n "$EXPECTED_SHA" ]; then
+
+            ACTUAL_SHA="$(
+              sha256sum "$RUNNER_TEMP/oc4life-restore.tar.zst" |
+              awk '{print $1}'
+            )"
+
+            if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+              echo "⚠️ Checksum mismatch — starting fresh."
+              echo "   expected: $EXPECTED_SHA"
+              echo "   actual:   $ACTUAL_SHA"
+              exit 0
+            fi
+
+            echo "✅ Archive checksum verified."
+
+          fi
+
+          SUDO=""
+          sudo -n true 2>/dev/null && SUDO="sudo"
+
+          echo "📦 Extracting full state to / ..."
+
+          # --------------------------------------------------------
+          # Decompress FIRST, then extract.
+          #
+          # The 4Life archive captures the runner's own zstd binary
+          # (/usr/local/bin/zstd) through the system-dir delta. If tar
+          # decompresses on the fly (`tar --zstd`), it spawns zstd and
+          # then tries to overwrite that very executable while it is
+          # still running, which fails with:
+          #
+          #   tar: usr/local/bin/zstd: Cannot open: Text file busy
+          #   tar: Exiting with failure status due to previous errors
+          #
+          # (ETXTBSY) and aborts the whole restore with exit code 2.
+          # Decompressing first lets zstd exit before tar writes
+          # anything, so the busy file is gone by extraction time.
+          # --------------------------------------------------------
+
+          PLAIN_TAR="$RUNNER_TEMP/oc4life-restore.tar"
+
+          rm -f "$PLAIN_TAR"
+
+          if ! zstd -q -d -f \
+            "$RUNNER_TEMP/oc4life-restore.tar.zst" \
+            -o "$PLAIN_TAR"; then
+
+            echo "⚠️ Decompression failed — starting fresh."
+            exit 0
+
+          fi
+
+          # Extraction must never abort the whole job with a fatal
+          # exit code if an odd file cannot be written; the session can
+          # still run with the (partially) restored state.
+          if ! $SUDO tar \
+            -xpf "$PLAIN_TAR" \
+            -C / \
+            --overwrite \
+            --transform="s|^home/[^/]*|home/$(id -un)|"; then
+
+            echo "⚠️ tar reported errors while extracting — continuing with the files it managed to restore."
+
+          fi
+
+          # Replace the live DB with the consistent snapshot that was
+          # stored inside the archive.
+
+          DB_PATH="${OPENCODE_DB_PATH:-$HOME/.local/share/opencode/opencode.db}"
+          DB_SNAP="${DB_PATH}.snapshot"
+
+          if [ -f "$DB_SNAP" ]; then
+
+            rm -f \
+              "$DB_PATH" \
+              "$DB_PATH-wal" \
+              "$DB_PATH-shm" \
+              2>/dev/null || true
+
+            mv -f "$DB_SNAP" "$DB_PATH"
+
+            echo "✅ Consistent OpenCode database restored."
+
+          fi
+
+          rm -f \
+            "$RUNNER_TEMP/oc4life-restore.enc" \
+            "$RUNNER_TEMP/oc4life-restore.tar.zst" \
+            "$RUNNER_TEMP/oc4life-restore.tar" \
+            2>/dev/null || true
+
+          echo "✅ OpenCode 4Life state restored."
+
+      # ============================================================
+      # 8. Restore extra system tools (diff only)
+      #
+      # We compare the saved manifests against the fresh runner and
+      # install ONLY what is missing, so base image packages are not
+      # reinstalled on every run.
+      # ============================================================
+
+      - name: 📦 Restore extra tools & packages
+        if: ${{ github.event.inputs.restore_system_packages == 'true' }}
+        run: |
+          set -uo pipefail
+
+          MAN="$HOME/.opencode-persistence/manifests"
+
+          if [ ! -d "$MAN" ]; then
+            echo "ℹ️ No saved package manifests — nothing to restore."
+            exit 0
+          fi
+
+          SUDO=""
+          sudo -n true 2>/dev/null && SUDO="sudo"
+
+          # --------------------------------------------------------
+          # apt packages (diff only)
+          # --------------------------------------------------------
+
+          echo "🔧 apt packages (missing only)..."
+
+          if [ -f "$MAN/dpkg-selections.txt" ]; then
+
+            cur="$(dpkg --get-selections 2>/dev/null | awk '$2=="install"{print $1}' | sort -u)"
+            sav="$(awk '$2=="install"{print $1}' "$MAN/dpkg-selections.txt" | sort -u)"
+            extra="$(comm -23 <(printf '%s\n' "$sav") <(printf '%s\n' "$cur") || true)"
+
+            if [ -n "$extra" ]; then
+              # shellcheck disable=SC2086
+              $SUDO apt-get install -y -qq $extra 2>&1 | tail -n 20 || true
+            else
+              echo "  ✓ no extra apt packages."
+            fi
+
+          fi
+
+          # --------------------------------------------------------
+          # pip user packages (diff only)
+          # --------------------------------------------------------
+
+          echo "🐍 pip user packages (missing only)..."
+
+          if [ -f "$MAN/pip-user.txt" ] && command -v python3 >/dev/null 2>&1; then
+
+            cur="$(python3 -m pip list --user --format=freeze 2>/dev/null | cut -d= -f1 | tr 'A-Z' 'a-z' | sort -u)"
+            sav="$(cut -d= -f1 "$MAN/pip-user.txt" | tr 'A-Z' 'a-z' | sort -u)"
+            extra="$(comm -23 <(printf '%s\n' "$sav") <(printf '%s\n' "$cur") || true)"
+
+            if [ -n "$extra" ]; then
+              # shellcheck disable=SC2086
+              python3 -m pip install --user -q $extra 2>&1 | tail -n 10 || true
+            else
+              echo "  ✓ no extra pip packages."
+            fi
+
+          fi
+
+          # --------------------------------------------------------
+          # npm global packages (diff only)
+          # --------------------------------------------------------
+
+          echo "📦 npm global packages (missing only)..."
+
+          if [ -f "$MAN/npm-global.txt" ] && command -v npm >/dev/null 2>&1; then
+
+            cur="$(npm ls -g --depth=0 --parseable 2>/dev/null | sed 's#.*/##' | grep -v '^$' | sort -u)"
+            sav="$(sort -u "$MAN/npm-global.txt")"
+            extra="$(comm -23 <(printf '%s\n' "$sav") <(printf '%s\n' "$cur") || true)"
+
+            if [ -n "$extra" ]; then
+              mapfile -t _pkgs <<< "$extra"
+              npm install -g "${_pkgs[@]}" 2>&1 | tail -n 10 || true
+            else
+              echo "  ✓ no extra npm packages."
+            fi
+
+          fi
+
+          echo "✅ Tool restoration finished."
+
+      # ============================================================
+      # 9. Verify restored state
+      # ============================================================
+
+      - name: 🧠 Verify OpenCode state
+        run: |
+          set +e
+
+          export PATH="$HOME/.opencode/bin:$PATH"
+
+          DB_PATH="${OPENCODE_DB_PATH:-$HOME/.local/share/opencode/opencode.db}"
+
+          echo "Database:"
+          echo "$DB_PATH"
+
+          if [ -f "$DB_PATH" ]; then
+            echo "✅ Database found."
+            ls -lh "$DB_PATH"
+          else
+            echo "ℹ️ No previous database."
+          fi
+
+          echo ""
+          echo "===== Restored sessions ====="
+
+          opencode session list \
+            --max-count 20 \
+            --format json 2>/dev/null || true
+
+          echo ""
+          echo "===== Restored tool-output files ====="
+
+          ls -1 "$HOME/.local/share/opencode/tool-output" 2>/dev/null | wc -l || true
+
+      # ============================================================
+      # 10. Prepare project OpenCode configuration
+      # ============================================================
+
+      - name: 📝 Prepare OpenCode configuration
+        run: |
+          set -euo pipefail
+
+          if [ ! -f "opencode.json" ] &&
+             [ ! -f "opencode.jsonc" ] &&
+             [ ! -f ".opencode/opencode.json" ] &&
+             [ ! -f ".opencode/opencode.jsonc" ]; then
+
+            cat > opencode.json <<'JSON'
+          {
+            "$schema": "https://opencode.ai/config.json",
+            "theme": "opencode",
+            "autoshare": false,
+            "autoupdate": false,
+            "permission": {
+              "*": "allow",
+              "read": "allow",
+              "edit": "allow",
+              "glob": "allow",
+              "grep": "allow",
+              "list": "allow",
+              "bash": "allow",
+              "task": "allow",
+              "skill": "allow",
+              "lsp": "allow",
+              "question": "allow",
+              "webfetch": "allow",
+              "websearch": "allow",
+              "external_directory": "allow",
+              "doom_loop": "allow"
+            }
+          }
+          JSON
+
+            echo "Created default opencode.json."
+
+          else
+
+            echo "Using existing OpenCode configuration."
+
+          fi
+
+      # ============================================================
+      # 11. Cloudflare
+      # ============================================================
+
+      - name: ☁️ Install cloudflared
+        uses: AnimMouse/setup-cloudflared@v2
+
+      # ============================================================
+      # 12. Start OpenCode Web
+      # ============================================================
+
+      - name: 🚀 Start OpenCode Web
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+
+          export PATH="$HOME/.opencode/bin:$PATH"
+
+          mkdir -p "$RUNNER_TEMP/opencode-logs"
+
+          LOG_FILE="$RUNNER_TEMP/opencode-logs/server.log"
+
+          : > "$LOG_FILE"
+
+          export OPENCODE_SERVER_USERNAME="${OPENCODE_WEB_USERNAME:-opencode}"
+
+          export OPENCODE_SERVER_PASSWORD="${OPENCODE_WEB_PASSWORD:-}"
+
+          if [ -z "$OPENCODE_SERVER_PASSWORD" ]; then
+            echo "⚠️ OPENCODE_WEB_PASSWORD is not configured."
+          fi
+
+          SERVE_CMD=""
+
+          if opencode web --help >/dev/null 2>&1; then
+            SERVE_CMD="opencode web"
+          elif opencode serve --help >/dev/null 2>&1; then
+            SERVE_CMD="opencode serve"
+          else
+            echo "❌ Neither 'opencode web' nor 'opencode serve' is available."
+            opencode --help || true
+            exit 1
+          fi
+
+          echo "🚀 Starting OpenCode with: $SERVE_CMD"
+
+          setsid bash -c \
+            "$SERVE_CMD \
+              --hostname 0.0.0.0 \
+              --port 4096 \
+              </dev/null \
+              >>'$LOG_FILE' 2>&1" &
+
+          PID=$!
+
+          echo "$PID" > "$RUNNER_TEMP/opencode.pid"
+
+          disown || true
+
+          echo "OpenCode PID=$PID"
+
+          UP=0
+
+          for i in $(seq 1 120); do
+
+            HTTP_CODE="$(
+              curl \
+                -s \
+                -o /dev/null \
+                --max-time 2 \
+                -w '%{http_code}' \
+                http://127.0.0.1:4096/global/health \
+                2>/dev/null || echo '000'
+            )"
+
+            if [ "$HTTP_CODE" = "000" ]; then
+
+              HTTP_CODE="$(
+                curl \
+                  -s \
+                  -o /dev/null \
+                  --max-time 2 \
+                  -w '%{http_code}' \
+                  http://127.0.0.1:4096/ \
+                  2>/dev/null || echo '000'
+              )"
+
+            fi
+
+            if [ "$HTTP_CODE" != "000" ]; then
+
+              UP=1
+
+              echo "✅ OpenCode is ready (HTTP $HTTP_CODE)."
+
+              break
+
+            fi
+
+            if ! kill -0 "$PID" 2>/dev/null; then
+
+              echo "❌ OpenCode exited."
+
+              cat "$LOG_FILE" || true
+
+              exit 1
+
+            fi
+
+            sleep 1
+
+          done
+
+          if [ "$UP" -ne 1 ]; then
+
+            echo "❌ OpenCode did not become ready."
+
+            tail -n 200 "$LOG_FILE" || true
+
+            exit 1
+
+          fi
+
+      # ============================================================
+      # 12b. Live UI reverse proxy (SSE fix)
+      #
+      # Cloudflare Quick Tunnels buffer SSE sent over GET, which makes
+      # the live UI freeze/delay. This nginx proxy injects a tiny
+      # same-origin shim into the app shell that subscribes to
+      # /api/event with POST, then rewrites that request back to GET
+      # for the OpenCode server. The proxy also disables buffering and
+      # passes the existing OpenCode basic auth through untouched.
+      # ============================================================
+
+      - name: 🛡️ Start live UI proxy
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+
+          PROXY_PORT=8080
+          PROXY_LOG="$RUNNER_TEMP/opencode-logs/proxy.log"
+          NGINX_CONF="$RUNNER_TEMP/opencode-proxy.conf"
+
+          : > "$PROXY_LOG"
+
+          export RUNNER_TRACKING_ID=""
+
+          # Enhanced same-origin shim for better SSE/live updates through Cloudflare
+          RETRY_JS="$RUNNER_TEMP/opencode-client-retry.js"
+
+          cat > "$RETRY_JS" <<'JAVASCRIPT'
+          (() => {
+            if (window.__ocRetryInstalled) return;
+            window.__ocRetryInstalled = true;
+
+            const retryPaths = new Set(["/api/agent", "/api/model", "/api/provider", "/api/session", "/api/config"]);
+            const originalFetch = window.fetch.bind(window);
+            const originalEventSource = window.EventSource;
+            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const isEvent = (input) => {
+              try {
+                const url = new URL(typeof input === "string" ? input : (input && input.url) ? input.url : "", location.href);
+                return url.pathname === "/api/event";
+              } catch {
+                return false;
+              }
+            };
+            const retryable = (input) => {
+              try {
+                const url = new URL(typeof input === "string" ? input : (input && input.url) ? input.url : "", location.href);
+                return retryPaths.has(url.pathname);
+              } catch {
+                return false;
+              }
+            };
+
+            // Force POST for event endpoint to work better through Quick Tunnels
+            window.fetch = async (input, init) => {
+              try {
+                if (isEvent(input)) {
+                  init = Object.assign({}, init || {}, { method: "POST", headers: Object.assign({}, (init && init.headers) || {}, {"Cache-Control": "no-cache"}) });
+                }
+              } catch(e){}
+              const method = String(
+                (init && init.method) || (input instanceof Request ? input.method : "GET"),
+              ).toUpperCase();
+              if (method !== "GET" || !retryable(input)) return originalFetch(input, init);
+
+              const cloneInput = () => (input instanceof Request ? input.clone() : input);
+              let response = await originalFetch(cloneInput(), init);
+
+              for (let attempt = 0; attempt < 36; attempt++) {
+                if (!response || !response.ok) return response;
+
+                let body;
+                try {
+                  body = await response.clone().json();
+                } catch {
+                  return response;
+                }
+
+                if (Array.isArray(body && body.data) && body.data.length > 0) return response;
+                if (init && init.signal && init.signal.aborted) return response;
+
+                await sleep(200);
+                response = await originalFetch(cloneInput(), init);
+              }
+
+              return response;
+            };
+
+            // Also try to make EventSource more resilient
+            if (originalEventSource) {
+              window.EventSource = function(url, config) {
+                try {
+                  const u = new URL(url, location.href);
+                  if (u.pathname === '/api/event') {
+                    // Try fetch-based SSE simulation isn't possible here, but ensure config
+                  }
+                } catch(e){}
+                return new originalEventSource(url, config);
+              };
+              window.EventSource.prototype = originalEventSource.prototype;
+            }
+          })();
+          JAVASCRIPT
+          chmod 644 "$RETRY_JS"
+
+          # Shared proxy headers. Authorization is deliberately not
+          # overridden, so the existing OpenCode login keeps working.
+          PROXY_HEADERS="$RUNNER_TEMP/opencode-proxy-headers.conf"
+
+          cat > "$PROXY_HEADERS" <<'PROXYHEADERS'
+          proxy_http_version 1.1;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection $connection_upgrade;
+          proxy_set_header Accept-Encoding "";
+          proxy_read_timeout 86400s;
+          proxy_send_timeout 86400s;
+          PROXYHEADERS
+          chmod 600 "$PROXY_HEADERS"
+
+          # nginx only gets sub_filter when the module is compiled in.
+          # Ubuntu's nginx package includes it; keep a graceful fallback.
+          SUB_FILTER=""
+          if nginx -V 2>&1 | grep -q -- '--with-http_sub_module'; then
+            SUB_FILTER="                sub_filter_once on;
+                sub_filter_types text/html;
+                sub_filter '</head>' '<script src=\"/__opencode_retry.js\"></script></head>';"
+          else
+            echo "⚠️ nginx lacks http_sub_module; client live UI shim is disabled."
+          fi
+
+          cat > "$NGINX_CONF" <<EOF
+          user $(id -un);
+          worker_processes auto;
+          pid $RUNNER_TEMP/opencode-proxy.pid;
+          error_log stderr warn;
+
+          events {
+            worker_connections 4096;
+            use epoll;
+            multi_accept on;
+          }
+
+          http {
+            access_log off;
+            tcp_nodelay on;
+            tcp_nopush on;
+            keepalive_timeout 65;
+            keepalive_requests 1000;
+
+            map \$http_upgrade \$connection_upgrade {
+              default upgrade;
+              ''      close;
+            }
+
+            server {
+              listen 127.0.0.1:$PROXY_PORT;
+              server_name _;
+
+              # Served as a separate same-origin file so strict CSPs
+              # (script-src 'self') keep working without weakening.
+              location = /__opencode_retry.js {
+                alias $RETRY_JS;
+                default_type application/javascript;
+                add_header Cache-Control "no-store, no-cache, must-revalidate" always;
+              }
+
+              # Cloudflare Quick Tunnels buffer SSE over GET. The client
+              # shim subscribes with POST, which the tunnel streams; nginx
+              # rewrites the request back to GET for the OpenCode server.
+              location = /api/event {
+                proxy_pass http://127.0.0.1:4096;
+                proxy_method GET;
+                include $PROXY_HEADERS;
+                proxy_buffering off;
+                proxy_request_buffering off;
+                proxy_cache off;
+                chunked_transfer_encoding on;
+                add_header X-Accel-Buffering "no" always;
+                proxy_set_header Connection "";
+              }
+
+              location / {
+                proxy_pass http://127.0.0.1:4096;
+                include $PROXY_HEADERS;
+
+                $SUB_FILTER
+
+                proxy_buffering off;
+                proxy_request_buffering off;
+                proxy_cache off;
+                chunked_transfer_encoding on;
+                proxy_hide_header Cache-Control;
+                add_header Cache-Control "no-store, no-cache, must-revalidate" always;
+                add_header X-Accel-Buffering "no" always;
+                proxy_connect_timeout 30s;
+                proxy_next_upstream error timeout http_502 http_503 http_504;
+              }
+            }
+          }
+          EOF
+
+          sudo nginx -t -c "$NGINX_CONF"
+
+          setsid sudo nginx \
+            -c "$NGINX_CONF" \
+            -g 'daemon off;' \
+            </dev/null \
+            >> "$PROXY_LOG" 2>&1 &
+
+          PID=$!
+
+          echo "$PID" > "$RUNNER_TEMP/nginx.pid"
+
+          disown || true
+
+          echo "Proxy PID=$PID"
+
+          UP=0
+
+          for _ in $(seq 1 30); do
+
+            CODE="$(
+              curl \
+                -s \
+                -o /dev/null \
+                --max-time 2 \
+                -w '%{http_code}' \
+                "http://127.0.0.1:${PROXY_PORT}/global/health" \
+                2>/dev/null || echo '000'
+            )"
+
+            if [ "$CODE" != "000" ] && [ "$CODE" != "502" ]; then
+              UP=1
+              break
+            fi
+
+            if ! kill -0 "$PID" 2>/dev/null; then
+              echo "❌ live UI proxy exited."
+              cat "$PROXY_LOG" || true
+              exit 1
+            fi
+
+            sleep 1
+
+          done
+
+          if [ "$UP" -ne 1 ]; then
+            echo "❌ Live UI proxy did not become ready."
+            cat "$PROXY_LOG" || true
+            exit 1
+          fi
+
+          echo "✅ Live UI proxy is ready (127.0.0.1:${PROXY_PORT} -> 127.0.0.1:4096)."
+
+      # ============================================================
+      # 13. Cloudflare Tunnel
+      # ============================================================
+
+      - name: 🌐 Start Cloudflare Tunnel
+        id: tunnel
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUNNER_TEMP/cloudflared-logs"
+
+          LOG_FILE="$RUNNER_TEMP/cloudflared-logs/tunnel.log"
+
+          : > "$LOG_FILE"
+
+          echo "🌐 Starting Cloudflare Tunnel..."
+
+          setsid bash -c \
+            "cloudflared tunnel \
+              --no-autoupdate \
+              --url http://127.0.0.1:8080 \
+              --protocol http2 \
+              --ha-connections 4 \
+              </dev/null \
+              >>'$LOG_FILE' 2>&1" &
+
+          PID=$!
+
+          echo "$PID" > "$RUNNER_TEMP/cloudflared.pid"
+
+          disown || true
+
+          PUBLIC_URL=""
+
+          for i in $(seq 1 90); do
+
+            PUBLIC_URL="$(
+              grep -Eo \
+              'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' \
+              "$LOG_FILE" |
+              head -n1 || true
+            )"
+
+            if [ -n "$PUBLIC_URL" ]; then
+              break
+            fi
+
+            if ! kill -0 "$PID" 2>/dev/null; then
+
+              echo "❌ Cloudflare exited."
+
+              cat "$LOG_FILE" || true
+
+              exit 1
+
+            fi
+
+            sleep 1
+
+          done
+
+          if [ -z "$PUBLIC_URL" ]; then
+
+            echo "❌ Could not obtain Cloudflare URL."
+
+            cat "$LOG_FILE" || true
+
+            exit 1
+
+          fi
+
+          echo "PUBLIC_URL=$PUBLIC_URL" >> "$GITHUB_ENV"
+
+          echo "=============================================="
+          echo "🧬 OpenCode Web is LIVE (MEHDIGM ARAB Optimized)"
+          echo ""
+          echo "$PUBLIC_URL"
+          echo "=============================================="
+
+      # ============================================================
+      # 14. GitHub Summary
+      # ============================================================
+
+      - name: 📌 Publish OpenCode URL
+        run: |
+          {
+            echo "# 🧬 OpenCode AI — MEHDIGM ARAB (Optimized Tunnel)"
+            echo ""
+            echo "## 🌐 Web Interface"
+            echo ""
+            echo "### [$PUBLIC_URL]($PUBLIC_URL)"
+            echo ""
+            echo "## 📦 Persistence"
+            echo ""
+            echo "- Release: \`$PERSIST_RELEASE_TAG\`"
+            echo "- Full \$HOME + extra roots (\`$PERSIST_EXTRA_PATHS\`)"
+            echo "- Consistent SQLite snapshot of all sessions/messages"
+            echo "- Tools, jars, downloads, caches and tmp are preserved"
+            echo ""
+            echo "## 📁 Repository"
+            echo ""
+            echo "\`$GITHUB_REPOSITORY\`"
+            echo ""
+            echo "## 🌿 Branch"
+            echo ""
+            echo "\`$GITHUB_REF_NAME\`"
+            echo ""
+            echo "## ⏱️ Duration"
+            echo ""
+            echo "${{ github.event.inputs.duration_minutes }} minutes"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ============================================================
+      # 15. Auto commit / push
+      # ============================================================
+
+      - name: 🔁 Start Git auto-commit
+        if: ${{ github.event.inputs.auto_commit == 'true' }}
+        run: |
+          set -euo pipefail
+
+          git config --global user.email \
+            "opencode-bot@users.noreply.github.com"
+
+          git config --global user.name \
+            "opencode-bot"
+
+          INTERVAL="${{ github.event.inputs.commit_interval_seconds }}"
+
+          LOG_FILE="$RUNNER_TEMP/autocommit.log"
+
+          : > "$LOG_FILE"
+
+          cat > "$RUNNER_TEMP/autocommit.sh" <<'SCRIPT'
+          #!/usr/bin/env bash
+
+          set -u
+
+          cd "$GITHUB_WORKSPACE"
+
+          while true; do
+
+            sleep "$INTERVAL"
+
+            if [ -n "$(git status --porcelain)" ]; then
+
+              git add -A
+
+              MSG="🤖 opencode: auto-commit $(date -u +'%Y-%m-%d %H:%M:%SZ')"
+
+              git commit \
+                -m "$MSG" \
+                >> "$LOG_FILE" 2>&1 || true
+
+              git push \
+                origin "$GITHUB_REF_NAME" \
+                >> "$LOG_FILE" 2>&1 || true
+
+            fi
+
+          done
+          SCRIPT
+
+          chmod +x "$RUNNER_TEMP/autocommit.sh"
+
+          export INTERVAL
+          export LOG_FILE
+
+          setsid bash \
+            "$RUNNER_TEMP/autocommit.sh" \
+            </dev/null \
+            >> "$LOG_FILE" 2>&1 &
+
+          echo "$!" > "$RUNNER_TEMP/autocommit.pid"
+
+          echo "✅ Auto-commit started."
+
+      # ============================================================
+      # 16. Persistent 4Life backup service
+      # ============================================================
+
+      - name: 💾 Prepare persistent 4Life backup service
+        env:
+          STATE_KEY: ${{ secrets.OPENCODE_STATE_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${STATE_KEY:-}" ]; then
+            echo "⚠️ OPENCODE_STATE_KEY is not configured — persistent backup disabled."
+            exit 0
+          fi
+
+          BACKUP_INTERVAL="${{ github.event.inputs.backup_interval_minutes }}"
+
+          BACKUP_SECONDS=$((BACKUP_INTERVAL * 60))
+
+          cat > "$RUNNER_TEMP/backup-opencode4life.sh" <<'SCRIPT'
+          #!/usr/bin/env bash
+          #
+          # 4Life full-state backup service.
+          # Serialises every backup with flock so the periodic loop and
+          # the final on-cancel backup can never run at the same time.
+
+          set -uo pipefail
+
+          export PATH="$HOME/.opencode/bin:$PATH"
+
+          RELEASE_TAG="${PERSIST_RELEASE_TAG:-opencode-mehdigm4life-state}"
+
+          DATA_DIR="${OPENCODE_DATA_DIR:-$HOME/.local/share/opencode}"
+          DB_PATH="${OPENCODE_DB_PATH:-$DATA_DIR/opencode.db}"
+
+          HOME_REL="${HOME#/}"
+          RUNNER_TEMP_REL="${RUNNER_TEMP#/}"
+
+          PERSIST_DIR="$HOME/.opencode-persistence"
+          MANIFEST_DIR="$PERSIST_DIR/manifests"
+
+          INCLUDE_CREDENTIALS="${PERSIST_INCLUDE_CREDENTIALS:-false}"
+          BACKUP_SECONDS="${BACKUP_SECONDS:-600}"
+          EXTRA_PATHS="${PERSIST_EXTRA_PATHS:-/opt /tmp}"
+          EXTRA_EXCLUDES="${PERSIST_EXTRA_EXCLUDES:-}"
+
+          SYS_CAPTURE_DIRS="${SYS_CAPTURE_DIRS:-${PERSIST_SYSTEM_DIRS:-/usr/local /usr/bin /usr/sbin /usr/share /root /etc/profile.d /etc/environment}}"
+          SYS_BASELINE_DIR="${SYS_BASELINE_DIR:-}"
+          SYS_DELTA_LIST="${SYS_DELTA_LIST:-$RUNNER_TEMP/oc4life-system-delta.list}"
+
+          ARCHIVE="$RUNNER_TEMP/oc4life-state.tar.zst"
+          ENC="$RUNNER_TEMP/oc4life-state.enc"
+          TAR_LOG="$RUNNER_TEMP/oc4life-tar.log"
+          LOCK_FILE="$RUNNER_TEMP/oc4life-backup.lock"
+
+          log() {
+            echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] $*"
+          }
+
+          # --------------------------------------------------------
+          # Package manifests (saved inside $HOME so they are part of
+          # the archive and available on the next run).
+          # --------------------------------------------------------
+
+          write_manifests() {
+
+            mkdir -p "$MANIFEST_DIR"
+
+            dpkg --get-selections \
+              > "$MANIFEST_DIR/dpkg-selections.txt" 2>/dev/null || true
+
+            apt-mark showmanual \
+              > "$MANIFEST_DIR/apt-manual.txt" 2>/dev/null || true
+
+            if command -v python3 >/dev/null 2>&1; then
+              python3 -m pip list --user --format=freeze \
+                > "$MANIFEST_DIR/pip-user.txt" 2>/dev/null || true
+              python3 -m pip list --format=freeze \
+                > "$MANIFEST_DIR/pip-system.txt" 2>/dev/null || true
+            fi
+
+            if command -v npm >/dev/null 2>&1; then
+              npm ls -g --depth=0 --parseable 2>/dev/null |
+                sed 's#.*/##' |
+                grep -v '^$' \
+                > "$MANIFEST_DIR/npm-global.txt" || true
+            fi
+
+            if command -v gem >/dev/null 2>&1; then
+              gem list --no-versions \
+                > "$MANIFEST_DIR/gem-list.txt" 2>/dev/null || true
+            fi
+
+            if command -v cargo >/dev/null 2>&1; then
+              cargo install --list 2>/dev/null |
+                sed -n 's/^\([^ ]*\) .*/\1/p' \
+                > "$MANIFEST_DIR/cargo-crates.txt" || true
+            fi
+
+            {
+              echo "HOME=$HOME"
+              echo "USER=$(id -un)"
+              echo "PATH=$PATH"
+            } > "$MANIFEST_DIR/env-info.txt"
+
+          }
+
+          # --------------------------------------------------------
+          # Consistent SQLite snapshot (never copy a live WAL DB).
+          # --------------------------------------------------------
+
+          make_db_snapshot() {
+
+            if [ "$DB_PATH" = ":memory:" ] || [ ! -f "$DB_PATH" ]; then
+              return 0
+            fi
+
+            rm -f "$DB_PATH.snapshot"
+
+            if ! sqlite3 "$DB_PATH" ".backup '$DB_PATH.snapshot'"; then
+              log "⚠️ sqlite3 backup failed — live DB will be archived as-is."
+              rm -f "$DB_PATH.snapshot"
+              return 0
+            fi
+
+            if [ "$INCLUDE_CREDENTIALS" != "true" ]; then
+              for t in account control_account credential account_state; do
+                sqlite3 "$DB_PATH.snapshot" "DELETE FROM $t;" \
+                  >/dev/null 2>&1 || true
+              done
+            fi
+
+            touch -r "$DB_PATH" "$DB_PATH.snapshot" 2>/dev/null || true
+
+          }
+
+          # --------------------------------------------------------
+          # Upload a finished encrypted blob as generation parts.
+          # --------------------------------------------------------
+
+          prune_old_generations() {
+
+            CURRENT="$1"
+
+            RID="$(
+              gh api \
+                "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" \
+                --jq '.id' 2>/dev/null || true
+            )"
+
+            [ -z "$RID" ] && return 0
+
+            gh api \
+              "repos/${GITHUB_REPOSITORY}/releases/${RID}/assets" \
+              --paginate 2>/dev/null |
+            jq -r --arg current "$CURRENT" '
+              .[]
+              | select(
+                  (.name | startswith("state-"))
+                  and
+                  (.name | startswith("state-\($current)-") | not)
+                )
+              | .id
+            ' |
+            while read -r ASSET_ID; do
+
+              [ -z "$ASSET_ID" ] && continue
+
+              log "🗑️ Removing old asset $ASSET_ID"
+
+              gh api \
+                --method DELETE \
+                "repos/${GITHUB_REPOSITORY}/releases/assets/${ASSET_ID}" \
+                >/dev/null 2>&1 || true
+
+            done
+
+          }
+
+          upload_backup() {
+
+            SRC="$1"
+
+            GENERATION="$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_RUN_ID}-${RANDOM}"
+
+            PREFIX="state-${GENERATION}-"
+
+            UPLOAD_DIR="$RUNNER_TEMP/oc4life-upload-${GENERATION}"
+
+            rm -rf "$UPLOAD_DIR"
+            mkdir -p "$UPLOAD_DIR"
+
+            SHA256="${ARCHIVE_SHA:-}"
+
+            # GitHub release assets must be < 2 GiB. 1900 MiB is safe.
+            split -b 1900M -d -a 4 "$SRC" "$UPLOAD_DIR/$PREFIX"
+
+            INDEX=0
+
+            for FILE in "$UPLOAD_DIR/$PREFIX"*; do
+              NEW_NAME="$UPLOAD_DIR/${PREFIX}$(printf '%04d' "$INDEX").part"
+              mv "$FILE" "$NEW_NAME"
+              INDEX=$((INDEX + 1))
+            done
+
+            if ! gh release view "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              >/dev/null 2>&1; then
+
+              gh release create "$RELEASE_TAG" \
+                --repo "$GITHUB_REPOSITORY" \
+                --title "🧬 OpenCode 4Life Persistent State" \
+                --notes "CURRENT_GENERATION=${GENERATION}" \
+                --latest=false
+
+            fi
+
+            for FILE in "$UPLOAD_DIR/${PREFIX}"*.part; do
+
+              [ -e "$FILE" ] || continue
+
+              log "⬆️ Uploading $(basename "$FILE")"
+
+              gh release upload \
+                "$RELEASE_TAG" \
+                "$FILE" \
+                --repo "$GITHUB_REPOSITORY" \
+                --clobber
+
+            done
+
+            # Publish only after ALL parts uploaded successfully, and
+            # store the plaintext checksum for integrity verification.
+
+            gh release edit \
+              "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --notes "$(printf 'CURRENT_GENERATION=%s\nSHA256=%s' "$GENERATION" "$SHA256")"
+
+            prune_old_generations "$GENERATION"
+
+            rm -rf "$UPLOAD_DIR"
+
+            log "✅ State persisted (generation $GENERATION)."
+
+          }
+
+          # --------------------------------------------------------
+          # Build a file list of everything the agent added to the
+          # system dirs (present now, absent from the fresh baseline).
+          # This is what makes manual installs into /usr/local/bin,
+          # /usr/bin, /usr/share, ... survive across runs cheaply.
+          # --------------------------------------------------------
+
+          build_system_delta() {
+
+            : > "$SYS_DELTA_LIST"
+
+            if [ -z "${SYS_BASELINE_DIR:-}" ] || [ ! -d "$SYS_BASELINE_DIR" ]; then
+              log "ℹ️ No system baseline — skipping system delta."
+              return 0
+            fi
+
+            for d in $SYS_CAPTURE_DIRS; do
+
+              [ -e "$d" ] || continue
+
+              key="$(printf '%s' "$d" | sed 's#^/##; s#/#_#g')"
+              base="$SYS_BASELINE_DIR/$key.list"
+
+              # Without a baseline for this dir we cannot compute a safe
+              # delta (we would archive the entire base image), so skip.
+              [ -f "$base" ] || continue
+
+              rel="${d#/}"
+
+              ( cd / && find "$rel" -printf '%p\t%s\t%T@\n' 2>/dev/null | LC_ALL=C sort ) |
+                LC_ALL=C comm -23 - "$base" |
+                cut -f1 >> "$SYS_DELTA_LIST" || true
+
+            done
+
+            log "🧭 System delta entries: $(wc -l < "$SYS_DELTA_LIST" | tr -d ' ')"
+
+          }
+
+          # --------------------------------------------------------
+          # Full backup
+          # --------------------------------------------------------
+
+          create_backup() {
+
+            log "=============================================="
+            log "💾 Creating full 4Life backup"
+            log "=============================================="
+
+            if [ -z "${STATE_KEY:-}" ]; then
+              log "⚠️ STATE_KEY missing — aborting backup."
+              return 1
+            fi
+
+            write_manifests
+
+            rm -f "$DB_PATH.snapshot"
+            make_db_snapshot
+
+            EXCLUDES=()
+
+            add_ex() {
+              EXCLUDES+=("--exclude=$1")
+            }
+
+            # Home / runner internals
+            add_ex "$HOME_REL/work"
+            add_ex "$HOME_REL/actions-runner"
+
+            # Freshly installed binary (restored from upstream each run)
+            add_ex "$HOME_REL/.opencode"
+
+            # Defensive: never archive our own work dir
+            [ -n "$RUNNER_TEMP_REL" ] && add_ex "$RUNNER_TEMP_REL"
+
+            # Stale locks
+            add_ex "$HOME_REL/.local/state/opencode/locks"
+
+            # Live (inconsistent) DB files — the .snapshot is included
+            add_ex "$HOME_REL/.local/share/opencode/opencode.db"
+            add_ex "$HOME_REL/.local/share/opencode/opencode.db-wal"
+            add_ex "$HOME_REL/.local/share/opencode/opencode.db-shm"
+
+            # Volatile /tmp internals
+            add_ex "tmp/.X11-unix"
+            add_ex "tmp/.ICE-unix"
+            add_ex "tmp/.XIM-unix"
+            add_ex "tmp/.font-unix"
+            add_ex "tmp/.Test-unix"
+            add_ex "tmp/systemd-private-*"
+            add_ex "tmp/snap-private-tmp"
+            add_ex "tmp/v8-compile-cache-*"
+            add_ex "tmp/clr-debug-pipe-*"
+            add_ex "tmp/dotnet-diagnostic-*"
+            add_ex "tmp/.bcddfd3fbf8dfb7f-*"
+
+            if [ "$INCLUDE_CREDENTIALS" != "true" ]; then
+              add_ex "$HOME_REL/.ssh"
+              add_ex "$HOME_REL/.netrc"
+              add_ex "$HOME_REL/.git-credentials"
+              add_ex "$HOME_REL/.npmrc"
+              add_ex "$HOME_REL/.docker/config.json"
+              add_ex "$HOME_REL/.config/gh"
+              add_ex "$HOME_REL/.config/gcloud"
+              add_ex "$HOME_REL/.aws"
+              add_ex "$HOME_REL/.kube"
+              add_ex "$HOME_REL/.config/opencode/auth.json"
+              add_ex "$HOME_REL/.local/share/opencode/auth.json"
+            fi
+
+            for e in $EXTRA_EXCLUDES; do
+              add_ex "${e#/}"
+            done
+
+            ROOTS=("$HOME_REL")
+
+            for p in $EXTRA_PATHS; do
+              r="${p#/}"
+              if [ -e "/$r" ]; then
+                ROOTS+=("$r")
+              fi
+            done
+
+            rm -f "$ARCHIVE" "$ENC"
+            : > "$TAR_LOG"
+
+            build_system_delta
+
+            log "📁 roots: ${ROOTS[*]}"
+
+            SUDO=""
+            sudo -n true 2>/dev/null && SUDO="sudo"
+
+            $SUDO tar -cf - \
+              --warning=no-file-changed \
+              --ignore-failed-read \
+              "${EXCLUDES[@]}" \
+              -C / \
+              --files-from="$SYS_DELTA_LIST" \
+              "${ROOTS[@]}" \
+              2>> "$TAR_LOG" | zstd -q -T0 > "$ARCHIVE"
+
+            _rc=("${PIPESTATUS[@]}")
+            TAR_RC=${_rc[0]}
+            ZSTD_RC=${_rc[1]}
+
+            rm -f "$DB_PATH.snapshot" 2>/dev/null || true
+
+            if [ "$TAR_RC" -gt 1 ] || [ "$ZSTD_RC" -ne 0 ]; then
+              log "❌ Archive creation failed (tar=$TAR_RC zstd=$ZSTD_RC)."
+              tail -n 40 "$TAR_LOG" || true
+              return 1
+            fi
+
+            if [ ! -s "$ARCHIVE" ]; then
+              log "❌ Archive is empty."
+              return 1
+            fi
+
+            log "📦 archive: $(du -h "$ARCHIVE" | cut -f1)"
+
+            ARCHIVE_SHA="$(sha256sum "$ARCHIVE" | awk '{print $1}')"
+
+            if ! openssl enc \
+              -aes-256-cbc \
+              -pbkdf2 \
+              -iter 200000 \
+              -pass env:STATE_KEY \
+              -in "$ARCHIVE" \
+              -out "$ENC"; then
+
+              log "❌ Encryption failed."
+              return 1
+
+            fi
+
+            rm -f "$ARCHIVE"
+
+            upload_backup "$ENC"
+
+          }
+
+          with_lock() {
+            (
+              exec 9>"$LOCK_FILE"
+              flock 9
+              "$@"
+            )
+          }
+
+          final_backup_on_term() {
+
+            log "🛑 Shutdown signal — running final 4Life backup..."
+
+            with_lock create_backup || true
+
+            exit 0
+
+          }
+
+          # --------------------------------------------------------
+          # Entry point
+          # --------------------------------------------------------
+
+          if [ "${1:-}" = "--once" ]; then
+            with_lock create_backup || true
+            exit 0
+          fi
+
+          trap final_backup_on_term TERM INT HUP
+
+          while true; do
+
+            sleep "$BACKUP_SECONDS" &
+            SLEEP_PID=$!
+            wait "$SLEEP_PID" 2>/dev/null || true
+
+            with_lock create_backup || true
+
+          done
+          SCRIPT
+
+          chmod +x "$RUNNER_TEMP/backup-opencode4life.sh"
+
+          export STATE_KEY
+          export BACKUP_SECONDS
+
+          setsid bash \
+            "$RUNNER_TEMP/backup-opencode4life.sh" \
+            </dev/null \
+            >> "$RUNNER_TEMP/opencode-backup.log" 2>&1 &
+
+          echo "$!" > "$RUNNER_TEMP/opencode-backup.pid"
+
+          echo "💾 4Life backup service started."
+          echo "⏱️ Interval: ${BACKUP_INTERVAL} minutes."
+
+      # ============================================================
+      # 17. Keep session alive
+      # ============================================================
+
+      - name: ⏳ Keep OpenCode alive
+        run: |
+          set -euo pipefail
+
+          shutdown_final_backup() {
+
+            echo ""
+            echo "=============================================="
+            echo "🛑 Session cancelled — final 4Life backup..."
+            echo "=============================================="
+
+            BPID="$(cat "$RUNNER_TEMP/opencode-backup.pid" 2>/dev/null || true)"
+
+            if [ -n "${BPID:-}" ] && kill -0 "$BPID" 2>/dev/null; then
+
+              echo "💾 Asking backup service (pid $BPID) to save final state..."
+
+              kill -TERM "$BPID" 2>/dev/null || true
+
+              for _ in $(seq 1 300); do
+
+                if ! kill -0 "$BPID" 2>/dev/null; then
+                  break
+                fi
+
+                sleep 1
+
+              done
+
+            fi
+
+            exit 0
+
+          }
+
+          trap shutdown_final_backup TERM INT HUP
+
+          DURATION_MIN="${{ github.event.inputs.duration_minutes }}"
+
+          DURATION_SEC=$((DURATION_MIN * 60))
+
+          ELAPSED=0
+
+          STEP=300
+
+          echo "=============================================="
+          echo "🧬 OpenCode 4Life session started"
+          echo "=============================================="
+          echo ""
+          echo "🌐 $PUBLIC_URL"
+          echo ""
+          echo "⏱️ Duration: ${DURATION_MIN} minutes"
+          echo ""
+
+          while [ "$ELAPSED" -lt "$DURATION_SEC" ]; do
+
+            sleep "$STEP"
+
+            ELAPSED=$((ELAPSED + STEP))
+
+            REMAINING=$((DURATION_SEC - ELAPSED))
+
+            if [ "$REMAINING" -lt 0 ]; then
+              REMAINING=0
+            fi
+
+            echo ""
+            echo "⏱️ Elapsed: $((ELAPSED / 60)) minutes"
+            echo "⏳ Remaining: $((REMAINING / 60)) minutes"
+            echo "🌐 $PUBLIC_URL"
+
+            if [ -f "$RUNNER_TEMP/opencode.pid" ]; then
+
+              PID="$(cat "$RUNNER_TEMP/opencode.pid")"
+
+              if ! kill -0 "$PID" 2>/dev/null; then
+
+                echo "❌ OpenCode process died."
+
+                exit 1
+
+              fi
+
+            fi
+
+            if [ -f "$RUNNER_TEMP/cloudflared.pid" ]; then
+
+              PID="$(cat "$RUNNER_TEMP/cloudflared.pid")"
+
+              if ! kill -0 "$PID" 2>/dev/null; then
+
+                echo "❌ Cloudflare process died."
+
+                exit 1
+
+              fi
+
+            fi
+
+            if [ -f "$RUNNER_TEMP/nginx.pid" ]; then
+
+              PID="$(cat "$RUNNER_TEMP/nginx.pid")"
+
+              if ! kill -0 "$PID" 2>/dev/null; then
+
+                echo "❌ Live UI proxy died."
+
+                exit 1
+
+              fi
+
+            fi
+
+          done
+
+          echo ""
+          echo "✅ Requested session duration reached."
+
+      # ============================================================
+      # 18. Final Git commit
+      # ============================================================
+
+      - name: 💾 Final project commit and push
+        if: ${{ always() && github.event.inputs.auto_commit == 'true' }}
+        run: |
+          set +e
+
+          git config --global user.email \
+            "opencode-bot@users.noreply.github.com"
+
+          git config --global user.name \
+            "opencode-bot"
+
+          git add -A
+
+          if ! git diff --cached --quiet; then
+
+            git commit \
+              -m "🤖 opencode: final auto-commit $(date -u +'%Y-%m-%d %H:%M:%SZ')"
+
+            git push \
+              origin "$GITHUB_REF_NAME"
+
+          else
+
+            echo "No pending project changes."
+
+          fi
+
+      # ============================================================
+      # 19. Final state backup
+      # ============================================================
+
+      - name: 💾 Final OpenCode 4Life state backup
+        if: ${{ always() }}
+        env:
+          STATE_KEY: ${{ secrets.OPENCODE_STATE_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+
+          if [ -z "${STATE_KEY:-}" ]; then
+            echo "⚠️ OPENCODE_STATE_KEY is not configured — skipping final backup."
+            exit 0
+          fi
+
+          if [ ! -x "$RUNNER_TEMP/backup-opencode4life.sh" ]; then
+            echo "ℹ️ Backup service script not present — skipping final backup."
+            exit 0
+          fi
+
+          echo "💾 Running final 4Life backup (--once)..."
+
+          export STATE_KEY
+
+          bash "$RUNNER_TEMP/backup-opencode4life.sh" --once || true
+
+          echo "✅ Final 4Life backup done."
+
+      # ============================================================
+      # 20. Debug logs
+      # ============================================================
+
+      - name: 📜 Show logs
+        if: always()
+        run: |
+
+          echo "=============================================="
+          echo "===== OpenCode server log ====="
+          echo "=============================================="
+
+          tail -n 100 \
+            "$RUNNER_TEMP/opencode-logs/server.log" \
+            2>/dev/null || true
+
+          echo ""
+          echo "=============================================="
+          echo "===== 4Life backup log ====="
+          echo "=============================================="
+
+          tail -n 120 \
+            "$RUNNER_TEMP/opencode-backup.log" \
+            2>/dev/null || true
+
+          echo ""
+          echo "=============================================="
+          echo "===== tar warnings ====="
+          echo "=============================================="
+
+          tail -n 40 \
+            "$RUNNER_TEMP/oc4life-tar.log" \
+            2>/dev/null || true
+
+          echo ""
+          echo "=============================================="
+          echo "===== Auto commit log ====="
+          echo "=============================================="
+
+          tail -n 100 \
+            "$RUNNER_TEMP/autocommit.log" \
+            2>/dev/null || true
+
+          echo ""
+          echo "=============================================="
+          echo "===== Live UI proxy log ====="
+          echo "=============================================="
+
+          tail -n 100 \
+            "$RUNNER_TEMP/opencode-logs/proxy.log" \
+            2>/dev/null || true
+
+          echo ""
+          echo "=============================================="
+          echo "===== Cloudflare log ====="
+          echo "=============================================="
+
+          tail -n 100 \
+            "$RUNNER_TEMP/cloudflared-logs/tunnel.log" \
+            2>/dev/null || true
+
+      # ============================================================
+      # 21. Proxy / Cloudflare cleanup
+      # ============================================================
+
+      - name: 🧹 Shutdown live UI proxy
+        if: always()
+        continue-on-error: true
+        run: |
+          sudo nginx -s quit -c "$RUNNER_TEMP/opencode-proxy.conf" 2>/dev/null || true
+          if [ -f "$RUNNER_TEMP/nginx.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/nginx.pid")" 2>/dev/null || true
+            rm -f "$RUNNER_TEMP/nginx.pid"
+          fi
+
+      - name: 🧹 Shutdown cloudflared
+        if: always()
+        continue-on-error: true
+        uses: AnimMouse/setup-cloudflared/shutdown@v2
