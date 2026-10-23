@@ -13,15 +13,24 @@ import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.getQualityFromName
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
+import okhttp3.Request
+import org.json.JSONArray
 import org.json.JSONObject
 import org.jsoup.parser.Parser
+import java.net.InetAddress
+import java.net.ServerSocket
+import java.net.Socket
 import java.net.URI
 import java.security.MessageDigest
+import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -153,6 +162,9 @@ object Anime4UpExtractorSuite {
         // Deduplicate VOE /e/ID and /ID
         Regex("""voe\.sx/(?:e/)?([A-Za-z0-9]{8,})""", RegexOption.IGNORE_CASE)
             .find(clean)?.groupValues?.get(1)?.let { return "voe:$it" }
+        // Deduplicate Anime4up-S1 & Anime4up-S2 across 4x.c1oiijc.shop and w1.anime4up.rest mirrors
+        Regex("""/(anime4up-s\d+/[^?#]+?)/?(?:[?#].*)?$""", RegexOption.IGNORE_CASE)
+            .find(clean)?.groupValues?.get(1)?.lowercase()?.let { return "vnx:$it" }
 
         return low.removeSuffix("/")
     }
@@ -199,7 +211,9 @@ object Anime4UpExtractorSuite {
                     serverHint?.contains("dood", ignoreCase = true) == true -> {
                     Anime4UpDoodExtractor().extractWithHint(url, referer, qualityHint, callback)
                 }
-                host.contains("c1oiijc.shop") || serverHint?.contains("anime4up", ignoreCase = true) == true -> {
+                url.contains("/Anime4up-S", ignoreCase = true) ||
+                    host.contains("c1oiijc.shop") ||
+                    serverHint?.contains("anime4up", ignoreCase = true) == true -> {
                     Anime4UpVnxPlayerExtractor().extractWithHint(url, referer, serverHint, qualityHint, subtitleCallback, callback)
                 }
                 host.contains("byse") -> {
@@ -1087,13 +1101,132 @@ class Anime4UpSaveFilesExtractor : ExtractorApi() {
 }
 
 // =========================================================================
-// 10. Anime4Up Native Player (4x.c1oiijc.shop / VnxPlayer) & Secondary Hosts
+// 10. Anime4Up Native Players: anime4up1 (Anime4up-S1) & anime4up2 (Anime4up-S2)
+//     (4x.c1oiijc.shop -> w1.anime4up.rest VnxPlayer + cdn1/cdn2 HLS + VTT)
 // =========================================================================
 
-class Anime4UpVnxPlayerExtractor : ExtractorApi() {
-    override val name = "Anime4Up Server"
+/**
+ * Lightweight loopback HTTP subtitle bridge (`127.0.0.1:<ephemeralPort>`) so Arabic `.vtt`
+ * tracks fetched through [Anime4UpNetwork] (bypassing Cloudflare 403 challenges on
+ * `w1.anime4up.rest/vnx-subtitle/...` and `/wp-content/uploads/...`) load reliably inside
+ * ExoPlayer regardless of the viewer's IP/VPN state.
+ */
+internal object Anime4UpSubtitleServer {
+    private const val MAX_ENTRIES = 16
+    private val store = object : LinkedHashMap<String, ByteArray>(MAX_ENTRIES, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ByteArray>?): Boolean {
+            return size > MAX_ENTRIES
+        }
+    }
+
+    @Volatile
+    private var serverSocket: ServerSocket? = null
+
+    @Volatile
+    private var boundPort: Int = 0
+
+    @Synchronized
+    private fun ensureStarted(): Int {
+        if (boundPort > 0 && serverSocket?.isClosed == false) return boundPort
+        return runCatching {
+            val sock = ServerSocket(0, 24, InetAddress.getByName("127.0.0.1"))
+            serverSocket = sock
+            boundPort = sock.localPort
+            Thread({
+                while (!sock.isClosed) {
+                    val client = runCatching { sock.accept() }.getOrNull() ?: break
+                    Thread({ handleClient(client) }, "Anime4UpSubConn").apply {
+                        isDaemon = true
+                        start()
+                    }
+                }
+            }, "Anime4UpSubServer").apply {
+                isDaemon = true
+                start()
+            }
+            boundPort
+        }.getOrDefault(0)
+    }
+
+    private fun handleClient(client: Socket) {
+        client.use { sock ->
+            runCatching {
+                sock.soTimeout = 5000
+                val reader = sock.getInputStream().bufferedReader(Charsets.UTF_8)
+                val requestLine = reader.readLine() ?: return
+                while (true) {
+                    val hdr = reader.readLine() ?: break
+                    if (hdr.isEmpty()) break
+                }
+                val parts = requestLine.split(' ')
+                val method = parts.getOrNull(0)?.uppercase().orEmpty()
+                val rawPath = parts.getOrNull(1).orEmpty().substringBefore('?')
+                val key = rawPath.substringAfterLast('/').removeSuffix(".vtt")
+                val out = sock.getOutputStream()
+
+                if (method == "OPTIONS") {
+                    val cors = "HTTP/1.1 204 No Content\r\n" +
+                        "Access-Control-Allow-Origin: *\r\n" +
+                        "Access-Control-Allow-Methods: GET, HEAD, OPTIONS\r\n" +
+                        "Connection: close\r\n\r\n"
+                    out.write(cors.toByteArray(Charsets.UTF_8))
+                    out.flush()
+                    return
+                }
+
+                val payload = synchronized(store) { store[key] }
+                if (payload == null) {
+                    val notFound = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    out.write(notFound.toByteArray(Charsets.UTF_8))
+                    out.flush()
+                    return
+                }
+
+                val headers = "HTTP/1.1 200 OK\r\n" +
+                    "Content-Type: text/vtt; charset=utf-8\r\n" +
+                    "Content-Length: ${payload.size}\r\n" +
+                    "Access-Control-Allow-Origin: *\r\n" +
+                    "Cache-Control: no-cache\r\n" +
+                    "Connection: close\r\n\r\n"
+                out.write(headers.toByteArray(Charsets.UTF_8))
+                if (method != "HEAD") {
+                    out.write(payload)
+                }
+                out.flush()
+            }
+        }
+    }
+
+    fun registerVtt(vttContent: String): String? {
+        val normalized = vttContent.removePrefix("\uFEFF").trim()
+        if (normalized.isEmpty() || !normalized.contains("-->")) return null
+        val finalVtt = if (normalized.startsWith("WEBVTT", ignoreCase = true)) {
+            "$normalized\n"
+        } else {
+            "WEBVTT\n\n$normalized\n"
+        }
+        val bytes = finalVtt.toByteArray(Charsets.UTF_8)
+        val sha1 = MessageDigest.getInstance("SHA-1").digest(bytes)
+            .joinToString("") { "%02x".format(it) }
+        synchronized(store) {
+            store[sha1] = bytes
+        }
+        val port = ensureStarted()
+        if (port <= 0) return null
+        return "http://127.0.0.1:$port/sub/$sha1.vtt"
+    }
+}
+
+open class Anime4UpVnxPlayerExtractor : ExtractorApi() {
+    override val name = "Anime4Up"
     override val mainUrl = "https://4x.c1oiijc.shop"
     override val requiresReferer = true
+
+    private data class HlsVariant(
+        val url: String,
+        val quality: Int,
+        val bandwidth: Long
+    )
 
     override suspend fun getUrl(
         url: String,
@@ -1112,67 +1245,365 @@ class Anime4UpVnxPlayerExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        val siteOrigin = referer?.let { Anime4UpExtractorUtils.originOf(it) } ?: "https://w1.anime4up.rest"
-        val html = runCatching {
-            app.get(
-                url,
-                referer = "$siteOrigin/",
-                headers = mapOf(
-                    "User-Agent" to Anime4UpExtractorUtils.UA,
-                    "Referer" to "$siteOrigin/",
-                    "Sec-Fetch-Dest" to "iframe",
-                    "Sec-Fetch-Mode" to "navigate",
-                    "Sec-Fetch-Site" to "cross-site"
-                )
-            ).text
-        }.getOrNull() ?: return
+        val siteOrigin = referer?.let { Anime4UpExtractorUtils.originOf(it) }
+            ?.takeIf { it.contains("anime4up", ignoreCase = true) }
+            ?: "https://w1.anime4up.rest"
+        val episodeReferer = referer?.takeIf { it.startsWith("http") } ?: "$siteOrigin/"
 
-        if (html.contains("Domain Restricted", ignoreCase = true) || html.length < 200) return
-
-        val combined = Anime4UpExtractorUtils.unpackAllScripts(html)
-        val displaySource = serverHint?.takeIf { it.isNotBlank() } ?: name
-        val qVal = Anime4UpExtractorUtils.parseQualityValue(qualityHint)
-        val selfOrigin = Anime4UpExtractorUtils.originOf(url) ?: mainUrl
-        val playHeaders = mapOf(
-            "User-Agent" to Anime4UpExtractorUtils.UA,
-            "Referer" to url,
-            "Origin" to selfOrigin
-        )
-
-        // Direct m3u8 / mp4 streams inside VnxPlayer
-        Regex("""["'](https?://[^"'\s]+\.m3u8[^"'\s]*)["']""").findAll(combined)
-            .map { it.groupValues[1].replace("\\/", "/") }
-            .distinct()
-            .forEach { m3u8 ->
-                Anime4UpExtractorUtils.emitHls(displaySource, displaySource, m3u8, url, playHeaders, qVal, callback)
-            }
-
-        Regex("""["'](https?://[^"'\s]+\.mp4[^"'\s]*)["']""").findAll(combined)
-            .map { it.groupValues[1].replace("\\/", "/") }
-            .distinct()
-            .forEach { mp4 ->
-                Anime4UpExtractorUtils.emitVideo(displaySource, displaySource, mp4, url, qVal, playHeaders, callback)
-            }
-
-        // Subtitle tracks if embedded
-        val subUrls = Regex("""["']file["']\s*:\s*["'](https?://[^"']+\.(?:vtt|srt|ass)[^"']*)["']""")
-            .findAll(combined)
-            .map { it.groupValues[1].replace("\\/", "/") }
-            .distinct()
-            .toList()
-        for (subUrl in subUrls) {
-            subtitleCallback(newSubtitleFile("Arabic", subUrl))
+        // Rewrite `4x.c1oiijc.shop/Anime4up-S1/...` or `Anime4up-S2/...` directly onto
+        // `$siteOrigin/Anime4up-S1|S2/...` with `vnx_no_cache` so W3 Total Cache never
+        // serves stale unauthorized pages or expired CDN stream tokens.
+        val vnxPathMatch = Regex("""/(Anime4up-S(\d+)/[^?#]+)""", RegexOption.IGNORE_CASE).find(url)
+        val serverIndex = vnxPathMatch?.groupValues?.get(2)
+        val canonicalPlayerUrl = if (vnxPathMatch != null) {
+            val cleanPath = vnxPathMatch.groupValues[1].trimStart('/')
+            "$siteOrigin/$cleanPath"
+        } else {
+            url.substringBefore('?')
+        }
+        val fetchTargetUrl = if (canonicalPlayerUrl.contains('?')) {
+            "$canonicalPlayerUrl&vnx_no_cache=${System.currentTimeMillis()}"
+        } else {
+            "$canonicalPlayerUrl?vnx_no_cache=${System.currentTimeMillis()}"
         }
 
-        // Nested iframe fallback
-        Regex("""<iframe[^>]+src=["'](https?://[^"']+)["']""", RegexOption.IGNORE_CASE).findAll(combined)
-            .map { it.groupValues[1] }
-            .filterNot { it == url }
-            .distinct()
-            .forEach { nested ->
-                loadExtractor(nested, url, subtitleCallback, callback)
+        val displaySource = resolveServerLabel(serverHint, serverIndex)
+        val iframeHeaders = mapOf(
+            "Sec-Fetch-Dest" to "iframe",
+            "Sec-Fetch-Mode" to "navigate",
+            "Sec-Fetch-Site" to "same-origin"
+        )
+
+        val html = Anime4UpNetwork.fetchHtml(
+            url = fetchTargetUrl,
+            referer = episodeReferer,
+            extraHeaders = iframeHeaders,
+            requireSiteSignature = false,
+            validator = { body ->
+                body.length > 500 &&
+                    !body.contains("هذا الدومين غير مصرح") &&
+                    !body.contains("Domain Restricted", ignoreCase = true) &&
+                    (body.contains("streamUrl") || body.contains("VnxPlayer") || body.contains(".m3u8"))
             }
+        ) ?: return
+
+        val combined = Anime4UpExtractorUtils.unpackAllScripts(html)
+
+        // 1. Extract & register external Arabic WebVTT subtitles (`const tracks = [...];`)
+        extractAndEmitSubtitles(combined, canonicalPlayerUrl, subtitleCallback)
+
+        // 2. Extract primary tokenized CDN HLS stream (`let streamUrl = "https://cdn1|2.7p4bm32.shop/?token=..."`)
+        val streamCandidates = LinkedHashSet<String>()
+        Regex("""(?:let|var|const)\s+streamUrl\s*=\s*["']([^"']+)["']""").findAll(combined).forEach { m ->
+            val u = unescapeJsUrl(m.groupValues[1])
+            if (u.startsWith("http")) streamCandidates.add(u)
+        }
+        Regex("""(https?://cdn\d*\.[A-Za-z0-9.-]+/\?token=[A-Za-z0-9_-]+)""").findAll(combined).forEach { m ->
+            streamCandidates.add(unescapeJsUrl(m.groupValues[1]))
+        }
+        Regex("""["'](https?://[^"'\s]+\.m3u8[^"'\s]*)["']""").findAll(combined).forEach { m ->
+            streamCandidates.add(unescapeJsUrl(m.groupValues[1]))
+        }
+
+        val cdnHeaders = mapOf(
+            "User-Agent" to Anime4UpExtractorUtils.UA,
+            "Accept" to "application/vnd.apple.mpegurl, application/x-mpegURL, */*",
+            "Referer" to "$siteOrigin/",
+            "Origin" to siteOrigin
+        )
+        val fallbackQuality = Anime4UpExtractorUtils.parseQualityValue(qualityHint)
+
+        var emittedAny = false
+        for (streamUrl in streamCandidates) {
+            if (emitValidatedVnxHls(displaySource, streamUrl, siteOrigin, cdnHeaders, fallbackQuality, callback)) {
+                emittedAny = true
+            }
+        }
+
+        // 3. Direct MP4 fallback if present
+        Regex("""["'](https?://[^"'\s]+\.mp4[^"'\s]*)["']""").findAll(combined)
+            .map { unescapeJsUrl(it.groupValues[1]) }
+            .distinct()
+            .forEach { mp4 ->
+                Anime4UpExtractorUtils.emitVideo(
+                    source = displaySource,
+                    label = displaySource,
+                    videoUrl = mp4,
+                    referer = "$siteOrigin/",
+                    quality = fallbackQuality,
+                    headers = cdnHeaders,
+                    callback = callback
+                )
+                emittedAny = true
+            }
+
+        // 4. Nested iframe fallback if `iframeOnly` mode is ever enabled on an episode
+        if (!emittedAny) {
+            Regex("""<iframe[^>]+src=["'](https?://[^"']+)["']""", RegexOption.IGNORE_CASE).findAll(combined)
+                .map { unescapeJsUrl(it.groupValues[1]) }
+                .filterNot { it.equals(url, ignoreCase = true) || it.equals(canonicalPlayerUrl, ignoreCase = true) }
+                .distinct()
+                .forEach { nested ->
+                    loadExtractor(nested, canonicalPlayerUrl, subtitleCallback, callback)
+                }
+        }
     }
+
+    private fun resolveServerLabel(serverHint: String?, serverIndex: String?): String {
+        val cleanedHint = serverHint
+            ?.replace("متعدد الجودات", "")
+            ?.trim()
+            .orEmpty()
+        if (cleanedHint.matches(Regex("""anime4up\s*\d+""", RegexOption.IGNORE_CASE))) {
+            return cleanedHint.replace(Regex("""\s+"""), "").lowercase()
+        }
+        if (!serverIndex.isNullOrBlank()) {
+            return "anime4up$serverIndex"
+        }
+        return cleanedHint.ifBlank { name }
+    }
+
+    private fun unescapeJsUrl(raw: String): String =
+        raw.trim()
+            .replace("\\/", "/")
+            .replace("\\u0026", "&")
+            .replace("&amp;", "&")
+
+    private suspend fun fetchDirectText(url: String, headers: Map<String, String>): Pair<Int, String>? =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val reqBuilder = Request.Builder().url(url)
+                headers.forEach { (k, v) -> reqBuilder.header(k, v) }
+                val client = app.baseClient.newBuilder()
+                    .connectTimeout(10, TimeUnit.SECONDS)
+                    .readTimeout(12, TimeUnit.SECONDS)
+                    .followRedirects(true)
+                    .followSslRedirects(true)
+                    .build()
+                client.newCall(reqBuilder.build()).execute().use { res ->
+                    res.code to res.body?.string().orEmpty()
+                }
+            }.getOrNull()
+        }
+
+    /**
+     * Fetches and validates the VnxPlayer HLS playlist (retrying transient CDN hiccups just like
+     * VnxPlayer's `resolvePlayableStream()`, without mutating the single `?token=` query string).
+     *
+     * Handles both playlist topologies used by `cdn1` and `cdn2`:
+     *  - Demuxed multi-audio Master Playlists (`#EXT-X-MEDIA:TYPE=AUDIO` with `URI=`): emits the
+     *    Master Playlist URL directly so ExoPlayer keeps separate Japanese/English audio tracks.
+     *  - Muxed multi-resolution Master Playlists (`#EXT-X-STREAM-INF` without separate audio URI):
+     *    emits individual 1080p / 720p / 480p / 360p HLS links sorted from highest to lowest.
+     */
+    private suspend fun emitValidatedVnxHls(
+        source: String,
+        streamUrl: String,
+        siteOrigin: String,
+        cdnHeaders: Map<String, String>,
+        fallbackQuality: Int,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        var playlistBody: String? = null
+        for (attempt in 0 until 2) {
+            val res = fetchDirectText(streamUrl, cdnHeaders)
+            if (res != null && res.first in 200..299) {
+                val normalized = res.second.removePrefix("\uFEFF").trim()
+                if (normalized.startsWith("#EXTM3U", ignoreCase = true)) {
+                    playlistBody = normalized
+                    break
+                }
+            }
+            if (attempt == 0) delay(450)
+        }
+        val body = playlistBody ?: return false
+
+        val hasSeparateAudioTrack = Regex(
+            """#EXT-X-MEDIA:[^\r\n]*TYPE=AUDIO[^\r\n]*URI=["'][^"']+["']""",
+            RegexOption.IGNORE_CASE
+        ).containsMatchIn(body)
+
+        val variants = parseMasterVariants(body, streamUrl)
+
+        if (hasSeparateAudioTrack || variants.isEmpty()) {
+            val bestQuality = variants.maxOfOrNull { it.quality }
+                ?.takeIf { it > Qualities.Unknown.value }
+                ?: fallbackQuality
+            callback(
+                newExtractorLink(source, source, streamUrl, ExtractorLinkType.M3U8) {
+                    this.referer = "$siteOrigin/"
+                    this.quality = bestQuality
+                    this.headers = cdnHeaders
+                }
+            )
+            return true
+        }
+
+        variants.sortedWith(compareByDescending<HlsVariant> { it.quality }.thenByDescending { it.bandwidth })
+            .distinctBy { it.url }
+            .forEach { variant ->
+                val qVal = if (variant.quality > Qualities.Unknown.value) variant.quality else fallbackQuality
+                callback(
+                    newExtractorLink(source, source, variant.url, ExtractorLinkType.M3U8) {
+                        this.referer = "$siteOrigin/"
+                        this.quality = qVal
+                        this.headers = cdnHeaders
+                    }
+                )
+            }
+        return true
+    }
+
+    private fun parseMasterVariants(playlist: String, baseUrl: String): List<HlsVariant> {
+        val lines = playlist.lines()
+        val variants = ArrayList<HlsVariant>()
+        var i = 0
+        while (i < lines.size) {
+            val line = lines[i].trim()
+            if (line.startsWith("#EXT-X-STREAM-INF:", ignoreCase = true)) {
+                val attrs = line.substringAfter(':')
+                val bw = Regex("""BANDWIDTH=(\d+)""", RegexOption.IGNORE_CASE)
+                    .find(attrs)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+                val nameAttr = Regex("""NAME=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+                    .find(attrs)?.groupValues?.get(1)
+                val heightAttr = Regex("""RESOLUTION=\d+x(\d+)""", RegexOption.IGNORE_CASE)
+                    .find(attrs)?.groupValues?.get(1)?.toIntOrNull()
+
+                val qVal = qualityFromStreamInf(nameAttr, heightAttr)
+
+                var j = i + 1
+                while (j < lines.size) {
+                    val next = lines[j].trim()
+                    if (next.isEmpty() || next.startsWith("#")) {
+                        if (next.startsWith("#EXT-X-STREAM-INF:", ignoreCase = true)) break
+                        j++
+                        continue
+                    }
+                    val resolvedUrl = resolveRelativeUrl(baseUrl, next)
+                    if (resolvedUrl.startsWith("http")) {
+                        variants.add(HlsVariant(resolvedUrl, qVal, bw))
+                    }
+                    break
+                }
+                i = j
+            }
+            i++
+        }
+        return variants
+    }
+
+    private fun qualityFromStreamInf(nameAttr: String?, height: Int?): Int {
+        if (!nameAttr.isNullOrBlank()) {
+            val byName = Anime4UpExtractorUtils.parseQualityValue(nameAttr)
+            if (byName > Qualities.Unknown.value) return byName
+        }
+        return when {
+            height == null -> Qualities.Unknown.value
+            height >= 2000 -> Qualities.P2160.value
+            height >= 1000 -> Qualities.P1080.value
+            height >= 700 -> Qualities.P720.value
+            height >= 440 -> Qualities.P480.value
+            height >= 320 -> Qualities.P360.value
+            height > 0 -> Qualities.P240.value
+            else -> Qualities.Unknown.value
+        }
+    }
+
+    private fun resolveRelativeUrl(baseUrl: String, ref: String): String {
+        if (ref.startsWith("http://") || ref.startsWith("https://")) return ref
+        return runCatching { URI(baseUrl).resolve(ref).toString() }.getOrDefault(ref)
+    }
+
+    private suspend fun extractAndEmitSubtitles(
+        combinedScript: String,
+        playerPageUrl: String,
+        subtitleCallback: (SubtitleFile) -> Unit
+    ) {
+        data class SubTrackSpec(val langLabel: String, val urls: List<String>)
+
+        val specs = ArrayList<SubTrackSpec>()
+        Regex("""const\s+tracks\s*=\s*(\[[\s\S]*?\])\s*;""").find(combinedScript)?.groupValues?.get(1)?.let { rawJson ->
+            runCatching {
+                val arr = JSONArray(rawJson)
+                for (i in 0 until arr.length()) {
+                    val obj = arr.optJSONObject(i) ?: continue
+                    val candidates = LinkedHashSet<String>()
+                    obj.optString("file").takeIf { it.isNotBlank() }?.let { candidates.add(unescapeJsUrl(it)) }
+                    obj.optJSONArray("fallbacks")?.let { fbArr ->
+                        for (j in 0 until fbArr.length()) {
+                            val fb = fbArr.optString(j)
+                            if (fb.isNotBlank()) {
+                                val cleanFb = unescapeJsUrl(fb)
+                                candidates.add(cleanFb)
+                                if (cleanFb.contains('?')) {
+                                    candidates.add(cleanFb.substringBefore('?'))
+                                }
+                            }
+                        }
+                    }
+                    val srclang = obj.optString("srclang").lowercase()
+                    val rawLabel = obj.optString("label").trim()
+                    val lang = if (srclang == "ar" || rawLabel.contains("عرب") || rawLabel.isBlank()) {
+                        "Arabic"
+                    } else {
+                        rawLabel
+                    }
+                    if (candidates.isNotEmpty()) {
+                        specs.add(SubTrackSpec(lang, candidates.toList()))
+                    }
+                }
+            }
+        }
+
+        // Fallback regex if `tracks` variable syntax changes
+        if (specs.isEmpty()) {
+            val fallbackUrls = Regex("""https?://[^"'\s\\]+\.(?:vtt|srt|ass)(?:\?[^"'\s\\]*)?""")
+                .findAll(combinedScript.replace("\\/", "/"))
+                .map { unescapeJsUrl(it.value) }
+                .distinct()
+                .toList()
+            if (fallbackUrls.isNotEmpty()) {
+                specs.add(SubTrackSpec("Arabic", fallbackUrls))
+            }
+        }
+
+        val subHeaders = mapOf(
+            "Accept" to "text/vtt,text/plain,application/x-subrip,*/*"
+        )
+
+        for (spec in specs) {
+            var servedLocally = false
+            for (candUrl in spec.urls) {
+                val vttText = Anime4UpNetwork.fetchHtml(
+                    url = candUrl,
+                    referer = playerPageUrl,
+                    extraHeaders = subHeaders,
+                    requireSiteSignature = false,
+                    validator = { body ->
+                        !body.contains("<html", ignoreCase = true) && body.contains("-->")
+                    }
+                )
+                if (!vttText.isNullOrBlank()) {
+                    val localUrl = Anime4UpSubtitleServer.registerVtt(vttText)
+                    if (localUrl != null) {
+                        subtitleCallback(newSubtitleFile(spec.langLabel, localUrl))
+                        servedLocally = true
+                        break
+                    }
+                }
+            }
+            if (!servedLocally) {
+                spec.urls.firstOrNull()?.let { remoteUrl ->
+                    subtitleCallback(newSubtitleFile(spec.langLabel, remoteUrl))
+                }
+            }
+        }
+    }
+}
+
+class Anime4UpVnxDirectExtractor : Anime4UpVnxPlayerExtractor() {
+    override val name = "Anime4Up Direct"
+    override val mainUrl = "https://w1.anime4up.rest"
 }
 
 class Anime4UpFourSharedExtractor : ExtractorApi() {
