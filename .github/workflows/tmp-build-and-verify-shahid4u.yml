@@ -80,17 +80,18 @@ jobs:
           print("Good proxies:", len(good_proxies), flush=True)
           assert good_proxies, "No working proxy found for shaahidd4u.net"
 
-          def new_sticky_session(start_idx=0):
+          def fetch_sticky_page(url, ref, start_idx=0):
               for off in range(len(good_proxies)):
-                  px = good_proxies[(start_idx + off) % len(good_proxies)]
+                  idx = (start_idx + off) % len(good_proxies)
+                  px = good_proxies[idx]
                   s = creq.Session(impersonate="chrome124", proxies={"http": px, "https": px})
                   try:
-                      r = s.get(BASE + "/", timeout=12)
+                      r = s.get(url, headers={"Referer": ref}, timeout=12)
                       if valid_s4u(r):
-                          return s, (start_idx + off)
+                          return s, r, (idx + 1) % len(good_proxies)
                   except Exception:
                       pass
-              raise RuntimeError("All proxies failed")
+              raise RuntimeError(f"All proxies failed on {url}")
 
           def sanitize_soup(html):
               soup = BeautifulSoup(html, "html.parser")
@@ -117,8 +118,7 @@ jobs:
                   el.decompose()
               return soup, trap_tokens
 
-          sess, p_idx = new_sticky_session(0)
-          hp_resp = sess.get(BASE + "/", timeout=15)
+          sess, hp_resp, p_idx = fetch_sticky_page(BASE + "/", BASE + "/", 0)
           hp_soup, _ = sanitize_soup(hp_resp.text)
           cards = hp_soup.select(".shows-container a.show-card")
           print("Homepage cards:", len(cards), flush=True)
@@ -414,8 +414,7 @@ jobs:
               jobs = {}
 
               # Watch page with dedicated sticky proxy session
-              wsess, next_p = new_sticky_session(start_p)
-              wr = wsess.get(watch_url, headers={"Referer": item_url}, timeout=16)
+              wsess, wr, next_p = fetch_sticky_page(watch_url, item_url, start_p)
               wr_ref = enc_url(wr.url)
               wsoup, wtraps = sanitize_soup(wr.text)
               csrf_el = wsoup.select_one("meta[name=csrf-token]")
@@ -442,8 +441,7 @@ jobs:
                   time.sleep(0.22)
 
               # Download page across ALL qualities (1080, 720, 480)
-              dsess, _ = new_sticky_session(next_p)
-              dr = dsess.get(dl_url, headers={"Referer": item_url}, timeout=16)
+              dsess, dr, _ = fetch_sticky_page(dl_url, item_url, next_p)
               dr_ref = enc_url(dr.url)
               dsoup, _ = sanitize_soup(dr.text)
               sroot = dsoup.select_one(".down-container .servers, .servers")
