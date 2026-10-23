@@ -120,22 +120,28 @@ jobs:
           cards = hp_soup.select(".shows-container a.show-card")
           print("Homepage cards:", len(cards), flush=True)
 
+          def enc_url(u):
+              p = urllib.parse.urlsplit(u)
+              path = urllib.parse.quote(urllib.parse.unquote(p.path), safe="/%")
+              query = urllib.parse.quote_plus(urllib.parse.unquote_plus(p.query), safe="=&%")
+              return urllib.parse.urlunsplit((p.scheme, p.netloc, path, query, p.fragment))
+
           ep_target = None
+          ep_foreign_target = None
           movie_target = None
           for c in cards:
-              href = urllib.parse.urljoin(BASE + "/", c.get("href", ""))
+              href = enc_url(urllib.parse.urljoin(BASE + "/", c.get("href", "")))
               dec = urllib.parse.unquote(href)
               title = (c.select_one("p.title") or c).get_text(" ", strip=True)
-              if "/episode/" in dec and not ep_target and "tulsa" in dec.lower():
-                  ep_target = (title, href)
+              if "/episode/" in dec:
+                  if not ep_target:
+                      ep_target = (title, href)
+                  if not ep_foreign_target and re.search(r"[a-zA-Z]{3,}", title):
+                      ep_foreign_target = (title, href)
               if "/film/" in dec and not movie_target:
                   movie_target = (title, href)
-          if not ep_target:
-              for c in cards:
-                  href = urllib.parse.urljoin(BASE + "/", c.get("href", ""))
-                  if "/episode/" in href:
-                      ep_target = ((c.select_one("p.title") or c).get_text(" ", strip=True), href)
-                      break
+          if ep_foreign_target:
+              ep_target = ep_foreign_target
 
           print("Selected Episode:", ep_target[0], urllib.parse.unquote(ep_target[1]), flush=True)
           print("Selected Movie:", movie_target[0], urllib.parse.unquote(movie_target[1]), flush=True)
@@ -398,14 +404,16 @@ jobs:
               return url
 
           def test_full_item(label, item_title, item_url, start_p):
+              item_url = enc_url(item_url)
               slug = urllib.parse.urlparse(item_url).path.strip("/").split("/", 1)[1]
-              watch_url = f"{BASE}/watch/{slug}"
-              dl_url = f"{BASE}/download/{slug}"
+              watch_url = enc_url(f"{BASE}/watch/{slug}")
+              dl_url = enc_url(f"{BASE}/download/{slug}")
               jobs = {}
 
               # Watch page with dedicated sticky proxy session
               wsess, next_p = new_sticky_session(start_p)
               wr = wsess.get(watch_url, headers={"Referer": item_url}, timeout=16)
+              wr_ref = enc_url(wr.url)
               wsoup, wtraps = sanitize_soup(wr.text)
               csrf_el = wsoup.select_one("meta[name=csrf-token]")
               csrf = csrf_el["content"] if csrf_el and csrf_el.has_attr("content") else ""
@@ -417,15 +425,15 @@ jobs:
                   try:
                       tok = b["data-token"]
                       el = 450 + idx * 520
-                      pr = wsess.post(f"{BASE}/watch/resolve", json={"key": wkey, "token": tok, "human_signal": {"version": 1, "elapsed_ms": el, "visible_ms": el - 20, "pointer": 5 + idx, "click": 2 + idx, "touch": 2, "scroll": 1, "key": 0}}, headers={"Accept": "application/json", "Content-Type": "application/json", "X-CSRF-TOKEN": csrf, "X-Requested-With": "XMLHttpRequest", "X-FP-Event-ID": "", "Origin": BASE, "Referer": wr.url}, timeout=14)
+                      pr = wsess.post(f"{BASE}/watch/resolve", json={"key": wkey, "token": tok, "human_signal": {"version": 1, "elapsed_ms": el, "visible_ms": el - 20, "pointer": 5 + idx, "click": 2 + idx, "touch": 2, "scroll": 1, "key": 0}}, headers={"Accept": "application/json", "Content-Type": "application/json", "X-CSRF-TOKEN": csrf, "X-Requested-With": "XMLHttpRequest", "X-FP-Event-ID": "", "Origin": BASE, "Referer": wr_ref}, timeout=14)
                       if pr.status_code == 200 and pr.json().get("ok"):
-                          mu = urllib.parse.urljoin(BASE + "/", pr.json()["url"])
-                          mr = wsess.get(mu, headers={"Referer": wr.url}, allow_redirects=False, timeout=12)
+                          mu = enc_url(urllib.parse.urljoin(BASE + "/", pr.json()["url"]))
+                          mr = wsess.get(mu, headers={"Referer": wr_ref}, allow_redirects=False, timeout=12)
                           loc = mr.headers.get("location", "")
                           if loc.startswith("http"):
                               watch_resolved_count += 1
                               ck = canonical_key(loc)
-                              jobs[ck] = {"url": loc, "ref": wr.url, "q": None}
+                              jobs[ck] = {"url": loc, "ref": wr_ref, "q": None}
                   except Exception as e:
                       print("Watch resolve err:", e, flush=True)
                   time.sleep(0.22)
@@ -433,6 +441,7 @@ jobs:
               # Download page across ALL qualities (1080, 720, 480)
               dsess, _ = new_sticky_session(next_p)
               dr = dsess.get(dl_url, headers={"Referer": item_url}, timeout=16)
+              dr_ref = enc_url(dr.url)
               dsoup, _ = sanitize_soup(dr.text)
               sroot = dsoup.select_one(".down-container .servers, .servers")
               cur_q = None
@@ -448,14 +457,14 @@ jobs:
                           if not any(s in nm for s in SUPPORTED):
                               continue
                           try:
-                              mu = urllib.parse.urljoin(BASE + "/", a["href"])
-                              mr = dsess.get(mu, headers={"Referer": dr.url}, allow_redirects=False, timeout=12)
+                              mu = enc_url(urllib.parse.urljoin(BASE + "/", a["href"]))
+                              mr = dsess.get(mu, headers={"Referer": dr_ref}, allow_redirects=False, timeout=12)
                               loc = mr.headers.get("location", "")
                               if loc.startswith("http"):
                                   dl_resolved_count += 1
                                   ck = canonical_key(loc)
                                   if ck not in jobs:
-                                      jobs[ck] = {"url": loc, "ref": dr.url, "q": cur_q}
+                                      jobs[ck] = {"url": loc, "ref": dr_ref, "q": cur_q}
                                   elif jobs[ck]["q"] is None and cur_q is not None:
                                       jobs[ck]["q"] = cur_q
                           except Exception as e:
