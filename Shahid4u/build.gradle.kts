@@ -1,7 +1,7 @@
-version = 10
+version = 8
 
 cloudstream {
-    description = "شاهد فور يو — جلسة Cloudflare دائمة، بوابة طلبات صارمة، كاش مواسم 24 ساعة، حماية من فخاخ canary، ودعم كامل للمواسم الكثيرة مثل Supernatural."
+    description = "إعادة بناء كاملة لدومين shaahidd4u.net: استخراج سيرفرات المشاهدة عبر /watch/resolve، كل المواسم والحلقات، حماية من الحظر وتحديد الطلبات"
     authors = listOf("mehdigm4life")
     language = "ar"
 
