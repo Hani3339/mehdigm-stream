@@ -27,7 +27,9 @@ import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.nicehttp.NiceResponse
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
 import org.jsoup.nodes.Document
@@ -62,7 +64,41 @@ class Shahid4u : MainAPI() {
     )
 
     private val cloudflareKiller by lazy { CloudflareKiller() }
-    private val cfInterceptor: Interceptor get() = cloudflareKiller
+
+    /**
+     * Cloudflare أحياناً يعيد صفحة تحقّق عربية بحالة HTTP 200، وCloudflareKiller
+     * لا يتدخّل إلا مع أكواد الخطأ المعروفة. نغلّف السلسلة ونحوّل صفحة التحقّق
+     * إلى 403 مع Server: cloudflare كي يتولاها الحل عبر WebView تلقائياً.
+     */
+    private val cfInterceptor: Interceptor = Interceptor { chain ->
+        val rewritingChain = object : Interceptor.Chain by chain {
+            override fun proceed(request: Request): Response {
+                val response = chain.proceed(request)
+                return if (isBrowserVerification(response)) {
+                    response.newBuilder()
+                        .code(403)
+                        .header("Server", "cloudflare")
+                        .build()
+                } else {
+                    response
+                }
+            }
+        }
+        cloudflareKiller.intercept(rewritingChain)
+    }
+
+    private fun isBrowserVerification(response: Response): Boolean {
+        if (response.code != 200) return false
+        if (response.header("cf-mitigated")?.contains("challenge", true) == true) return true
+        val contentType = response.header("Content-Type").orEmpty()
+        if (contentType.isNotBlank() && !contentType.contains("text/html", true)) return false
+        val body = runCatching { response.peekBody(64L * 1024L).string() }.getOrDefault("")
+        return body.contains("<title>Just a moment", true) ||
+                body.contains("جارٍ التحقق من المتصفح") ||
+                body.contains("سيتم فتح الصفحة تلقائيًا") ||
+                body.contains("cf_chl_opt", true)
+    }
+
     private val earnVids by lazy { ExternalEarnVidsExtractor() }
 
     private val docCache = ConcurrentHashMap<String, Pair<Long, Document>>()
@@ -75,6 +111,27 @@ class Shahid4u : MainAPI() {
         ConcurrentHashMap<String, Pair<Long, List<Triple<String, String, String>>>>()
     private val cookieStore =
         ConcurrentHashMap<String, MutableMap<String, String>>()
+
+    /**
+     * القالب يعرض البطاقات بأكثر من شكل حسب القسم/نسخة الموقع:
+     * a.show-card، a.show.card، a.glide_post، أو حاويات div.shows-container.
+     * الاعتماد على محدّد واحد كان يجعل الصفحة تبدو فارغة.
+     */
+    private val cardSelectors = listOf(
+        "div.shows-container.row div[class*=col-]",
+        "div.shows-container div[class*=col-]",
+        "div.shows-container.row a.show-card[href]",
+        "a.show-card[href]",
+        "a.show.card[href]",
+        "a.glide_post[href]",
+        "a.glide-item[href]",
+        "div.glide li.glide__slide:not(.glide__slide--clone)",
+        "a[href*='/watch/']",
+        "a[href*='/film/']",
+        "a[href*='/episode/']",
+        "a[href*='/series/']",
+        "a[href*='/season/']"
+    )
 
     private val jsonMediaType = "application/json".toMediaType()
     private val fpEventId by lazy { java.util.UUID.randomUUID().toString() }
@@ -252,12 +309,22 @@ class Shahid4u : MainAPI() {
                 body.contains("cf-error-details", true) ||
                 body.contains("You are unable to access", true)
 
+    /**
+     * صفحات تحدي Cloudflare قد تصل أحياناً بحالة HTTP 200 بدل 403،
+     * فلا يكفي الاعتماد على كود الحالة. نرفضها حتى لا تُفسَّر كصفحة فارغة.
+     * ملاحظة: challenge-platform يظهر أيضاً في الصفحات العادية، لذلك لا نعتمد عليه
+     * إلا مع 403 بعد التأكد من أن الصفحة ليست صفحة حظر.
+     */
+    private fun isChallengePage(body: String): Boolean =
+        body.contains("<title>Just a moment", true) ||
+                body.contains("cf_chl_opt", true) ||
+                body.contains("جارٍ التحقق من المتصفح") ||
+                body.contains("سيتم فتح الصفحة تلقائيًا")
+
     private fun isChallenge(res: NiceResponse, body: String): Boolean {
-        if (res.code != 403) return false
         if (res.headers["cf-mitigated"]?.contains("challenge", true) == true) return true
-        return body.contains("Just a moment", true) ||
-                body.contains("challenge-platform", true) ||
-                body.contains("cf_chl_opt", true)
+        if (isChallengePage(body)) return true
+        return res.code == 403 && body.contains("challenge-platform", true)
     }
 
     private suspend fun siteGet(
@@ -297,9 +364,17 @@ class Shahid4u : MainAPI() {
             )
         }
 
+        if (isBlockPage(body)) {
+            SiteGate.penalizeBlocked()
+            throw ErrorLoadingException(
+                "الموقع حظر الـIP عبر Cloudflare. تم إيقاف كل الطلبات 24 ساعة " +
+                        "لعدم إطالة الحظر. غيّر الشبكة/VPN ثم أعد المحاولة لاحقاً."
+            )
+        }
+
         val challenge = isChallenge(res, body)
         if (res.code == 403 || challenge) {
-            if (isBlockPage(body) || (res.code == 403 && !challenge)) {
+            if (res.code == 403 && !challenge) {
                 SiteGate.penalizeBlocked()
                 throw ErrorLoadingException(
                     "الموقع حظر الـIP عبر Cloudflare (403). تم إيقاف كل الطلبات 24 ساعة " +
@@ -343,52 +418,106 @@ class Shahid4u : MainAPI() {
             element
         } else {
             element.selectFirst("a.show-card[href]")
-                ?: element.selectFirst("a[href*='/episode/'], a[href*='/film/'], a[href*='/series/']")
+                ?: element.selectFirst("a.show.card[href]")
+                ?: element.selectFirst("a.glide_post[href]")
+                ?: element.selectFirst("a.glide-item[href]")
+                ?: element.selectFirst(
+                    "a[href*='/watch/'], a[href*='/film/'], a[href*='/episode/'], " +
+                            "a[href*='/series/'], a[href*='/season/']"
+                )
+                ?: element.selectFirst("a[href]")
                 ?: return null
         }
 
+        if (isHiddenElement(a)) return null
         val href = makeAbsoluteUrl(a.attr("href")) ?: return null
         if (href.contains("/m/")) return null
+        if (isNavigationHref(href)) return null
 
-        val title = a.selectFirst("p.title")?.text()?.trim()?.takeIf { it.isNotBlank() }
-            ?: a.selectFirst(".card-content .title")?.text()?.trim()?.takeIf { it.isNotBlank() }
-            ?: a.selectFirst("img")?.attr("alt")?.trim()?.takeIf { it.isNotBlank() }
+        val title = sequenceOf(
+            a.selectFirst("p.title"),
+            a.selectFirst(".card-content .title"),
+            a.selectFirst(".title"),
+            a.selectFirst("h2"),
+            a.selectFirst("h3"),
+            element.selectFirst("p.title"),
+            element.selectFirst(".card-content .title"),
+            element.selectFirst("h2"),
+            element.selectFirst("h3")
+        ).mapNotNull { it?.text()?.trim()?.takeIf { text -> text.isNotBlank() } }
+            .firstOrNull()
+            ?: a.attr("title").trim().takeIf { it.isNotBlank() }
+            ?: a.attr("aria-label").trim().takeIf { it.isNotBlank() }
+            ?: a.attr("data-title").trim().takeIf { it.isNotBlank() }
+            ?: a.selectFirst("img[alt]")?.attr("alt")?.trim()?.takeIf { it.isNotBlank() }
+            ?: element.selectFirst("img[alt]")?.attr("alt")?.trim()?.takeIf { it.isNotBlank() }
             ?: return null
 
-        var poster = a.selectFirst("img[src]")?.attr("src")
-        if (poster.isNullOrBlank() || !isSafeImage(poster)) {
-            poster = a.selectFirst("img[data-src]")?.attr("data-src")
-        }
-        val posterUrl = makeAbsoluteUrl(poster)
-            ?.takeIf { isSafeImage(it) }
+        val style = a.attr("style") + " " + element.attr("style")
+        val fromStyle = Regex("""url\(\s*['"]?(.*?)['"]?\s*\)""")
+            .find(style)?.groupValues?.get(1)
+        val poster = sequenceOf(
+            fromStyle,
+            a.selectFirst("img[data-src]")?.attr("data-src"),
+            a.selectFirst("img[data-original]")?.attr("data-original"),
+            a.selectFirst("img[data-lazy-src]")?.attr("data-lazy-src"),
+            a.selectFirst("img[data-image]")?.attr("data-image"),
+            a.selectFirst("img[src]")?.attr("src"),
+            element.selectFirst("img[data-src]")?.attr("data-src"),
+            element.selectFirst("img[data-original]")?.attr("data-original"),
+            element.selectFirst("img[data-lazy-src]")?.attr("data-lazy-src"),
+            element.selectFirst("img[data-image]")?.attr("data-image"),
+            element.selectFirst("img[src]")?.attr("src")
+        ).mapNotNull { makeAbsoluteUrl(it) }.firstOrNull { isSafeImage(it) }
             ?: TRANSPARENT_PNG
 
-        val decoded = runCatching { java.net.URLDecoder.decode(href, "UTF-8") }.getOrDefault(href)
+        val decoded = decodeUrl(href)
         val isAnime = decoded.contains("انمي") || decoded.contains("anime", true)
+        val isSeries = href.contains("/episode/") || href.contains("/series/") ||
+                href.contains("/season/") ||
+                element.selectFirst(".ep_num, .ep, .episode-number") != null
         val type = when {
             isAnime -> TvType.Anime
-            href.contains("/episode/") || href.contains("/series/") || href.contains("/season/") ->
-                TvType.TvSeries
+            isSeries -> TvType.TvSeries
             else -> TvType.Movie
         }
 
         return if (type == TvType.Movie) {
             newMovieSearchResponse(title, href, type) {
-                this.posterUrl = posterUrl
+                this.posterUrl = poster
                 this.posterHeaders = posterHeaders()
             }
         } else {
             newTvSeriesSearchResponse(title, href, type) {
-                this.posterUrl = posterUrl
+                this.posterUrl = poster
                 this.posterHeaders = posterHeaders()
             }
         }
     }
 
-    private fun parseCards(doc: Document, selector: String): List<SearchResponse> =
-        doc.select(selector)
-            .mapNotNull { parseCard(it) }
-            .distinctBy { it.url }
+    /** روابط التنقّل/التصنيفات التي قد تُلتقط عند البحث داخل حاوية البطاقة. */
+    private fun isNavigationHref(href: String): Boolean {
+        val path = runCatching { URI(href).path.orEmpty() }.getOrDefault(href).lowercase()
+        if (path.isBlank() || path == "/") return true
+        val skip = listOf(
+            "/category/", "/tag/", "/genre/", "/search", "/actor/", "/country/",
+            "/year/", "/page/", "/login", "/register", "/contact", "/about",
+            "/privacy", "/dmca", "/feed", "/cdn-cgi/", "/assets/", "/photos/"
+        )
+        return skip.any { path.contains(it) }
+    }
+
+    private fun parseCards(doc: Document, selector: String? = null): List<SearchResponse> {
+        val selectors = if (selector != null) listOf(selector) else cardSelectors
+        val cards = LinkedHashMap<String, SearchResponse>()
+        for (current in selectors) {
+            doc.select(current).forEach { element ->
+                val card = parseCard(element) ?: return@forEach
+                cards.putIfAbsent(card.url, card)
+            }
+        }
+        return cards.values.toList()
+    }
 
     override suspend fun search(query: String): List<SearchResponse> {
         if (SiteGate.isCoolingDown()) {
@@ -400,7 +529,7 @@ class Shahid4u : MainAPI() {
         val encoded = URLEncoder.encode(query, "UTF-8").replace("+", "%20")
         return try {
             val doc = getDocument("${mainUrl}search?s=$encoded", referer = mainUrl)
-            parseCards(doc, "div.shows-container.row a.show-card[href]")
+            parseCards(doc)
         } catch (e: ErrorLoadingException) {
             throw e
         } catch (e: Exception) {
@@ -420,19 +549,24 @@ class Shahid4u : MainAPI() {
         if (request.data.isBlank() && page <= 1) {
             val featured = parseCards(
                 doc,
-                "div.glide li.glide__slide:not(.glide__slide--clone) a.show-card[href]"
+                "div.glide li.glide__slide:not(.glide__slide--clone)"
             )
             if (featured.isNotEmpty()) {
                 lists.add(HomePageList("أبرز العروض", featured, false))
             }
         }
 
-        val latest = parseCards(doc, "div.shows-container.row a.show-card[href]")
+        val latest = parseCards(doc)
         if (latest.isNotEmpty()) {
             lists.add(HomePageList(request.name, latest, hasNextPage(doc)))
         }
 
-        if (lists.isEmpty()) throw ErrorLoadingException("لا توجد نتائج في هذه الصفحة.")
+        if (lists.isEmpty()) {
+            Log.w(logTag, "no cards parsed from $url (html=${doc.html().length} chars)")
+            throw ErrorLoadingException(
+                "تعذّر قراءة بطاقات الصفحة من الموقع. حدّث الإضافة أو أعد المحاولة بعد قليل."
+            )
+        }
         return newHomePageResponse(lists)
     }
 

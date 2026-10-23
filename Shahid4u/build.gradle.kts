@@ -1,4 +1,4 @@
-version = 9
+version = 10
 
 cloudstream {
     description = "شاهد فور يو — جلسة Cloudflare دائمة، بوابة طلبات صارمة، كاش مواسم 24 ساعة، حماية من فخاخ canary، ودعم كامل للمواسم الكثيرة مثل Supernatural."
