@@ -1,75 +1,79 @@
 {
-  "plain_requests_home": {
-    "status": 403,
-    "len": 5853,
-    "server": "cloudflare",
-    "cf_mitigated": null,
-    "title": [
-      "Attention Required! | Cloudflare"
-    ]
-  },
-  "cffi_pages": {
+  "pages": {
     "homepage.html": {
-      "status": 403,
-      "len": 5841,
-      "final_url": "https://shaahidd4u.net/"
+      "title": "Attention Required! | Cloudflare",
+      "len": 5756,
+      "url": "https://shaahidd4u.net/"
     },
     "category_p2.html": {
-      "status": 403,
-      "len": 6194,
-      "final_url": "https://shaahidd4u.net/category/%D8%A7%D9%81%D9%84%D8%A7%D9%85-%D8%A7%D8%AC%D9%86%D8%A8%D9%8A?page=2"
+      "title": "Attention Required! | Cloudflare",
+      "len": 4695,
+      "url": "https://shaahidd4u.net/category/%D8%A7%D9%81%D9%84%D8%A7%D9%85-%D8%A7%D8%AC%D9%86%D8%A8%D9%8A?page=2"
     },
     "search_tulsa.html": {
-      "status": 403,
-      "len": 5920,
-      "final_url": "https://shaahidd4u.net/search?s=tulsa"
+      "title": "Attention Required! | Cloudflare",
+      "len": 4695,
+      "url": "https://shaahidd4u.net/search?s=tulsa"
     },
     "ep_tulsa.html": {
-      "status": 403,
-      "len": 6716,
-      "final_url": "https://shaahidd4u.net/episode/%D9%85%D8%B3%D9%84%D8%B3%D9%84-tulsa-king-%D8%A7%D9%84%D9%85%D9%88%D8%B3%D9%85-%D8%A7%D9%84%D8%B1%D8%A7%D8%A8%D8%B9-%D8%A7%D9%84%D8%AD%D9%84%D9%82%D8%A9-1-%D9%85%D8%AA%D8%B1%D8%AC%D9%85%D8%A9"
+      "title": "Attention Required! | Cloudflare",
+      "len": 4695,
+      "url": "https://shaahidd4u.net/episode/%D9%85%D8%B3%D9%84%D8%B3%D9%84-tulsa-king-%D8%A7%D9%84%D9%85%D9%88%D8%B3%D9%85-%D8%A7%D9%84%D8%B1%D8%A7%D8%A8%D8%B9-%D8%A7%D9%84%D8%AD%D9%84%D9%82%D8%A9-1-%D9%85%D8%AA%D8%B1%D8%AC%D9%85%D8%A9"
     },
     "season_tulsa_s3.html": {
-      "status": 403,
-      "len": 6621,
-      "final_url": "https://shaahidd4u.net/season/%D9%85%D8%B3%D9%84%D8%B3%D9%84-tulsa-king-%D8%A7%D9%84%D9%85%D9%88%D8%B3%D9%85-%D8%A7%D9%84%D8%AB%D8%A7%D9%84%D8%AB-%D9%85%D8%AA%D8%B1%D8%AC%D9%85"
+      "title": "Attention Required! | Cloudflare",
+      "len": 4695,
+      "url": "https://shaahidd4u.net/season/%D9%85%D8%B3%D9%84%D8%B3%D9%84-tulsa-king-%D8%A7%D9%84%D9%85%D9%88%D8%B3%D9%85-%D8%A7%D9%84%D8%AB%D8%A7%D9%84%D8%AB-%D9%85%D8%AA%D8%B1%D8%AC%D9%85"
+    },
+    "season_tulsa_s3_episodes.html": {
+      "title": "Attention Required! | Cloudflare",
+      "len": 4695,
+      "url": "https://shaahidd4u.net/season/%D9%85%D8%B3%D9%84%D8%B3%D9%84-tulsa-king-%D8%A7%D9%84%D9%85%D9%88%D8%B3%D9%85-%D8%A7%D9%84%D8%AB%D8%A7%D9%84%D8%AB-%D9%85%D8%AA%D8%B1%D8%AC%D9%85/episodes"
     },
     "ep_umur.html": {
-      "status": 403,
-      "len": 6972,
-      "final_url": "https://shaahidd4u.net/episode/%D9%85%D8%B3%D9%84%D8%B3%D9%84-%D8%A7%D9%84%D9%85%D8%B9%D9%84%D9%85%D8%A9-%D8%A7%D9%88%D9%85%D9%88%D8%B1-%D8%A7%D9%84%D9%85%D9%88%D8%B3%D9%85-%D8%A7%D9%84%D8%A7%D9%88%D9%84-%D8%A7%D9%84%D8%AD%D9%84%D9%82%D8%A9-4-%D9%85%D8%AA%D8%B1%D8%AC%D9%85%D8%A9"
+      "title": "Attention Required! | Cloudflare",
+      "len": 4695,
+      "url": "https://shaahidd4u.net/episode/%D9%85%D8%B3%D9%84%D8%B3%D9%84-%D8%A7%D9%84%D9%85%D8%B9%D9%84%D9%85%D8%A9-%D8%A7%D9%88%D9%85%D9%88%D8%B1-%D8%A7%D9%84%D9%85%D9%88%D8%B3%D9%85-%D8%A7%D9%84%D8%A7%D9%88%D9%84-%D8%A7%D9%84%D8%AD%D9%84%D9%82%D8%A9-4-%D9%85%D8%AA%D8%B1%D8%AC%D9%85%D8%A9"
     },
     "film_footsoldier.html": {
-      "status": 403,
-      "len": 6294,
-      "final_url": "https://shaahidd4u.net/film/%D9%81%D9%8A%D9%84%D9%85-rise-of-the-footsoldier-retribution-2026-%D9%85%D8%AA%D8%B1%D8%AC%D9%85"
-    },
-    "watch_ep.html": {
-      "status": 403,
-      "len": 6838,
-      "final_url": "https://shaahidd4u.net/watch/%D9%85%D8%B3%D9%84%D8%B3%D9%84-tulsa-king-%D8%A7%D9%84%D9%85%D9%88%D8%B3%D9%85-%D8%A7%D9%84%D8%B1%D8%A7%D8%A8%D8%B9-%D8%A7%D9%84%D8%AD%D9%84%D9%82%D8%A9-1-%D9%85%D8%AA%D8%B1%D8%AC%D9%85%D8%A9"
-    },
-    "watch_film.html": {
-      "status": 403,
-      "len": 6383,
-      "final_url": "https://shaahidd4u.net/watch/%D9%81%D9%8A%D9%84%D9%85-rise-of-the-footsoldier-retribution-2026-%D9%85%D8%AA%D8%B1%D8%AC%D9%85"
+      "title": "Attention Required! | Cloudflare",
+      "len": 4695,
+      "url": "https://shaahidd4u.net/film/%D9%81%D9%8A%D9%84%D9%85-rise-of-the-footsoldier-retribution-2026-%D9%85%D8%AA%D8%B1%D8%AC%D9%85"
     },
     "watch_umur.html": {
-      "status": 403,
-      "len": 7073,
-      "final_url": "https://shaahidd4u.net/watch/%D9%85%D8%B3%D9%84%D8%B3%D9%84-%D8%A7%D9%84%D9%85%D8%B9%D9%84%D9%85%D8%A9-%D8%A7%D9%88%D9%85%D9%88%D8%B1-%D8%A7%D9%84%D9%85%D9%88%D8%B3%D9%85-%D8%A7%D9%84%D8%A7%D9%88%D9%84-%D8%A7%D9%84%D8%AD%D9%84%D9%82%D8%A9-4-%D9%85%D8%AA%D8%B1%D8%AC%D9%85%D8%A9"
+      "title": "Attention Required! | Cloudflare",
+      "len": 4695,
+      "url": "https://shaahidd4u.net/watch/%D9%85%D8%B3%D9%84%D8%B3%D9%84-%D8%A7%D9%84%D9%85%D8%B9%D9%84%D9%85%D8%A9-%D8%A7%D9%88%D9%85%D9%88%D8%B1-%D8%A7%D9%84%D9%85%D9%88%D8%B3%D9%85-%D8%A7%D9%84%D8%A7%D9%88%D9%84-%D8%A7%D9%84%D8%AD%D9%84%D9%82%D8%A9-4-%D9%85%D8%AA%D8%B1%D8%AC%D9%85%D8%A9"
+    },
+    "watch_bc.html": {
+      "title": "Attention Required! | Cloudflare",
+      "len": 4695,
+      "url": "https://shaahidd4u.net/watch/%D8%A7%D9%86%D9%85%D9%8A-black-clover-%D8%A7%D9%84%D9%85%D9%88%D8%B3%D9%85-%D8%A7%D9%84%D8%AB%D8%A7%D9%86%D9%8A-%D8%A7%D9%84%D8%AD%D9%84%D9%82%D8%A9-3-%D9%85%D8%AA%D8%B1%D8%AC%D9%85%D8%A9"
+    },
+    "watch_ep.html": {
+      "title": "Attention Required! | Cloudflare",
+      "len": 4695,
+      "url": "https://shaahidd4u.net/watch/%D9%85%D8%B3%D9%84%D8%B3%D9%84-tulsa-king-%D8%A7%D9%84%D9%85%D9%88%D8%B3%D9%85-%D8%A7%D9%84%D8%B1%D8%A7%D8%A8%D8%B9-%D8%A7%D9%84%D8%AD%D9%84%D9%82%D8%A9-1-%D9%85%D8%AA%D8%B1%D8%AC%D9%85%D8%A9"
+    },
+    "watch_film.html": {
+      "title": "Attention Required! | Cloudflare",
+      "len": 4695,
+      "url": "https://shaahidd4u.net/watch/%D9%81%D9%8A%D9%84%D9%85-rise-of-the-footsoldier-retribution-2026-%D9%85%D8%AA%D8%B1%D8%AC%D9%85"
     },
     "download_ep.html": {
-      "status": 403,
-      "len": 6826,
-      "final_url": "https://shaahidd4u.net/download/%D9%85%D8%B3%D9%84%D8%B3%D9%84-tulsa-king-%D8%A7%D9%84%D9%85%D9%88%D8%B3%D9%85-%D8%A7%D9%84%D8%B1%D8%A7%D8%A8%D8%B9-%D8%A7%D9%84%D8%AD%D9%84%D9%82%D8%A9-1-%D9%85%D8%AA%D8%B1%D8%AC%D9%85%D8%A9"
+      "title": "Attention Required! | Cloudflare",
+      "len": 4695,
+      "url": "https://shaahidd4u.net/download/%D9%85%D8%B3%D9%84%D8%B3%D9%84-tulsa-king-%D8%A7%D9%84%D9%85%D9%88%D8%B3%D9%85-%D8%A7%D9%84%D8%B1%D8%A7%D8%A8%D8%B9-%D8%A7%D9%84%D8%AD%D9%84%D9%82%D8%A9-1-%D9%85%D8%AA%D8%B1%D8%AC%D9%85%D8%A9"
     },
     "download_film.html": {
-      "status": 403,
-      "len": 6392,
-      "final_url": "https://shaahidd4u.net/download/%D9%81%D9%8A%D9%84%D9%85-rise-of-the-footsoldier-retribution-2026-%D9%85%D8%AA%D8%B1%D8%AC%D9%85"
+      "title": "Attention Required! | Cloudflare",
+      "len": 4695,
+      "url": "https://shaahidd4u.net/download/%D9%81%D9%8A%D9%84%D9%85-rise-of-the-footsoldier-retribution-2026-%D9%85%D8%AA%D8%B1%D8%AC%D9%85"
     }
   },
+  "cookies_names": [
+    "cf_clearance"
+  ],
   "site_scripts": [],
   "watch_ep_servers": [
     {
@@ -87,7 +91,8 @@
       "csrf": false
     }
   ],
-  "watch_umur_servers": [],
+  "watch_umur_raw": [],
+  "watch_bc_raw": [],
   "download_ep_targets": [],
   "download_film_targets": [],
   "probed_hosts": {}
