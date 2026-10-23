@@ -1,0 +1,248 @@
+name: Temp Inspect MegaMax
+
+on:
+  push:
+    branches:
+      - arena/b5447323-mehdigm-stream
+    paths:
+      - .github/workflows/tmp-inspect-megamax.yml
+
+permissions:
+  contents: write
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: arena/b5447323-mehdigm-stream
+
+      - name: Install Python & Playwright
+        run: |
+          pip install -q curl_cffi playwright beautifulsoup4
+          python3 -m playwright install chromium
+
+      - name: Deep Inspect MegaMax & Share4Max & Every Provider Inside
+        run: |
+          mkdir -p .tmp_mm
+          python3 - << 'PYEOF'
+          import asyncio, json, re, urllib.parse
+          from bs4 import BeautifulSoup
+          from curl_cffi import requests as creq
+          from playwright.async_api import async_playwright
+
+          ep_ref = "https://w1.anime4up.rest/episode/%d8%a7%d9%86%d9%85%d9%8a-tokyo-revengers-santen-sensou-hen-%d8%a7%d9%84%d8%ad%d9%84%d9%82%d8%a9-4-%d9%85%d8%aa%d8%b1%d8%ac%d9%85%d8%a9/"
+          mm_id = "WJH4dVV5cgxk0"
+
+          report = {
+              "pages": {},
+              "download_attachments": {},
+              "all_discovered_mirrors": [],
+              "mirror_probes": {},
+              "playwright_iframe_events": [],
+          }
+
+          def parse_inertia(html):
+              soup = BeautifulSoup(html, "html.parser")
+              sc = soup.select_one("script[data-page=app]")
+              if sc and sc.string:
+                  return json.loads(sc.string.strip())
+              app_div = soup.select_one("#app[data-page]")
+              if app_div and app_div.get("data-page"):
+                  return json.loads(app_div["data-page"])
+              return None
+
+          # 1. Inspect share4max /iframe/, megamax /iframe/, megamax /d/, megamax /download/, share4max /download/
+          sess = creq.Session(impersonate="chrome124")
+          for label, u in [
+              ("share4max_iframe", f"https://share4max.com/iframe/{mm_id}"),
+              ("megamax_iframe", f"https://megamax.me/iframe/{mm_id}"),
+              ("megamax_d", f"https://megamax.me/d/{mm_id}"),
+              ("megamax_download", f"https://megamax.me/download/{mm_id}"),
+              ("share4max_download", f"https://share4max.com/download/{mm_id}"),
+          ]:
+              try:
+                  r = sess.get(u, headers={"Referer": ep_ref}, timeout=15, allow_redirects=True)
+                  with open(f".tmp_mm/{label}.html", "w", encoding="utf-8") as f:
+                      f.write(r.text)
+                  pdata = parse_inertia(r.text)
+                  if pdata:
+                      with open(f".tmp_mm/{label}_inertia.json", "w", encoding="utf-8") as f:
+                          json.dump(pdata, f, ensure_ascii=False, indent=2)
+                  report["pages"][label] = {
+                      "status": r.status_code,
+                      "final_url": str(r.url),
+                      "len": len(r.text),
+                      "has_inertia": pdata is not None,
+                      "component": pdata.get("component") if pdata else None,
+                      "props_keys": list(pdata.get("props", {}).keys()) if pdata else [],
+                  }
+              except Exception as ex:
+                  report["pages"][label] = {"err": str(ex)}
+
+          # 2. Extract ALL mirrors from iframe props AND POST /download/<id> for every attachment!
+          seen_mirrors = set()
+          for fn in ("share4max_iframe_inertia.json", "megamax_iframe_inertia.json"):
+              try:
+                  with open(f".tmp_mm/{fn}", encoding="utf-8") as f:
+                      d = json.load(f)
+                  arr = d.get("props", {}).get("streams", {}).get("data", {}).get("arr", [])
+                  for tier in arr:
+                      qlabel = tier.get("label", "")
+                      for m in tier.get("mirrors", []):
+                          drv = m.get("driver", "")
+                          lnk = m.get("link", "")
+                          if lnk.startswith("//"):
+                              lnk = "https:" + lnk
+                          key = (fn, qlabel, drv, lnk)
+                          if lnk and (drv, lnk, qlabel) not in seen_mirrors:
+                              seen_mirrors.add((drv, lnk, qlabel))
+                              report["all_discovered_mirrors"].append({
+                                  "from": fn,
+                                  "quality": qlabel,
+                                  "driver": drv,
+                                  "link": lnk,
+                                  "raw_obj": m,
+                              })
+              except Exception as ex:
+                  report["pages"][fn + "_parse_err"] = str(ex)
+
+          # Now test Inertia POST on /download/<id> for both megamax.me and share4max.com!
+          for host_base in ("https://megamax.me", "https://share4max.com"):
+              try:
+                  dl_s = creq.Session(impersonate="chrome124")
+                  dl_url = f"{host_base}/download/{mm_id}"
+                  r0 = dl_s.get(dl_url, headers={"Referer": ep_ref}, timeout=15)
+                  pd = parse_inertia(r0.text)
+                  if not pd:
+                      continue
+                  version = pd.get("version", "")
+                  xsrf_raw = dl_s.cookies.get("XSRF-TOKEN", "")
+                  xsrf = urllib.parse.unquote(xsrf_raw) if "%" in xsrf_raw else xsrf_raw
+                  atts = pd.get("props", {}).get("attachments", [])
+                  report["download_attachments"][host_base] = {"attachments": atts, "results": {}}
+                  for att in atts:
+                      att_id = att.get("hashId")
+                      q_lbl = att.get("label") or att.get("resolution") or ""
+                      hdrs = {
+                          "Accept": "text/html, application/xhtml+xml",
+                          "Content-Type": "application/json",
+                          "X-Requested-With": "XMLHttpRequest",
+                          "X-Inertia": "true",
+                          "X-Inertia-Partial-Component": pd.get("component", "files/mirror/download"),
+                          "X-Inertia-Partial-Data": "download",
+                          "Origin": host_base,
+                          "Referer": dl_url,
+                      }
+                      if version:
+                          hdrs["X-Inertia-Version"] = version
+                      if xsrf:
+                          hdrs["X-XSRF-TOKEN"] = xsrf
+                      rp = dl_s.post(dl_url, headers=hdrs, data=json.dumps({"attach": att_id}), timeout=15)
+                      try:
+                          rj = rp.json()
+                      except Exception:
+                          rj = {"raw_status": rp.status_code, "raw_text": rp.text[:1000]}
+                      report["download_attachments"][host_base]["results"][f"{q_lbl}_{att_id}"] = rj
+                      dl_mirrors = rj.get("props", {}).get("download", {}).get("data", {}).get("mirrors", [])
+                      # Also check direct link if any in download.data!
+                      dl_data = rj.get("props", {}).get("download", {}).get("data", {})
+                      for m in dl_mirrors:
+                          drv = m.get("driver", "")
+                          lnk = m.get("link", "")
+                          if lnk.startswith("//"):
+                              lnk = "https:" + lnk
+                          if lnk and (drv, lnk, q_lbl) not in seen_mirrors:
+                              seen_mirrors.add((drv, lnk, q_lbl))
+                              report["all_discovered_mirrors"].append({
+                                  "from": f"download:{host_base}",
+                                  "quality": q_lbl,
+                                  "driver": drv,
+                                  "link": lnk,
+                                  "raw_obj": m,
+                              })
+              except Exception as ex:
+                  report["download_attachments"][host_base + "_err"] = str(ex)
+
+          # 3. Run Playwright on https://share4max.com/iframe/WJH4dVV5cgxk0 to see how MegaMax's own UI/JS resolves sources (especially "leech" / native / custom drivers!)
+          async def run_pw():
+              async with async_playwright() as p:
+                  browser = await p.chromium.launch(headless=True)
+                  ctx = await browser.new_context(
+                      user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                  )
+                  page = await ctx.new_page()
+                  async def on_resp(resp):
+                      u = resp.url
+                      rt = resp.request.resource_type
+                      if any(x in u for x in ("google", "analytics", "fonts.gstatic")):
+                          return
+                      item = {"status": resp.status, "method": resp.request.method, "type": rt, "url": u}
+                      if rt in ("xhr", "fetch", "document", "script") and resp.status < 500:
+                          try:
+                              txt = await resp.text()
+                              item["len"] = len(txt)
+                              if u.endswith(".js") and ("share4max" in u or "megamax" in u):
+                                  jname = re.sub(r"[^A-Za-z0-9._-]", "_", u.split("/")[-1])[:80]
+                                  with open(f".tmp_mm/js_{jname}", "w", encoding="utf-8") as jf:
+                                      jf.write(txt)
+                              elif rt in ("xhr", "fetch"):
+                                  item["preview"] = txt[:2000]
+                          except Exception:
+                              pass
+                      report["playwright_iframe_events"].append(item)
+                  page.on("response", on_resp)
+                  await page.goto(f"https://share4max.com/iframe/{mm_id}", referer=ep_ref, wait_until="networkidle", timeout=25000)
+                  await page.wait_for_timeout(4000)
+                  with open(".tmp_mm/pw_rendered_iframe.html", "w", encoding="utf-8") as f:
+                      f.write(await page.content())
+                  await browser.close()
+
+          asyncio.run(run_pw())
+
+          # 4. Probe EVERY SINGLE unique mirror URL discovered across iframe + download!
+          for idx, item in enumerate(report["all_discovered_mirrors"]):
+              drv = item["driver"]
+              lnk = item["link"]
+              q = item["quality"]
+              key = f"{idx:02d}_{drv}_{q}"
+              try:
+                  r = creq.get(lnk, headers={"Referer": f"https://share4max.com/iframe/{mm_id}"}, impersonate="chrome124", timeout=12, allow_redirects=True)
+                  txt = r.text
+                  fn = re.sub(r"[^A-Za-z0-9._-]", "_", f"probe_{idx:02d}_{drv}_{q}.html")
+                  with open(f".tmp_mm/{fn}", "w", encoding="utf-8") as pf:
+                      pf.write(txt[:180000])
+                  m3u8s = re.findall(r'https?:\\?/\\?/[^"\'\\\s<>]+\.m3u8[^"\'\\\s<>]*', txt)
+                  mp4s = re.findall(r'https?:\\?/\\?/[^"\'\\\s<>]+\.mp4[^"\'\\\s<>]*', txt)
+                  evals = len(re.findall(r'eval\(function\(p,a,c,k,e,', txt))
+                  iframes = re.findall(r'<iframe[^>]+src=["\']([^"\']+)["\']', txt, re.I)
+                  report["mirror_probes"][key] = {
+                      "driver": drv,
+                      "quality": q,
+                      "orig_url": lnk,
+                      "final_url": str(r.url),
+                      "status": r.status_code,
+                      "len": len(txt),
+                      "packed_evals": evals,
+                      "m3u8_matches": [x.replace("\\/", "/") for x in m3u8s[:5]],
+                      "mp4_matches": [x.replace("\\/", "/") for x in mp4s[:5]],
+                      "iframes": iframes[:5],
+                      "title": (re.search(r"<title[^>]*>(.*?)</title>", txt, re.S | re.I).group(1).strip() if re.search(r"<title[^>]*>(.*?)</title>", txt, re.S | re.I) else ""),
+                  }
+              except Exception as ex:
+                  report["mirror_probes"][key] = {"driver": drv, "quality": q, "orig_url": lnk, "err": str(ex)}
+
+          with open(".tmp_mm/megamax_report.json", "w", encoding="utf-8") as f:
+              json.dump(report, f, ensure_ascii=False, indent=2)
+          print("MEGAMAX INSPECTION COMPLETE:", len(report["all_discovered_mirrors"]), "mirrors found")
+          PYEOF
+
+      - name: Commit MegaMax inspection results
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f .tmp_mm/
+          git commit -m "chore: capture megamax mirrors and providers [skip ci]" || true
+          git push origin arena/b5447323-mehdigm-stream
