@@ -5,12 +5,14 @@ on:
   push:
     paths:
       - 'Shahid4u/**'
+      - '.github/workflows/build-shahid4u.yml'
 
 permissions:
   contents: write
 
 jobs:
   build:
+    if: "!contains(github.event.head_commit.message, '[skip ci]') && !contains(github.event.head_commit.message, '🤖')"
     runs-on: ubuntu-latest
 
     steps:
@@ -22,15 +24,13 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '17'
+          cache: 'gradle'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Grant execute permission for gradlew
-        run: chmod +x gradlew
-
-      - name: Build Shahid4u plugin
-        run: ./gradlew :Shahid4u:make
+      - name: Configure Android SDK and build Shahid4u plugin
+        run: |
+          chmod +x gradlew
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          ./gradlew :Shahid4u:make --no-daemon
 
       - name: Upload Shahid4u.cs3 artifact
         uses: actions/upload-artifact@v4
@@ -41,13 +41,32 @@ jobs:
       - name: Commit and push built cs3 to build/
         run: |
           if [ -f "Shahid4u/build/Shahid4u.cs3" ]; then
-            cp Shahid4u/build/Shahid4u.cs3 build/Shahid4u.cs3
+            mkdir -p build
+            cp -f Shahid4u/build/Shahid4u.cs3 build/Shahid4u.cs3
+            python3 - <<'PY'
+          import os, re
+          sz = os.path.getsize("build/Shahid4u.cs3")
+          with open("plugins.json", "r", encoding="utf-8") as fh:
+              txt = fh.read()
+          def repl(m):
+              blk = m.group(0)
+              if '"internalName": "Shahid4u"' not in blk:
+                  return blk
+              return re.sub(r'("fileSize"\s*:\s*)\d+', rf'\g<1>{sz}', blk, count=1)
+          new_txt = re.sub(r'\{[^{}]*"internalName"\s*:\s*"Shahid4u"[^{}]*\}', repl, txt, flags=re.S)
+          if new_txt != txt:
+              with open("plugins.json", "w", encoding="utf-8") as fh:
+                  fh.write(new_txt)
+          PY
             git config --local user.email "github-actions[bot]@users.noreply.github.com"
             git config --local user.name "github-actions[bot]"
-            git add -f build/Shahid4u.cs3
-            git commit --allow-empty -m "🤖 Build Shahid4u.cs3"
-            git pull --rebase origin "$GITHUB_REF_NAME" || true
-            git push
+            git add -f build/Shahid4u.cs3 plugins.json
+            if ! git diff --cached --quiet; then
+              git commit -m "🤖 Build Shahid4u.cs3 [skip ci]"
+              git pull --rebase origin "$GITHUB_REF_NAME" || true
+              git push
+            fi
           else
             echo "Shahid4u.cs3 not found!"
+            exit 1
           fi

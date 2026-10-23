@@ -1,7 +1,7 @@
-version = 11
+version = 12
 
 cloudstream {
-    description = "شاهد فور يو — تحسينات للاستقرار وتفادي timeout، حماية أفضل من الفخاخ، وتحسين جلب البطاقات."
+    description = "شاهد فور يو — إعادة بناء شاملة من الصفر مع تجاوز Cloudflare ودعم جميع سيرفرات المشاهدة والتحميل وكافة الجودات."
     authors = listOf("mehdigm4life")
     language = "ar"
 
@@ -10,8 +10,9 @@ cloudstream {
     tvTypes = listOf(
         "TvSeries",
         "Movie",
-        "Anime"
+        "Anime",
+        "AnimeMovie"
     )
 
-    iconUrl = "https://shaahidd4u.net/favicon.ico?v=33"
+    iconUrl = "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/Shahid4u.png"
 }
