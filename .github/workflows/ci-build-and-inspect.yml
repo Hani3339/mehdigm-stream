@@ -31,17 +31,17 @@ jobs:
       - name: Build Anime4Up & Cimawbas (.cs3)
         run: |
           chmod +x gradlew
-          ./gradlew :Anime4Up:clean :Anime4Up:make :Cimawbas:clean :Cimawbas:make --stacktrace --no-daemon
+          ./gradlew :Anime4Up:clean :Anime4Up:make :Cimawbas:clean :Cimawbas:make --stacktrace --no-daemon | tee .tmp_gradle_build.log
           mkdir -p build
           cp -v Anime4Up/build/Anime4Up.cs3 build/Anime4Up.cs3
           cp -v Cimawbas/build/Cimawbas.cs3 build/Cimawbas.cs3
           ls -lh build/Anime4Up.cs3 build/Cimawbas.cs3
 
-      - name: Live End-to-End Verification (Naruto 500 eps + Homepage New Anime & Episodes + Providers)
+      - name: Live End-to-End Verification
         run: |
-          pip install -q curl_cffi beautifulsoup4 pycryptodome
-          python3 - << 'PYEOF'
-          import base64, json, re, time, urllib.parse
+          pip install -q curl_cffi beautifulsoup4
+          python3 -u - << 'PYEOF' 2>&1 | tee .tmp_verify_log.txt
+          import base64, json, re, urllib.parse
           from concurrent.futures import ThreadPoolExecutor, as_completed
           from bs4 import BeautifulSoup
           from curl_cffi import requests as creq
@@ -57,6 +57,7 @@ jobs:
           ]
 
           working_proxy = None
+          dead_proxies = set()
 
           def is_valid_site(html):
               if not html or len(html) < 800:
@@ -76,49 +77,60 @@ jobs:
                           for line in r.text.splitlines()[:100]:
                               line = line.strip()
                               if line and ":" in line and not line.startswith("#"):
-                                  cands.append(line if "://" in line else f"{proto}://{line}")
+                                  spec = line if "://" in line else f"{proto}://{line}"
+                                  if spec not in dead_proxies:
+                                      cands.append(spec)
                   except Exception:
                       pass
               cands = list(dict.fromkeys(cands))[:220]
-              print(f"[Proxy] Harvested {len(cands)} proxies from {len(PROXY_FEEDS)} sources")
+              print(f"[Proxy] Probing {len(cands)} proxies across {len(PROXY_FEEDS)} sources...")
 
               def probe(p):
                   try:
-                      r = creq.get(test_url, impersonate="chrome124", proxies={"http": p, "https": p}, timeout=10)
+                      r = creq.get(test_url, impersonate="chrome124", proxies={"http": p, "https": p}, timeout=9)
                       if r.status_code == 200 and is_valid_site(r.text):
                           return p, r.text
                   except Exception:
                       pass
+                  dead_proxies.add(p)
                   return None
 
-              with ThreadPoolExecutor(max_workers=28) as ex:
+              ex = ThreadPoolExecutor(max_workers=28)
+              try:
                   futs = [ex.submit(probe, p) for p in cands]
                   for f in as_completed(futs):
                       res = f.result()
                       if res:
                           working_proxy = res[0]
                           print(f"[Proxy] Selected working proxy: {working_proxy}")
-                          for rest in futs:
-                              rest.cancel()
+                          ex.shutdown(wait=False, cancel_futures=True)
                           return res[1]
+              finally:
+                  ex.shutdown(wait=False, cancel_futures=True)
               return None
 
           def fetch_site(url):
               global working_proxy
               try:
-                  r = creq.get(url, impersonate="chrome124", timeout=12)
+                  r = creq.get(url, impersonate="chrome124", timeout=10)
                   if r.status_code == 200 and is_valid_site(r.text):
                       return r.text
               except Exception:
                   pass
-              if working_proxy:
-                  try:
-                      r = creq.get(url, impersonate="chrome124", proxies={"http": working_proxy, "https": working_proxy}, timeout=14)
-                      if r.status_code == 200 and is_valid_site(r.text):
-                          return r.text
-                  except Exception:
+              for _ in range(3):
+                  if working_proxy:
+                      try:
+                          r = creq.get(url, impersonate="chrome124", proxies={"http": working_proxy, "https": working_proxy}, timeout=14)
+                          if r.status_code == 200 and is_valid_site(r.text):
+                              return r.text
+                      except Exception:
+                          pass
+                      dead_proxies.add(working_proxy)
                       working_proxy = None
-              return find_working_proxy(url)
+                  res = find_working_proxy(url)
+                  if res:
+                      return res
+              return None
 
           def extract_episodes_like_kotlin(anime_url):
               html = fetch_site(anime_url)
@@ -126,6 +138,7 @@ jobs:
               soup = BeautifulSoup(html, "html.parser")
               title = soup.select_one("h1.anime-details-title")
               title_txt = title.get_text(strip=True) if title else "?"
+              no_eps_yet = "لا توجد حلقات" in html
               cards = soup.select("div#episodesList div.anime-card-container")
               ep_map = {}
               for c in cards:
@@ -145,7 +158,7 @@ jobs:
                           href = a["href"]
                           key = urllib.parse.unquote(href).rstrip("/").lower()
                           ep_map[key] = href
-              return title_txt, len(cards), len(ep_map), first_ep
+              return title_txt, len(cards), len(ep_map), first_ep, no_eps_yet
 
           def decrypt_voe(enc):
               rot = []
@@ -194,7 +207,7 @@ jobs:
                           r = creq.get(u, impersonate="chrome124", timeout=12)
                           m = re.search(r'https?://download\d*\.mediafire\.com/[^"\'\s<>]+', r.text)
                           if m:
-                              resolved.append(f"MediaFire({q})->OK")
+                              resolved.append(f"MediaFire({q})->MP4_OK")
                       elif "vkvideo.ru" in u:
                           r = creq.get(u, impersonate="chrome124", timeout=12)
                           quals = re.findall(r'"(url\d+|hls)"\s*:\s*"https?:', r.text)
@@ -222,15 +235,22 @@ jobs:
 
           report = {}
 
-          # 1. Naruto Shippuuden full 500-episode test
+          # 1. Naruto Shippuuden full 500-episode test + Ep 500 & Ep 1 links
           naruto_url = "https://w1.anime4up.rest/anime/naruto-shippuuden-sgtfr/"
-          n_title, n_p1, n_total, n_first = extract_episodes_like_kotlin(naruto_url)
+          n_title, n_p1, n_total, n_first, _ = extract_episodes_like_kotlin(naruto_url)
           print(f"[Naruto] {n_title}: page1={n_p1}, total={n_total}")
           assert n_total == 500, f"Expected 500 Naruto episodes, got {n_total}"
-          nw, nd, nres = test_episode_providers("https://w1.anime4up.rest/episode/naruto-shippuuden-%d8%a7%d9%84%d8%ad%d9%84%d9%82%d8%a9-500/")
-          report["naruto_shippuuden"] = {"title": n_title, "page1_cards": n_p1, "total_episodes": n_total, "ep500_watch": nw, "ep500_download": nd, "ep500_resolved": nres}
+          nw500, nd500, nres500 = test_episode_providers("https://w1.anime4up.rest/episode/naruto-shippuuden-%d8%a7%d9%84%d8%ad%d9%84%d9%82%d8%a9-500/")
+          nw1, nd1, nres1 = test_episode_providers(n_first)
+          report["naruto_shippuuden"] = {
+              "title": n_title,
+              "page1_cards": n_p1,
+              "total_episodes": n_total,
+              "ep1": {"watch": nw1, "download": nd1, "resolved": nres1},
+              "ep500": {"watch": nw500, "download": nd500, "resolved": nres500},
+          }
 
-          # 2. Homepage new anime & episodes test
+          # 2. Homepage widgets & new anime/episodes test
           home_html = fetch_site("https://w1.anime4up.rest/home8/")
           home_soup = BeautifulSoup(home_html, "html.parser")
           widgets = []
@@ -242,23 +262,36 @@ jobs:
                   continue
               cards = w.select("div.anime-card-container")
               widgets.append({"heading": h_txt, "count": len(cards)})
-              if cards and len(tested_new) < 4:
-                  c = cards[0]
+              for c in cards[:5]:
                   a_el = c.select_one("div.anime-card-title h3 a[href*='/anime/']")
                   ep_el = c.select_one("div.ep_num a[href*='/episode/']")
-                  if a_el:
-                      a_url = a_el["href"]
-                      t_txt, p1c, totc, f_ep = extract_episodes_like_kotlin(a_url)
-                      assert totc > 0, f"Homepage anime {a_url} had 0 episodes!"
-                      probe_ep = ep_el["href"] if ep_el else f_ep
-                      wc, dc, rlist = test_episode_providers(probe_ep)
-                      tested_new.append({"widget": h_txt, "anime": t_txt, "url": a_url, "episodes": totc, "watch_servers": wc, "download_links": dc, "resolved_streams": rlist})
-                      print(f"[Home:{h_txt}] {t_txt} -> {totc} eps, {wc} watch, {dc} dl, resolved={rlist}")
+                  if not a_el or not a_el["href"].startswith("http"):
+                      continue
+                  a_url = a_el["href"]
+                  t_txt, p1c, totc, f_ep, no_eps_yet = extract_episodes_like_kotlin(a_url)
+                  if no_eps_yet and totc == 0:
+                      print(f"[Home:{h_txt}] {t_txt} -> site says 'لا توجد حلقات' (unreleased), skipping")
+                      continue
+                  assert totc > 0, f"Homepage anime {a_url} had 0 episodes!"
+                  probe_ep = ep_el["href"] if ep_el else f_ep
+                  wc, dc, rlist = test_episode_providers(probe_ep)
+                  tested_new.append({
+                      "widget": h_txt,
+                      "anime": t_txt,
+                      "url": a_url,
+                      "episodes": totc,
+                      "watch_servers": wc,
+                      "download_links": dc,
+                      "resolved_streams": rlist,
+                  })
+                  print(f"[Home:{h_txt}] {t_txt} -> {totc} eps, {wc} watch, {dc} dl, resolved={rlist}")
+                  break
 
-          # 3. Movie test
-          m_title, m_p1, m_tot, _ = extract_episodes_like_kotlin("https://w1.anime4up.rest/anime/naruto-movie-1-dai-katsugeki-yuki-hime-shinobu-houjou-dattebayo/")
+          # 3. Movie test (note exact URL slug on site: ninpouchou)
+          m_title, m_p1, m_tot, m_ep, _ = extract_episodes_like_kotlin("https://w1.anime4up.rest/anime/naruto-movie-1-dai-katsugeki-yuki-hime-ninpouchou-dattebayo/")
           assert m_tot >= 1, f"Movie had 0 episodes!"
-          report["movie_test"] = {"title": m_title, "episodes": m_tot}
+          mw, md, mres = test_episode_providers(m_ep)
+          report["movie_test"] = {"title": m_title, "episodes": m_tot, "watch": mw, "download": md, "resolved": mres}
           report["home_widgets"] = widgets
           report["homepage_live_samples"] = tested_new
 
@@ -268,9 +301,10 @@ jobs:
           PYEOF
 
       - name: Commit built .cs3 artifacts and verification report
+        if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -f build/Anime4Up.cs3 build/Cimawbas.cs3 .tmp_verify_report.json
+          git add -f build/Anime4Up.cs3 build/Cimawbas.cs3 .tmp_verify_report.json .tmp_verify_log.txt .tmp_gradle_build.log || true
           git commit -m "chore: build Anime4Up.cs3 & Cimawbas.cs3 and verify [skip ci]" || true
-          git push origin HEAD
+          git push origin HEAD || true

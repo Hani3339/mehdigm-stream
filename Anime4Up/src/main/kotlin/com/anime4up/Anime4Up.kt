@@ -135,7 +135,9 @@ class Anime4Up : MainAPI() {
             ?: selectFirst("a[href]")?.attr("href")?.takeIf { it.isNotBlank() }
             ?: return null
 
-        val cleanHref = fixUrlNull(targetHref) ?: return null
+        val cleanHref = fixUrlNull(targetHref)
+            ?.takeIf { it.startsWith("http") && !it.contains(" ") && !it.contains("'") }
+            ?: return null
 
         val rawTitle = animeLinkEl?.attr("title")?.takeIf { it.isNotBlank() }
             ?: animeLinkEl?.text()?.trim()?.takeIf { it.isNotBlank() }
