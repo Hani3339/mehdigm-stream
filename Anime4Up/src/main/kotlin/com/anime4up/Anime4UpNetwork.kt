@@ -79,6 +79,7 @@ object Anime4UpNetwork {
     private var cachedUa: String = DEFAULT_UA
 
     private val workingProxies = CopyOnWriteArrayList<String>()
+    private val proxyFailCounts = ConcurrentHashMap<String, Int>()
     private val proxyMutex = Mutex()
     private val cfMutex = Mutex()
     private val deadProxies = ConcurrentHashMap.newKeySet<String>()
@@ -174,19 +175,29 @@ object Anime4UpNetwork {
             }
         }
 
-        // 2. Try verified working proxies from pool
+        // 2. Try verified working proxies from pool (tolerate transient hiccups up to 3 strikes)
         for (proxySpec in workingProxies.toList()) {
             if (deadProxies.contains(proxySpec)) {
                 workingProxies.remove(proxySpec)
                 continue
             }
-            proxyGet(url, proxySpec, referer, extraHeaders, timeoutSec = 14)?.let { (code, body) ->
+            val attempt = proxyGet(url, proxySpec, referer, extraHeaders, timeoutSec = 14)
+                ?: proxyGet(url, proxySpec, referer, extraHeaders, timeoutSec = 14)
+            if (attempt != null) {
+                val (code, body) = attempt
                 if (code in 200..399 && !isCloudflareChallenge(code, body) && (!requireSiteSignature || isValidAnime4UpHtml(body))) {
+                    proxyFailCounts.remove(proxySpec)
                     return@withContext body
                 }
             }
-            deadProxies.add(proxySpec)
-            workingProxies.remove(proxySpec)
+            val strikes = (proxyFailCounts[proxySpec] ?: 0) + 1
+            proxyFailCounts[proxySpec] = strikes
+            if (strikes >= 3) {
+                deadProxies.add(proxySpec)
+                workingProxies.remove(proxySpec)
+            } else if (workingProxies.size > 1 && workingProxies.remove(proxySpec)) {
+                workingProxies.add(proxySpec)
+            }
         }
 
         // 3. Try silent Android WebView Cloudflare solver if an Activity is available
@@ -220,11 +231,14 @@ object Anime4UpNetwork {
                 if (deadProxies.contains(proxySpec)) continue
                 proxyGet(url, proxySpec, referer, extraHeaders, timeoutSec = 14)?.let { (code, body) ->
                     if (code in 200..399 && !isCloudflareChallenge(code, body) && (!requireSiteSignature || isValidAnime4UpHtml(body))) {
+                        proxyFailCounts.remove(proxySpec)
                         return@withContext body
                     }
                 }
-                deadProxies.add(proxySpec)
-                workingProxies.remove(proxySpec)
+            }
+
+            if (deadProxies.size > 600) {
+                deadProxies.clear()
             }
 
             discoverWorkingProxyAndFetch(url, referer, extraHeaders, requireSiteSignature)
