@@ -47,17 +47,42 @@ jobs:
               except Exception:
                   pass
 
+          from concurrent.futures import ThreadPoolExecutor, as_completed
+
+          GOOD_PROXY = [None]
+
+          def try_one_proxy(p, url, headers):
+              try:
+                  kw = {"impersonate": "chrome124", "headers": headers, "timeout": 5, "allow_redirects": True}
+                  if p:
+                      kw["proxies"] = {"http": p, "https": p}
+                  r = creq.get(url, **kw)
+                  if r.status_code == 200 and "Just a moment..." not in r.text[:2000] and "_cf_chl_opt" not in r.text[:4000]:
+                      return r.status_code, str(r.url), r.text, dict(r.headers), p
+              except Exception:
+                  pass
+              return None
+
           def fetch_via_proxy(url, headers):
-              for p in [None] + PROXIES[:80]:
-                  try:
-                      kw = {"impersonate": "chrome124", "headers": headers, "timeout": 10, "allow_redirects": True}
-                      if p:
-                          kw["proxies"] = {"http": p, "https": p}
-                      r = creq.get(url, **kw)
-                      if r.status_code == 200 and "Just a moment..." not in r.text[:2000] and "_cf_chl_opt" not in r.text[:4000]:
-                          return r.status_code, str(r.url), r.text, dict(r.headers), p
-                  except Exception:
-                      pass
+              if GOOD_PROXY[0]:
+                  res = try_one_proxy(GOOD_PROXY[0], url, headers)
+                  if res:
+                      return res
+              res = try_one_proxy(None, url, headers)
+              if res:
+                  return res
+              try:
+                  with ThreadPoolExecutor(max_workers=25) as ex:
+                      futs = [ex.submit(try_one_proxy, p, url, headers) for p in PROXIES[:60]]
+                      for fut in as_completed(futs, timeout=12):
+                          r = fut.result()
+                          if r:
+                              GOOD_PROXY[0] = r[4]
+                              for of in futs:
+                                  of.cancel()
+                              return r
+              except Exception:
+                  pass
               return 0, "", "", {}, None
 
           ep_ref = "https://w1.anime4up.rest/episode/%d8%a7%d9%86%d9%85%d9%8a-tokyo-revengers-santen-sensou-hen-%d8%a7%d9%84%d8%ad%d9%84%d9%82%d8%a9-4-%d9%85%d8%aa%d8%b1%d8%ac%d9%85%d8%a9/"
