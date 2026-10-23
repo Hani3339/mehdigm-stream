@@ -1,0 +1,314 @@
+name: Inspect Shahid4u Live Architecture & Providers
+
+on:
+  push:
+    branches:
+      - arena/67b3a643-mehdigm-stream
+
+permissions:
+  contents: write
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: arena/67b3a643-mehdigm-stream
+
+      - name: Inspect shaahidd4u.net pages, JS, watch/resolve, download redirects & sub-hosts
+        run: |
+          pip install -q requests beautifulsoup4 curl_cffi
+          mkdir -p .tmp_s4u/hosts .tmp_s4u/js
+          python3 - <<'PY'
+          import json, os, re, time, urllib.parse, uuid
+          import requests
+          from bs4 import BeautifulSoup
+          from curl_cffi import requests as creq
+
+          BASE = "https://shaahidd4u.net"
+          UA = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+
+          report = {
+              "plain_requests_home": {},
+              "cffi_pages": {},
+              "site_scripts": [],
+              "watch_ep_servers": [],
+              "watch_film_servers": [],
+              "watch_umur_servers": [],
+              "download_ep_targets": [],
+              "download_film_targets": [],
+              "probed_hosts": {},
+          }
+
+          # 1. Test plain requests (OkHttp-equivalent TLS) on homepage first
+          try:
+              r0 = requests.get(
+                  BASE + "/",
+                  headers={"User-Agent": UA, "Accept": "text/html,application/xhtml+xml,*/*;q=0.8", "Accept-Language": "ar-EG,ar;q=0.9,en;q=0.8"},
+                  timeout=15,
+              )
+              report["plain_requests_home"] = {
+                  "status": r0.status_code,
+                  "len": len(r0.text),
+                  "server": r0.headers.get("Server"),
+                  "cf_mitigated": r0.headers.get("cf-mitigated"),
+                  "title": re.findall(r"<title>(.*?)</title>", r0.text, re.S)[:1],
+              }
+          except Exception as e:
+              report["plain_requests_home"] = {"error": repr(e)}
+
+          sess = creq.Session(impersonate="chrome124")
+
+          def safe_url(u: str) -> str:
+              p = urllib.parse.urlsplit(u)
+              path = urllib.parse.quote(urllib.parse.unquote(p.path), safe="/%")
+              query = urllib.parse.quote_plus(urllib.parse.unquote_plus(p.query), safe="=&%")
+              return urllib.parse.urlunsplit((p.scheme, p.netloc, path, query, p.fragment))
+
+          def get_page(url: str, save_as: str = None, referer: str = BASE + "/"):
+              time.sleep(0.55)
+              su = safe_url(url)
+              r = sess.get(
+                  su,
+                  headers={
+                      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                      "Accept-Language": "ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7",
+                      "Referer": safe_url(referer),
+                  },
+                  timeout=20,
+              )
+              if save_as:
+                  with open(f".tmp_s4u/{save_as}", "w", encoding="utf-8") as fh:
+                      fh.write(r.text)
+              report["cffi_pages"][save_as or url] = {"status": r.status_code, "len": len(r.text), "final_url": str(r.url)}
+              return r
+
+          # Fetch Homepage, Category p2, Search
+          home_r = get_page(BASE + "/", "homepage.html")
+          get_page(BASE + "/category/افلام-اجنبي?page=2", "category_p2.html")
+          get_page(BASE + "/search?s=tulsa", "search_tulsa.html")
+
+          # Series / Season / Episode pages
+          ep_slug = "مسلسل-tulsa-king-الموسم-الرابع-الحلقة-1-مترجمة"
+          umur_slug = "مسلسل-المعلمة-اومور-الموسم-الاول-الحلقة-4-مترجمة"
+          film_slug = "فيلم-rise-of-the-footsoldier-retribution-2026-مترجم"
+
+          ep_r = get_page(f"{BASE}/episode/{ep_slug}", "ep_tulsa.html")
+          get_page(f"{BASE}/season/مسلسل-tulsa-king-الموسم-الثالث-مترجم", "season_tulsa_s3.html", f"{BASE}/episode/{ep_slug}")
+          # Check if there is a /series/ link in ep_tulsa.html
+          m_ser = re.search(r'href=["\'](https?://[^"\']+/series/[^"\']+|/series/[^"\']+)["\']', ep_r.text)
+          if m_ser:
+              ser_u = urllib.parse.urljoin(BASE, m_ser.group(1))
+              get_page(ser_u, "series_tulsa.html", f"{BASE}/episode/{ep_slug}")
+
+          get_page(f"{BASE}/episode/{umur_slug}", "ep_umur.html")
+          get_page(f"{BASE}/film/{film_slug}", "film_footsoldier.html")
+
+          # Watch pages
+          w_ep_r = get_page(f"{BASE}/watch/{ep_slug}", "watch_ep.html", f"{BASE}/episode/{ep_slug}")
+          w_film_r = get_page(f"{BASE}/watch/{film_slug}", "watch_film.html", f"{BASE}/film/{film_slug}")
+          w_umur_r = get_page(f"{BASE}/watch/{umur_slug}", "watch_umur.html", f"{BASE}/episode/{umur_slug}")
+
+          # Save same-site JS scripts from watch_ep.html
+          soup_w = BeautifulSoup(w_ep_r.text, "html.parser")
+          for idx, sc in enumerate(soup_w.find_all("script", src=True)):
+              src = sc["src"]
+              full_src = urllib.parse.urljoin(BASE, src)
+              if "shaahidd4u" in full_src or src.startswith("/"):
+                  time.sleep(0.35)
+                  jr = sess.get(safe_url(full_src), headers={"Referer": safe_url(f"{BASE}/watch/{ep_slug}")}, timeout=15)
+                  fn = f"js/script_{idx}_{os.path.basename(urllib.parse.urlsplit(full_src).path) or 'inline.js'}"
+                  with open(f".tmp_s4u/{fn}", "w", encoding="utf-8") as fh:
+                      fh.write(jr.text)
+                  report["site_scripts"].append({"url": full_src, "status": jr.status_code, "len": len(jr.text), "file": fn})
+
+          def is_hidden_el(el):
+              if el.get("tabindex") == "-1":
+                  return True
+              cur = el
+              while cur is not None and hasattr(cur, "attrs") and cur.attrs is not None:
+                  if cur.has_attr("hidden"):
+                      return True
+                  if str(cur.get("aria-hidden", "")).lower() == "true":
+                      return True
+                  st = str(cur.get("style", "")).replace(" ", "").lower()
+                  if "display:none" in st or "visibility:hidden" in st:
+                      return True
+                  if cur.name == "template":
+                      return True
+                  cur = cur.parent
+              return False
+
+          def is_canary_srv(name: str, rank: int, url: str) -> bool:
+              if rank >= 900000 or rank < 0:
+                  return True
+              ln = (name or "").lower()
+              if any(x in ln for x in ["backup", "mirror", "cdn player", "canary", "trap", "test", "bot"]):
+                  return True
+              lu = (url or "").lower()
+              return any(x in lu for x in ["/media/watch/", "/media/api/", "/media/page/"])
+
+          def follow_m_once(m_url: str, ref: str):
+              if "shaahidd4u.net/m/" not in m_url:
+                  return m_url
+              time.sleep(0.45)
+              rr = sess.get(
+                  safe_url(m_url),
+                  headers={"Referer": safe_url(ref)},
+                  allow_redirects=False,
+                  timeout=15,
+              )
+              loc = rr.headers.get("Location") or rr.headers.get("location")
+              return {"status": rr.status_code, "location": loc}
+
+          def resolve_watch_all(html: str, watch_url: str):
+              out = []
+              m_srv = re.search(r'(?:const|let|var)\s+servers\s*=\s*(\[[\s\S]*?\])\s*;', html)
+              m_key = re.search(r'watchResolveKey\s*=\s*["\']([^"\']+)["\']', html)
+              m_csrf = re.search(r'csrfToken\s*=\s*["\']([^"\']+)["\']', html) or re.search(r'<meta\s+name=["\']csrf-token["\']\s+content=["\']([^"\']+)["\']', html)
+              m_res = re.search(r'resolveUrl\s*=\s*["\']([^"\']+)["\']', html)
+              if not (m_srv and m_key and m_csrf):
+                  return [{"error": "missing_vars", "srv": bool(m_srv), "key": bool(m_key), "csrf": bool(m_csrf)}]
+              srvs = json.loads(m_srv.group(1).replace("\\/", "/"))
+              key = m_key.group(1)
+              csrf = m_csrf.group(1)
+              res_url = urllib.parse.urljoin(BASE, m_res.group(1).replace("\\/", "/")) if m_res else f"{BASE}/watch/resolve"
+              fp_id = str(uuid.uuid4())
+              for idx, s in enumerate(srvs):
+                  name = s.get("name", f"s{idx}")
+                  rank = int(s.get("rank", idx))
+                  tok = s.get("resolve_token", "")
+                  u0 = s.get("url") or s.get("src") or ""
+                  if is_canary_srv(name, rank, u0):
+                      out.append({"name": name, "rank": rank, "skipped_canary": True, "raw": s})
+                      continue
+                  if not tok:
+                      out.append({"name": name, "rank": rank, "direct_in_obj": s})
+                      continue
+                  time.sleep(0.5)
+                  pr = sess.post(
+                      safe_url(res_url),
+                      headers={
+                          "Accept": "application/json, text/plain, */*",
+                          "Content-Type": "application/json",
+                          "X-CSRF-TOKEN": csrf,
+                          "X-Requested-With": "XMLHttpRequest",
+                          "X-FP-Event-ID": fp_id,
+                          "Origin": BASE,
+                          "Referer": safe_url(watch_url),
+                      },
+                      data=json.dumps({"key": key, "token": tok, "human_signal": None}),
+                      timeout=15,
+                  )
+                  try:
+                      pj = pr.json()
+                  except Exception:
+                      pj = {"raw_text": pr.text[:300]}
+                  target = pj.get("url") if isinstance(pj, dict) else None
+                  final_target = None
+                  if target:
+                      abs_t = urllib.parse.urljoin(BASE, target)
+                      final_target = follow_m_once(abs_t, watch_url)
+                  out.append({
+                      "name": name,
+                      "rank": rank,
+                      "post_status": pr.status_code,
+                      "resp": pj,
+                      "final_target": final_target,
+                  })
+              return out
+
+          report["watch_ep_servers"] = resolve_watch_all(w_ep_r.text, f"{BASE}/watch/{ep_slug}")
+          report["watch_film_servers"] = resolve_watch_all(w_film_r.text, f"{BASE}/watch/{film_slug}")
+          # Just parse server names on watch_umur without extra POSTs unless new server name appears
+          m_u = re.search(r'(?:const|let|var)\s+servers\s*=\s*(\[[\s\S]*?\])\s*;', w_umur_r.text)
+          if m_u:
+              report["watch_umur_servers"] = json.loads(m_u.group(1).replace("\\/", "/"))
+
+          # Download pages
+          dl_ep_r = get_page(f"{BASE}/download/{ep_slug}", "download_ep.html", f"{BASE}/episode/{ep_slug}")
+          dl_film_r = get_page(f"{BASE}/download/{film_slug}", "download_film.html", f"{BASE}/film/{film_slug}")
+
+          def inspect_download(html: str, dl_url: str, max_follow: int = 20):
+              sp = BeautifulSoup(html, "html.parser")
+              items = []
+              seen_hosts = set()
+              followed = 0
+              for a in sp.select("div.down-container a.btn-down[href], a.btn-down[href]"):
+                  hid = is_hidden_el(a)
+                  el_id = a.get("id", "")
+                  href = urllib.parse.urljoin(BASE, a.get("href", ""))
+                  txt = " ".join(a.stripped_strings)
+                  span_name = a.select_one(".info span")
+                  sname = span_name.get_text(strip=True) if span_name else txt
+                  if hid or el_id == "download-primary-server" or "/media/" in href.lower():
+                      items.append({"name": sname, "text": txt, "id": el_id, "skipped_trap": True})
+                      continue
+                  base_prov = re.sub(r'[^a-zA-Z0-9]+', '', sname.lower())
+                  loc_info = None
+                  if followed < max_follow and base_prov not in seen_hosts:
+                      seen_hosts.add(base_prov)
+                      followed += 1
+                      loc_info = follow_m_once(href, dl_url)
+                  items.append({"name": sname, "text": txt, "href": href, "resolved": loc_info})
+              return items
+
+          report["download_ep_targets"] = inspect_download(dl_ep_r.text, f"{BASE}/download/{ep_slug}", max_follow=18)
+          report["download_film_targets"] = inspect_download(dl_film_r.text, f"{BASE}/download/{film_slug}", max_follow=18)
+
+          # Collect distinct external URLs to probe their HTML/player
+          ext_urls = []
+          for entry in report["watch_ep_servers"] + report["watch_film_servers"]:
+              ft = entry.get("final_target")
+              u = ft.get("location") if isinstance(ft, dict) else (ft if isinstance(ft, str) else None)
+              if u and u.startswith("http"):
+                  ext_urls.append(("watch_" + entry.get("name", "unk"), u))
+          for entry in report["download_ep_targets"] + report["download_film_targets"]:
+              rs = entry.get("resolved")
+              u = rs.get("location") if isinstance(rs, dict) else None
+              if u and u.startswith("http"):
+                  ext_urls.append(("dl_" + entry.get("name", "unk"), u))
+
+          seen_domains = set()
+          for tag, eu in ext_urls:
+              dom = urllib.parse.urlsplit(eu).netloc.lower()
+              key_dom = dom.replace("www.", "")
+              if key_dom in seen_domains:
+                  continue
+              seen_domains.add(key_dom)
+              try:
+                  pr = requests.get(
+                      eu,
+                      headers={"User-Agent": UA, "Referer": BASE + "/"},
+                      timeout=15,
+                  )
+                  safe_tag = re.sub(r'[^a-zA-Z0-9_.-]+', '_', f"{tag}_{key_dom}")[:60]
+                  with open(f".tmp_s4u/hosts/{safe_tag}.html", "w", encoding="utf-8") as fh:
+                      fh.write(pr.text[:250000])
+                  report["probed_hosts"][safe_tag] = {
+                      "input_url": eu,
+                      "final_url": pr.url,
+                      "status": pr.status_code,
+                      "len": len(pr.text),
+                  }
+              except Exception as exc:
+                  report["probed_hosts"][key_dom] = {"input_url": eu, "error": repr(exc)}
+
+          with open(".tmp_s4u/report.json", "w", encoding="utf-8") as fh:
+              json.dump(report, fh, indent=2, ensure_ascii=False)
+          print("DONE! Probed hosts:", list(report["probed_hosts"].keys()))
+          PY
+
+      - name: Commit inspection results
+        if: always()
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add -f .tmp_s4u/ || true
+          git commit --allow-empty -m "chore: inspect shaahidd4u live pages & providers [skip ci]"
+          git pull --rebase origin arena/67b3a643-mehdigm-stream || true
+          git push origin arena/67b3a643-mehdigm-stream
