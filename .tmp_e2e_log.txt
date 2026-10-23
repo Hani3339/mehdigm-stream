@@ -1,0 +1,7 @@
+Good proxies: 9
+Homepage cards: 50
+Selected Episode: مسلسل Chicago PD الموسم 14 الحلقة 3 مترجمة https://shaahidd4u.net/episode/مسلسل-chicago-pd-الموسم-14-الحلقة-3-مترجمة
+Selected Movie: فيلم The Intern 2026 مترجم اون لاين https://shaahidd4u.net/film/فيلم-the-intern-2026-مترجم-اون-لاين
+Watch resolve err: Failed to perform, curl: (28) Operation timed out after 12001 milliseconds with 0 bytes received. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+Watch resolve err: Failed to perform, curl: (28) Operation timed out after 14001 milliseconds with 0 bytes received. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+Watch resolve err: Failed to perform, curl: (28) Operation timed out after 14003 milliseconds with 0 bytes received. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
