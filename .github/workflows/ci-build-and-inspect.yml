@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  build-and-inspect:
+  inspect-providers:
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     runs-on: ubuntu-latest
     steps:
@@ -19,88 +19,25 @@ jobs:
           ref: ${{ github.ref_name }}
           fetch-depth: 0
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-          cache: 'gradle'
+      - name: Install Python curl_cffi
+        run: pip install curl_cffi
 
-      - name: Ensure Android SDK & Licenses
-        run: |
-          if [ -z "${ANDROID_HOME:-}" ] || [ ! -d "${ANDROID_HOME:-}" ]; then
-            export ANDROID_HOME="$HOME/android-sdk"
-            mkdir -p "$ANDROID_HOME/cmdline-tools"
-            curl -fsSL https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -o /tmp/cmdline.zip
-            unzip -q /tmp/cmdline.zip -d "$ANDROID_HOME/cmdline-tools"
-            mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
-            echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
-            echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
-          fi
-          SDKMGR="$(find "$ANDROID_HOME" -name sdkmanager | head -n 1)"
-          if [ -n "$SDKMGR" ]; then
-            yes | "$SDKMGR" --licenses > /dev/null || true
-          fi
-
-      - name: Build Cimawbas with ./gradlew :Cimawbas:make
-        run: |
-          chmod +x gradlew
-          ./gradlew :Cimawbas:clean :Cimawbas:make | tee .tmp_cimawbas_build.log
-          ls -lh Cimawbas/build/Cimawbas.cs3
-          cp Cimawbas/build/Cimawbas.cs3 build/Cimawbas.cs3
-
-      - name: Install Python curl_cffi & bs4
-        run: pip install curl_cffi beautifulsoup4
-
-      - name: Deep Inspect Anime4Up HTML, JS & Servers
+      - name: Inspect Home8, Black Clover Ep3, VnxPlayer, Workupload, GoFile, MediaFire
         run: |
           python3 - << 'PYEOF'
-          import os, re, json, base64, urllib.parse
+          import os, re, json
           from concurrent.futures import ThreadPoolExecutor, as_completed
           from curl_cffi import requests as creq
-          from bs4 import BeautifulSoup
 
-          os.makedirs(".tmp_inspect/js", exist_ok=True)
-          os.makedirs(".tmp_inspect/snippets", exist_ok=True)
+          os.makedirs(".tmp_inspect/v2", exist_ok=True)
+          TEST_URL = "https://w1.anime4up.rest/home8/"
 
-          TEST_URL = "https://w1.anime4up.rest/anime/naruto-shippuuden-sgtfr/"
+          def is_valid_a4u(t):
+              return bool(t and len(t) > 1500 and "just a moment" not in t.lower() and "anime4up" in t.lower())
 
-          def is_valid_html(text):
-              if not text or len(text) < 1500:
-                  return False
-              low = text.lower()
-              if "just a moment" in low or "cf-browser-verification" in low or "<title>attention required" in low:
-                  return False
-              return "anime4up" in low or "naruto" in low or "حلقة" in text
-
-          def try_fetch_once(url, proxy=None, timeout=15, method="GET", data=None, extra_headers=None):
-              headers = {
-                  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                  "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
-                  "Referer": "https://w1.anime4up.rest/",
-              }
-              if extra_headers:
-                  headers.update(extra_headers)
-              proxies = {"http": proxy, "https": proxy} if proxy else None
-              if method == "POST":
-                  r = creq.post(url, data=data, headers=headers, proxies=proxies, impersonate="chrome124", timeout=timeout, allow_redirects=True)
-              else:
-                  r = creq.get(url, headers=headers, proxies=proxies, impersonate="chrome124", timeout=timeout, allow_redirects=True)
-              return r.status_code, r.text, str(r.url)
-
-          working_proxies = [None]
-          direct_ok = False
-          direct_status = None
-          try:
-              code, txt, final_u = try_fetch_once(TEST_URL, None, timeout=15)
-              direct_status = code
-              if code == 200 and is_valid_html(txt):
-                  direct_ok = True
-          except Exception as e:
-              direct_status = str(e)
-
+          # Collect multiple working proxies so no single proxy drops mid-run
           PROXY_SOURCES = [
-              ("http", "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=7000&country=all&ssl=yes&anonymity=all"),
+              ("http", "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=6000&country=all&ssl=yes&anonymity=all"),
               ("http", "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt"),
               ("socks5", "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt"),
               ("http", "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt"),
@@ -108,96 +45,141 @@ jobs:
               ("http", "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/https.txt"),
               ("socks5", "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt"),
           ]
+          candidates, seen = [], set()
+          for proto, src in PROXY_SOURCES:
+              try:
+                  r = creq.get(src, timeout=8)
+                  if r.status_code == 200:
+                      for ln in r.text.splitlines()[:160]:
+                          ln = ln.strip()
+                          if ":" in ln and not ln.startswith("#"):
+                              p = ln if "://" in ln else f"{proto}://{ln}"
+                              if p not in seen:
+                                  seen.add(p)
+                                  candidates.append(p)
+              except Exception:
+                  pass
 
-          if not direct_ok:
-              candidates, seen = [], set()
-              for proto, src in PROXY_SOURCES:
+          good_proxies = []
+          def test_p(p):
+              try:
+                  r = creq.get(TEST_URL, proxies={"http": p, "https": p}, impersonate="chrome124", timeout=9)
+                  if r.status_code == 200 and is_valid_a4u(r.text):
+                      return p, r.text
+              except Exception:
+                  pass
+              return None
+
+          home8_cached = ""
+          with ThreadPoolExecutor(max_workers=50) as ex:
+              futs = [ex.submit(test_p, p) for p in candidates[:500]]
+              for fut in as_completed(futs):
+                  res = fut.result()
+                  if res:
+                      p, txt = res
+                      good_proxies.append(p)
+                      if not home8_cached:
+                          home8_cached = txt
+                      if len(good_proxies) >= 8:
+                          break
+
+          print("Good proxies:", good_proxies)
+          if home8_cached:
+              with open(".tmp_inspect/v2/home8.html", "w", encoding="utf-8") as f:
+                  f.write(home8_cached)
+
+          def a4u_get(url):
+              for p in [None] + good_proxies:
                   try:
-                      r = creq.get(src, timeout=10)
-                      if r.status_code == 200:
-                          for ln in r.text.splitlines()[:150]:
-                              ln = ln.strip()
-                              if ":" in ln and not ln.startswith("#"):
-                                  p = ln if "://" in ln else f"{proto}://{ln}"
-                                  if p not in seen:
-                                      seen.add(p)
-                                      candidates.append(p)
-                  except Exception:
-                      pass
-
-              good = []
-              def check_proxy(p):
-                  try:
-                      c, t, _ = try_fetch_once(TEST_URL, p, timeout=10)
-                      if c == 200 and is_valid_html(t):
-                          return p
-                  except Exception:
-                      pass
-                  return None
-
-              with ThreadPoolExecutor(max_workers=40) as ex:
-                  futs = [ex.submit(check_proxy, p) for p in candidates[:400]]
-                  for fut in as_completed(futs):
-                      res = fut.result()
-                      if res:
-                          good.append(res)
-                          if len(good) >= 5:
-                              break
-              working_proxies = good if good else [None]
-
-          def smart_get(url, extra_headers=None):
-              for p in working_proxies:
-                  try:
-                      c, t, u = try_fetch_once(url, p, timeout=20, extra_headers=extra_headers)
-                      if c == 200 and len(t) > 200 and "just a moment" not in t.lower():
-                          return t
+                      prx = {"http": p, "https": p} if p else None
+                      r = creq.get(url, headers={"Referer": "https://w1.anime4up.rest/", "Accept-Language": "ar,en-US;q=0.9"}, proxies=prx, impersonate="chrome124", timeout=15)
+                      if r.status_code == 200 and is_valid_a4u(r.text):
+                          return r.text
                   except Exception:
                       pass
               return ""
 
-          PAGES = {
-              "home8.html": "https://w1.anime4up.rest/home8/",
-              "anime_list.html": "https://w1.anime4up.rest/%d9%82%d8%a7%d8%a6%d9%85%d8%a9-%d8%a7%d9%84%d8%a7%d9%86%d9%85%d9%8a/",
-              "dubbed_list.html": "https://w1.anime4up.rest/anime-category/%d8%a7%d9%84%d8%a7%d9%86%d9%85%d9%8a-%d8%a7%d9%84%d9%85%d8%af%d8%a8%d9%84%d8%ac/",
-              "search_naruto.html": "https://w1.anime4up.rest/?search_param=animes&s=naruto",
-              "naruto_shippuuden.html": "https://w1.anime4up.rest/anime/naruto-shippuuden-sgtfr/",
-              "naruto_shippuuden_p2.html": "https://w1.anime4up.rest/anime/naruto-shippuuden-sgtfr/page/2/",
-              "naruto_ep500.html": "https://w1.anime4up.rest/episode/naruto-shippuuden-%d8%a7%d9%84%d8%ad%d9%84%d9%82%d8%a9-500-%d9%88%d8%a7%d9%84%d8%a7%d8%ae%d9%8a%d8%b1%d8%a9/",
-              "black_clover_s2.html": "https://w1.anime4up.rest/anime/black-clover-2nd-season/",
-              "black_clover_s2_ep3.html": "https://w1.anime4up.rest/episode/%d8%a7%d9%86%d9%85%d9%8a-black-clover-2nd-season-%d8%a7%d9%84%d8%ad%d9%84%d9%82%d8%a9-3-%d9%85%d8%aa%d8%b1%d8%ac%d9%85%d8%a9/",
-              "naruto_movie1.html": "https://w1.anime4up.rest/anime/naruto-movie-1-dai-katsugeki-yuki-hime-ninpouchou-dattebayo/",
-              "naruto_movie1_ep.html": "https://w1.anime4up.rest/episode/%d9%81%d9%8a%d9%84%d9%85-naruto-movie-1-dai-katsugeki-yuki-hime-ninpouchou-dattebayo/",
+          for fname, u in [
+              ("black_clover_s2_ep3.html", "https://w1.anime4up.rest/episode/%d8%a7%d9%86%d9%85%d9%8a-black-clover-2nd-season-%d8%a7%d9%84%d8%ad%d9%84%d9%82%d8%a9-3-%d9%85%d8%aa%d8%b1%d8%ac%d9%85%d8%a9/"),
+              ("search_naruto.html", "https://w1.anime4up.rest/?search_param=animes&s=naruto"),
+          ]:
+              h = a4u_get(u)
+              print(f"{fname}: {len(h)} bytes")
+              with open(f".tmp_inspect/v2/{fname}", "w", encoding="utf-8") as f:
+                  f.write(h)
+
+          # Now test VnxPlayer (Anime4up-S1 & Anime4up-S2) WITH Referer: https://w1.anime4up.rest/
+          vnx_headers = {
+              "Referer": "https://w1.anime4up.rest/",
+              "Sec-Fetch-Dest": "iframe",
+              "Sec-Fetch-Mode": "navigate",
+              "Sec-Fetch-Site": "cross-site",
+              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
           }
+          for vname, vurl in [
+              ("vnx_naruto_s1.html", "https://4x.c1oiijc.shop/Anime4up-S1/mal/1735/500/sub/"),
+              ("vnx_naruto_s2.html", "https://4x.c1oiijc.shop/Anime4up-S2/mal/1735/500/sub/"),
+              ("vnx_bc_s1.html", "https://4x.c1oiijc.shop/Anime4up-S1/mal/61967/3/sub/"),
+              ("vnx_bc_s2.html", "https://4x.c1oiijc.shop/Anime4up-S2/mal/61967/3/sub/"),
+          ]:
+              for p in [None] + good_proxies[:3]:
+                  try:
+                      prx = {"http": p, "https": p} if p else None
+                      r = creq.get(vurl, headers=vnx_headers, proxies=prx, impersonate="chrome124", timeout=15)
+                      print(f"{vname} via {p}: status={r.status_code} len={len(r.text)} url={r.url}")
+                      if r.status_code == 200 and len(r.text) > 100:
+                          with open(f".tmp_inspect/v2/{vname}", "w", encoding="utf-8") as f:
+                              f.write(f"<!-- FINAL_URL: {r.url} -->\n" + r.text)
+                          break
+                  except Exception as e:
+                      print(f"{vname} err: {e}")
 
-          js_urls = set()
-          summary = {"direct_ok": direct_ok, "direct_status": direct_status, "working_proxies": working_proxies, "pages": {}}
+          # Test Workupload direct download API
+          wu_report = {}
+          try:
+              s = creq.Session(impersonate="chrome124")
+              r1 = s.get("https://workupload.com/file/bZQrCGgNJQy", timeout=12)
+              r2 = s.get("https://workupload.com/start/bZQrCGgNJQy", headers={"Referer": "https://workupload.com/file/bZQrCGgNJQy"}, timeout=12)
+              r3 = s.get("https://workupload.com/api/file/getDownloadServer/bZQrCGgNJQy", headers={"Referer": "https://workupload.com/start/bZQrCGgNJQy", "X-Requested-With": "XMLHttpRequest"}, timeout=12)
+              wu_report = {"r1": r1.status_code, "r2": r2.status_code, "r3_status": r3.status_code, "r3_body": r3.text[:1000], "cookies": dict(s.cookies)}
+          except Exception as e:
+              wu_report = {"err": str(e)}
 
-          for fname, url in PAGES.items():
-              html = smart_get(url)
-              summary["pages"][fname] = len(html)
-              with open(f".tmp_inspect/snippets/{fname}", "w", encoding="utf-8") as f:
-                  f.write(html)
-              if html:
-                  soup = BeautifulSoup(html, "html.parser")
-                  for sc in soup.find_all("script", src=True):
-                      src = sc["src"]
-                      if "wp-content/themes" in src or ("anime4up" in src and "wp-includes" not in src):
-                          js_urls.add(urllib.parse.urljoin(url, src))
+          # Test GoFile API
+          gf_report = {}
+          try:
+              s = creq.Session(impersonate="chrome124")
+              acc = s.post("https://api.gofile.io/accounts", timeout=12).json()
+              tok = acc.get("data", {}).get("token", "")
+              # Also check global.js for wt token
+              gjs = s.get("https://gofile.io/dist/js/config.js", timeout=10)
+              if gjs.status_code != 200:
+                  gjs = s.get("https://gofile.io/dist/js/global.js", timeout=10)
+              wt_m = re.search(r'wt\s*[:=]\s*["\']([^"\']+)["\']', gjs.text) if gjs.status_code == 200 else None
+              wt = wt_m.group(1) if wt_m else "4fd6sg89d7s6"
+              cnt = s.get(f"https://api.gofile.io/contents/Ea141JHv?wt={wt}", headers={"Authorization": f"Bearer {tok}", "X-Website-Token": wt}, timeout=12)
+              gf_report = {"token_ok": bool(tok), "wt": wt, "cnt_status": cnt.status_code, "cnt_body": cnt.text[:1500]}
+          except Exception as e:
+              gf_report = {"err": str(e)}
 
-          for idx, jurl in enumerate(sorted(js_urls)):
-              jtxt = smart_get(jurl)
-              safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", jurl.split("/")[-1].split("?")[0]) or f"script_{idx}.js"
-              with open(f".tmp_inspect/js/{idx:02d}_{safe_name}", "w", encoding="utf-8") as f:
-                  f.write(f"// URL: {jurl}\n" + jtxt)
+          # Test MediaFire direct extraction
+          mf_report = {}
+          try:
+              rmf = creq.get("https://www.mediafire.com/file/a7nxsp84rbvukf9", impersonate="chrome124", timeout=12)
+              m1 = re.search(r'href="(https?://download\d+\.mediafire\.com/[^"]+)"', rmf.text)
+              m2 = re.search(r'data-scrambled-url="([^"]+)"', rmf.text)
+              mf_report = {"status": rmf.status_code, "direct": m1.group(1) if m1 else None, "scrambled": m2.group(1) if m2 else None}
+          except Exception as e:
+              mf_report = {"err": str(e)}
 
-          with open(".tmp_inspect/summary.json", "w", encoding="utf-8") as f:
-              json.dump(summary, f, indent=2, ensure_ascii=False)
+          with open(".tmp_inspect/v2/providers_report.json", "w", encoding="utf-8") as f:
+              json.dump({"good_proxies": good_proxies, "workupload": wu_report, "gofile": gf_report, "mediafire": mf_report}, f, indent=2, ensure_ascii=False)
           PYEOF
 
-      - name: Commit build & inspect results back to branch
+      - name: Commit v2 inspect results
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add -f build/Cimawbas.cs3 .tmp_cimawbas_build.log .tmp_inspect/
-          git commit -m "chore: attach Cimawbas build and Anime4Up inspection [skip ci]"
+          git add -f .tmp_inspect/v2/
+          git commit -m "chore: attach v2 provider inspection [skip ci]"
           git push origin "${{ github.ref_name }}"
