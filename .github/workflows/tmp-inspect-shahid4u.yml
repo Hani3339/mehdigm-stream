@@ -96,7 +96,7 @@ jobs:
           sess = make_session(good_proxies[0])
 
           def get_page(url: str, save_as: str, ref: str = BASE + "/"):
-              nonlocal sess
+              global sess
               for attempt_idx in range(len(good_proxies)):
                   time.sleep(0.45)
                   try:
