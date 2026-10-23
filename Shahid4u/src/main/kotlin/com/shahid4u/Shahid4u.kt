@@ -77,6 +77,16 @@ class Shahid4u : MainAPI() {
         ConcurrentHashMap<String, MutableMap<String, String>>()
 
     private val jsonMediaType = "application/json".toMediaType()
+    private val fpEventId by lazy { java.util.UUID.randomUUID().toString() }
+
+    init {
+        // استرجاع جلسة Cloudflare المحفوظة حتى لا نبدأ من الصفر في كل تشغيل.
+        val domain = cookieDomain(mainUrl)
+        val saved = Shahid4uStore.loadCookies(domain)
+        if (saved.isNotEmpty()) {
+            cookieStore.getOrPut(domain) { ConcurrentHashMap() }.putAll(saved)
+        }
+    }
 
     private data class ServerEntry(
         val name: String,
@@ -101,29 +111,58 @@ class Shahid4u : MainAPI() {
 
     private fun isFresh(at: Long, ttl: Long) = now() - at in 0 until ttl
 
-    private fun ua() = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    private fun ua(): String =
+        Shahid4uStore.deviceUserAgent()
+            ?: "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+
+    private fun chromeMajor(): String =
+        Regex("""Chrome/(\d+)""").find(ua())?.groupValues?.get(1) ?: "131"
+
+    private fun secChUa(): String =
+        "\"Chromium\";v=\"${chromeMajor()}\", \"Google Chrome\";v=\"${chromeMajor()}\", " +
+                "\"Not_A Brand\";v=\"24\""
+
+    private fun secChMobile(): String =
+        if (ua().contains("Mobile", true)) "?1" else "?0"
 
     /** ترميز آمن لقيم الترويسات (Referer قد يحتوي عربياً). */
     private fun headerSafe(url: String): String =
         runCatching { URI(url).toASCIIString() }.getOrDefault(url)
 
-    private fun browserHeaders(referer: String? = null): Map<String, String> = mapOf(
-        "User-Agent" to ua(),
-        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9," +
-                "image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language" to "ar,en-US;q=0.9,en;q=0.8",
-        "Referer" to headerSafe(referer ?: mainUrl),
-        "Sec-Fetch-Site" to "same-origin",
-        "Sec-Fetch-Mode" to "navigate",
-        "Sec-Fetch-Dest" to "document",
-        "Upgrade-Insecure-Requests" to "1"
-    )
+    private fun browserHeaders(referer: String? = null): Map<String, String> = buildMap {
+        put("User-Agent", ua())
+        put(
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9," +
+                    "image/avif,image/webp,image/apng,*/*;q=0.8," +
+                    "application/signed-exchange;v=b3;q=0.7"
+        )
+        put("Accept-Language", "ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7")
+        put("Cache-Control", "max-age=0")
+        put("Upgrade-Insecure-Requests", "1")
+        put("Sec-Fetch-Mode", "navigate")
+        put("Sec-Fetch-User", "?1")
+        put("Sec-Fetch-Dest", "document")
+        put(
+            "sec-ch-ua",
+            secChUa()
+        )
+        put("sec-ch-ua-mobile", secChMobile())
+        put("sec-ch-ua-platform", "\"Android\"")
+        if (referer != null) {
+            put("Referer", headerSafe(referer))
+            put("Sec-Fetch-Site", "same-origin")
+        } else {
+            put("Sec-Fetch-Site", "none")
+        }
+    }
 
     private fun posterHeaders(): Map<String, String> = mapOf(
         "User-Agent" to ua(),
         "Referer" to headerSafe(mainUrl),
-        "Accept" to "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"
+        "Accept" to "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        "Accept-Language" to "ar-EG,ar;q=0.9,en;q=0.8"
     )
 
     private fun makeAbsoluteUrl(url: String?): String? {
@@ -149,6 +188,43 @@ class Shahid4u : MainAPI() {
         return host == mainHost || host.endsWith(".$mainHost")
     }
 
+    /**
+     * الموقع يضيف في كل صفحة رابط canary مخفياً:
+     * <a href="/m/<64-hex>" hidden aria-hidden="true" tabindex="-1"
+     *    rel="nofollow" style="display:none!important">Server</a>
+     * أي بوت يتبعه يُسجَّل ويُحظر. نرفض أي عنصر مخفي أو داخل <template>.
+     */
+    private fun isHiddenElement(element: Element): Boolean {
+        // tabindex=-1 على الرابط نفسه فقط؛ بعض الحاويات الشرعية تستخدمه أيضاً.
+        if (element.attr("tabindex") == "-1") return true
+        var current: Element? = element
+        while (current != null) {
+            if (current.hasAttr("hidden")) return true
+            if (current.attr("aria-hidden").equals("true", true)) return true
+            val style = current.attr("style").replace(" ", "").lowercase()
+            if (style.contains("display:none") || style.contains("visibility:hidden")) return true
+            if (current.tagName().equals("template", true)) return true
+            current = current.parent()
+        }
+        return false
+    }
+
+    private fun isCanaryHref(href: String): Boolean {
+        val lower = href.lowercase()
+        return lower.contains("/media/watch/") ||
+                lower.contains("/media/api/") ||
+                lower.contains("/media/page/")
+    }
+
+    private fun isCanaryServer(name: String, rank: Int, url: String): Boolean {
+        if (rank >= 900_000 || rank < 0) return true
+        val lowerName = name.lowercase()
+        if (listOf("backup", "mirror", "cdn player", "canary", "trap", "test", "bot")
+                .any { lowerName.contains(it) }
+        ) return true
+        return isCanaryHref(url)
+    }
+
     private fun withPage(url: String, page: Int): String =
         if (page <= 1) url else "$url${if (url.contains('?')) '&' else '?'}page=$page"
 
@@ -159,17 +235,26 @@ class Shahid4u : MainAPI() {
 
     private fun rememberCookies(url: String, res: NiceResponse) {
         if (res.cookies.isEmpty()) return
-        cookieStore.getOrPut(cookieDomain(url)) { ConcurrentHashMap() }.putAll(res.cookies)
+        val domain = cookieDomain(url)
+        val store = cookieStore.getOrPut(domain) { ConcurrentHashMap() }
+        store.putAll(res.cookies)
+        // حفظ دائم: cf_clearance/__cf_bm يجب أن تبقى بين جلسات التطبيق.
+        Shahid4uStore.saveCookies(domain, store)
     }
 
     // =====================================================================
     // HTTP + Cloudflare + rate limiting
     // =====================================================================
 
-    private fun isChallenge(res: NiceResponse): Boolean {
+    private fun isBlockPage(body: String): Boolean =
+        body.contains("Sorry, you have been blocked", true) ||
+                body.contains("Attention Required", true) ||
+                body.contains("cf-error-details", true) ||
+                body.contains("You are unable to access", true)
+
+    private fun isChallenge(res: NiceResponse, body: String): Boolean {
         if (res.code != 403) return false
         if (res.headers["cf-mitigated"]?.contains("challenge", true) == true) return true
-        val body = runCatching { res.text }.getOrDefault("")
         return body.contains("Just a moment", true) ||
                 body.contains("challenge-platform", true) ||
                 body.contains("cf_chl_opt", true)
@@ -186,7 +271,7 @@ class Shahid4u : MainAPI() {
                 app.get(
                     url,
                     headers = browserHeaders(referer),
-                    referer = headerSafe(referer ?: mainUrl),
+                    referer = referer?.let { headerSafe(it) },
                     cookies = cookiesFor(url),
                     interceptor = cfInterceptor,
                     allowRedirects = allowRedirects,
@@ -202,25 +287,31 @@ class Shahid4u : MainAPI() {
         }
 
         rememberCookies(url, res)
+        val body = runCatching { res.text }.getOrDefault("")
 
         if (res.code == 429) {
-            SiteGate.penalize(false)
+            val retryAfter = res.headers["retry-after"]?.trim()?.toLongOrNull()
+            SiteGate.penalizeRateLimit(retryAfter)
             throw ErrorLoadingException(
                 "الموقع رفض الطلبات (429: تجاوز الحد). تم إيقاف الطلبات مؤقتاً لحماية الـIP."
             )
         }
-        if (isChallenge(res) || res.code == 403) {
-            val challenge = isChallenge(res)
-            SiteGate.penalize(challenge)
+
+        val challenge = isChallenge(res, body)
+        if (res.code == 403 || challenge) {
+            if (isBlockPage(body) || (res.code == 403 && !challenge)) {
+                SiteGate.penalizeBlocked()
+                throw ErrorLoadingException(
+                    "الموقع حظر الـIP عبر Cloudflare (403). تم إيقاف كل الطلبات 24 ساعة " +
+                            "لعدم إطالة الحظر. غيّر الشبكة/VPN ثم أعد المحاولة لاحقاً."
+                )
+            }
+            SiteGate.penalizeChallenge()
             throw ErrorLoadingException(
-                if (challenge) {
-                    "حماية Cloudflare رفضت الطلب. أعد المحاولة بعد دقيقتين."
-                } else {
-                    "الموقع رفض الطلب (403). غالباً حظر مؤقت للـIP بسبب حد الطلبات؛ " +
-                            "تم إيقاف الطلبات الآن. استخدم VPN أو انتظر انتهاء الحظر."
-                }
+                "حماية Cloudflare رفضت الطلب. تم إيقاف الطلبات 10 دقائق لحماية الـIP."
             )
         }
+
         if (res.code >= 400) {
             Log.w(logTag, "HTTP ${res.code} for $url")
             throw ErrorLoadingException("فشل الطلب (HTTP ${res.code}) على $url")
@@ -465,12 +556,29 @@ class Shahid4u : MainAPI() {
         return response
     }
 
+    private fun restoreSeries(
+        stored: List<Shahid4uStore.StoredEpisode>
+    ): List<com.lagradost.cloudstream3.Episode> =
+        stored.map { item ->
+            newEpisode(item.data) {
+                name = item.name
+                season = item.season
+                episode = item.episode
+                posterUrl = item.posterUrl
+            }
+        }
+
     private suspend fun collectSeriesEpisodes(
         seriesUrl: String,
         poster: String?
     ): List<com.lagradost.cloudstream3.Episode> {
         seriesCache[seriesUrl]?.let { (at, eps) ->
-            if (isFresh(at, 120 * 60_000L)) return eps
+            if (isFresh(at, 24 * 60 * 60_000L)) return eps
+        }
+        Shahid4uStore.loadSeries(seriesUrl)?.let { stored ->
+            val cached = restoreSeries(stored)
+            seriesCache[seriesUrl] = now() to cached
+            return cached
         }
 
         val seriesDoc = try {
@@ -492,7 +600,7 @@ class Shahid4u : MainAPI() {
 
     /**
      * يجلب كل المواسم بالتوالي (طلب واحد لكل موسم) ويعيد الحلقات موسومة
-     * برقم الموسم. الجلب متسلسل عبر SiteGate؛ والنتيجة تُخزَّن 2 ساعة حتى
+     * برقم الموسم. الجلب متسلسل عبر SiteGate؛ والنتيجة تُخزَّن 24 ساعة حتى
      * لا يتكرر الجلب عند فتح حلقة أخرى من نفس المسلسل.
      */
     private suspend fun collectSeasons(
@@ -501,7 +609,12 @@ class Shahid4u : MainAPI() {
         poster: String?
     ): List<com.lagradost.cloudstream3.Episode> {
         seriesCache[cacheKey]?.let { (at, eps) ->
-            if (isFresh(at, 120 * 60_000L)) return eps
+            if (isFresh(at, 24 * 60 * 60_000L)) return eps
+        }
+        Shahid4uStore.loadSeries(cacheKey)?.let { stored ->
+            val cached = restoreSeries(stored)
+            seriesCache[cacheKey] = now() to cached
+            return cached
         }
 
         val result = ArrayList<com.lagradost.cloudstream3.Episode>()
@@ -523,6 +636,7 @@ class Shahid4u : MainAPI() {
             } catch (e: Exception) {
                 Log.w(logTag, "season failed $seasonUrl: ${e.message}")
                 complete = false
+                if (SiteGate.isCoolingDown()) break
                 continue
             }
 
@@ -537,6 +651,7 @@ class Shahid4u : MainAPI() {
                 } catch (e: Exception) {
                     Log.w(logTag, "season episodes failed: ${e.message}")
                     complete = false
+                    if (SiteGate.isCoolingDown()) break
                 }
             }
             if (episodes.isEmpty()) complete = false
@@ -549,6 +664,8 @@ class Shahid4u : MainAPI() {
 
         if (sorted.isNotEmpty() && complete) {
             seriesCache[cacheKey] = now() to sorted
+            // كاش دائم 24 ساعة: فتح Supernatural مرة ثانية لا يرسل أي طلب مواسم.
+            Shahid4uStore.saveSeries(cacheKey, sorted)
         }
         Log.d(logTag, "seasons=${sorted.mapNotNull { it.season }.distinct().sorted()} episodes=${sorted.size} complete=$complete")
         return sorted
@@ -718,6 +835,11 @@ class Shahid4u : MainAPI() {
                     if (token.isBlank()) continue
                     val serverName = obj.optString("name").ifBlank { "Server ${i + 1}" }
                     val rank = obj.optInt("rank", i)
+                    val serverUrl = obj.optString("url").ifBlank { obj.optString("src") }
+                    if (isCanaryServer(serverName, rank, serverUrl)) {
+                        Log.w(logTag, "skip canary server '$serverName' rank=$rank")
+                        continue
+                    }
                     out[token] = ServerEntry(serverName, token, rank)
                 }
             }.onFailure { Log.w(logTag, "servers JSON: ${it.message}") }
@@ -748,16 +870,19 @@ class Shahid4u : MainAPI() {
         val headers = mapOf(
             "User-Agent" to ua(),
             "Accept" to "application/json, text/plain, */*",
-            "Accept-Language" to "ar,en-US;q=0.9,en;q=0.8",
+            "Accept-Language" to "ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7",
             "Content-Type" to "application/json",
             "X-CSRF-TOKEN" to watch.csrf,
             "X-Requested-With" to "XMLHttpRequest",
-            "X-FP-Event-ID" to "",
+            "X-FP-Event-ID" to fpEventId,
             "Origin" to mainUrl.trimEnd('/'),
             "Referer" to headerSafe(watch.watchUrl),
             "Sec-Fetch-Site" to "same-origin",
             "Sec-Fetch-Mode" to "cors",
-            "Sec-Fetch-Dest" to "empty"
+            "Sec-Fetch-Dest" to "empty",
+            "sec-ch-ua" to secChUa(),
+            "sec-ch-ua-mobile" to secChMobile(),
+            "sec-ch-ua-platform" to "\"Android\""
         )
 
         val res = try {
@@ -783,15 +908,17 @@ class Shahid4u : MainAPI() {
 
         val text = runCatching { res.text }.getOrDefault("")
         if (res.code == 429) {
-            SiteGate.penalize(false)
+            val retryAfter = res.headers["retry-after"]?.trim()?.toLongOrNull()
+            SiteGate.penalizeRateLimit(retryAfter)
             return null
         }
-        if (res.code == 403 || text.contains("Just a moment", true) ||
-            text.contains("challenge-platform", true)
-        ) {
-            val challenge = text.contains("Just a moment", true) ||
-                    text.contains("challenge-platform", true)
-            SiteGate.penalize(challenge)
+        val challenge = isChallenge(res, text)
+        if (res.code == 403 || challenge) {
+            if (isBlockPage(text) || (res.code == 403 && !challenge)) {
+                SiteGate.penalizeBlocked()
+            } else {
+                SiteGate.penalizeChallenge()
+            }
             return null
         }
         if (res.code >= 400) {
@@ -839,8 +966,19 @@ class Shahid4u : MainAPI() {
             }
             rememberCookies(url, res)
             when {
-                res.code == 403 || res.code == 429 -> {
-                    SiteGate.penalize(false)
+                res.code == 429 -> {
+                    val retryAfter = res.headers["retry-after"]?.trim()?.toLongOrNull()
+                    SiteGate.penalizeRateLimit(retryAfter)
+                    null
+                }
+                res.code == 403 -> {
+                    val body = runCatching { res.text }.getOrDefault("")
+                    val challenge = isChallenge(res, body)
+                    if (isBlockPage(body) || !challenge) {
+                        SiteGate.penalizeBlocked()
+                    } else {
+                        SiteGate.penalizeChallenge()
+                    }
                     null
                 }
                 res.code in 300..399 -> {
@@ -850,6 +988,11 @@ class Shahid4u : MainAPI() {
                     } else {
                         null
                     }
+                }
+                res.code == 200 -> {
+                    // صفحة HTML بدل تحويل = غالباً canary أو توكن منتهي. لا نعيد المحاولة.
+                    Log.w(logTag, "internal redirect returned 200 (canary/expired?) for $url")
+                    null
                 }
                 else -> null
             }
@@ -994,9 +1137,11 @@ class Shahid4u : MainAPI() {
 
         val entries = doc.select("div.down-container a.btn-down[href]")
             .mapNotNull { anchor ->
+                if (isHiddenElement(anchor)) return@mapNotNull null
                 if (anchor.id() == "download-primary-server") return@mapNotNull null
                 val href = makeAbsoluteUrl(anchor.attr("href")) ?: return@mapNotNull null
                 if (!isSameSite(href) || !href.contains("/m/")) return@mapNotNull null
+                if (isCanaryHref(href)) return@mapNotNull null
                 val info = anchor.selectFirst(".info")?.text().orEmpty()
                 val name = anchor.selectFirst(".info span")?.text()?.trim()
                     .orEmpty().ifBlank { "سيرفر" }
@@ -1015,7 +1160,7 @@ class Shahid4u : MainAPI() {
         val emitted = ArrayList<Triple<String, String, String>>()
         var attempts = 0
         for (entry in entries) {
-            if (attempts >= 3 || emitted.isNotEmpty() || SiteGate.isCoolingDown()) break
+            if (attempts >= 2 || emitted.isNotEmpty() || SiteGate.isCoolingDown()) break
             attempts++
             val location = followInternalRedirect(entry.href, downloadUrl) ?: continue
             val label = if (entry.quality > 0) "${entry.name} • ${entry.quality}p" else entry.name
@@ -1049,7 +1194,7 @@ class Shahid4u : MainAPI() {
         val emitted = ArrayList<Triple<String, String, String>>()
         var attempts = 0
         for (server in watch.servers) {
-            if (attempts >= 2 || emitted.isNotEmpty() || SiteGate.isCoolingDown()) break
+            if (attempts >= 1 || emitted.isNotEmpty() || SiteGate.isCoolingDown()) break
             attempts++
             val resolved = resolveServer(watch, server) ?: continue
             if (emitLink(resolved, server.name, watchUrl, subtitleCallback, callback)) {
