@@ -1,0 +1,206 @@
+name: CI Build and Inspect
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'arena/**'
+
+permissions:
+  contents: read
+
+jobs:
+  build-cimawbas:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build Cimawbas with ./gradlew :Cimawbas:make
+        run: |
+          ./gradlew :Cimawbas:make --info | tee cimawbas_build.log
+          ls -lh Cimawbas/build/
+
+      - name: Upload Cimawbas artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cimawbas-build
+          path: |
+            Cimawbas/build/Cimawbas.cs3
+            cimawbas_build.log
+
+  inspect-anime4up:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Python curl_cffi & bs4
+        run: pip install curl_cffi beautifulsoup4 cloudscraper
+
+      - name: Fetch Anime4Up HTML & JS (Direct + Multi-Source Proxy Fallback)
+        run: |
+          python3 - << 'PYEOF'
+          import os, re, json, base64, urllib.parse
+          from concurrent.futures import ThreadPoolExecutor, as_completed
+          from curl_cffi import requests as creq
+          from bs4 import BeautifulSoup
+
+          os.makedirs("dump/js", exist_ok=True)
+          os.makedirs("dump/embeds", exist_ok=True)
+
+          TEST_URL = "https://w1.anime4up.rest/anime/naruto-shippuuden-sgtfr/"
+
+          def is_valid_html(text):
+              if not text or len(text) < 1500:
+                  return False
+              low = text.lower()
+              if "just a moment" in low or "cf-browser-verification" in low or "<title>attention required" in low:
+                  return False
+              return "anime4up" in low or "naruto" in low or "حلقة" in text
+
+          working_proxies = [None]  # Try direct first!
+
+          def try_fetch_once(url, proxy=None, timeout=15, method="GET", data=None, extra_headers=None):
+              headers = {
+                  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                  "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
+                  "Referer": "https://w1.anime4up.rest/",
+              }
+              if extra_headers:
+                  headers.update(extra_headers)
+              proxies = {"http": proxy, "https": proxy} if proxy else None
+              if method == "POST":
+                  r = creq.post(url, data=data, headers=headers, proxies=proxies, impersonate="chrome124", timeout=timeout, allow_redirects=True)
+              else:
+                  r = creq.get(url, headers=headers, proxies=proxies, impersonate="chrome124", timeout=timeout, allow_redirects=True)
+              return r.status_code, r.text, str(r.url)
+
+          # 1. Test direct connection first
+          direct_ok = False
+          try:
+              code, txt, final_u = try_fetch_once(TEST_URL, None, timeout=15)
+              print(f"Direct test: status={code}, len={len(txt)}, url={final_u}")
+              if code == 200 and is_valid_html(txt):
+                  print("DIRECT CONNECTION WORKS WITHOUT CF BLOCK!")
+                  direct_ok = True
+          except Exception as e:
+              print(f"Direct test error: {e}")
+
+          # 2. Gather proxies from multiple sources if direct is blocked (or keep backups ready)
+          PROXY_SOURCES = [
+              ("http", "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=7000&country=all&ssl=yes&anonymity=all"),
+              ("http", "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt"),
+              ("socks5", "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt"),
+              ("http", "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt"),
+              ("socks5", "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt"),
+              ("http", "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/https.txt"),
+              ("socks5", "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt"),
+          ]
+
+          if not direct_ok:
+              print("Direct blocked by Cloudflare -> harvesting proxies from multiple sources...")
+              candidates = []
+              seen = set()
+              for proto, src in PROXY_SOURCES:
+                  try:
+                      r = creq.get(src, timeout=10)
+                      if r.status_code == 200:
+                          lines = [ln.strip() for ln in r.text.splitlines() if ":" in ln and not ln.startswith("#")]
+                          print(f"Source {src} -> {len(lines)} proxies")
+                          for ln in lines[:120]:
+                              p = ln if "://" in ln else f"{proto}://{ln}"
+                              if p not in seen:
+                                  seen.add(p)
+                                  candidates.append(p)
+                  except Exception as e:
+                      print(f"Proxy source error {src}: {e}")
+
+              print(f"Total unique candidate proxies to test: {len(candidates)}")
+              good = []
+              def check_proxy(p):
+                  try:
+                      c, t, _ = try_fetch_once(TEST_URL, p, timeout=10)
+                      if c == 200 and is_valid_html(t):
+                          return p
+                  except Exception:
+                      pass
+                  return None
+
+              with ThreadPoolExecutor(max_workers=40) as ex:
+                  futs = {ex.submit(check_proxy, p): p for p in candidates[:400]}
+                  for fut in as_completed(futs):
+                      res = fut.result()
+                      if res:
+                          print(f"FOUND WORKING PROXY: {res}")
+                          good.append(res)
+                          if len(good) >= 5:
+                              break
+              working_proxies = good if good else [None]
+
+          with open("dump/proxy_report.json", "w") as f:
+              json.dump({"direct_ok": direct_ok, "working_proxies": working_proxies}, f, indent=2)
+
+          def smart_get(url):
+              for p in working_proxies:
+                  try:
+                      c, t, u = try_fetch_once(url, p, timeout=20)
+                      if c == 200 and len(t) > 500 and "just a moment" not in t.lower():
+                          return t
+                  except Exception as e:
+                      print(f"Fetch failed {url} via {p}: {e}")
+              return ""
+
+          PAGES = {
+              "home8.html": "https://w1.anime4up.rest/home8/",
+              "anime_list.html": "https://w1.anime4up.rest/%d9%82%d8%a7%d8%a6%d9%85%d8%a9-%d8%a7%d9%84%d8%a7%d9%86%d9%85%d9%8a/",
+              "dubbed_list.html": "https://w1.anime4up.rest/anime-category/%d8%a7%d9%84%d8%a7%d9%86%d9%85%d9%8a-%d8%a7%d9%84%d9%85%d8%af%d8%a8%d9%84%d8%ac/",
+              "search_naruto.html": "https://w1.anime4up.rest/?search_param=animes&s=naruto",
+              "naruto_shippuuden.html": "https://w1.anime4up.rest/anime/naruto-shippuuden-sgtfr/",
+              "naruto_shippuuden_p2.html": "https://w1.anime4up.rest/anime/naruto-shippuuden-sgtfr/page/2/",
+              "naruto_ep500.html": "https://w1.anime4up.rest/episode/naruto-shippuuden-%d8%a7%d9%84%d8%ad%d9%84%d9%82%d8%a9-500-%d9%88%d8%a7%d9%84%d8%a7%d8%ae%d9%8a%d8%b1%d8%a9/",
+              "naruto_ep1.html": "https://w1.anime4up.rest/episode/naruto-shippuuden-%d8%a7%d9%84%d8%ad%d9%84%d9%82%d8%a9-1/",
+              "black_clover_s2.html": "https://w1.anime4up.rest/anime/black-clover-2nd-season/",
+              "black_clover_s2_ep3.html": "https://w1.anime4up.rest/episode/%d8%a7%d9%86%d9%85%d9%8a-black-clover-2nd-season-%d8%a7%d9%84%d8%ad%d9%84%d9%82%d8%a9-3-%d9%85%d8%aa%d8%b1%d8%ac%d9%85%d8%a9/",
+              "one_piece_ep1180.html": "https://w1.anime4up.rest/episode/%d8%a7%d9%86%d9%85%d9%8a-%d9%88%d9%86-%d8%a8%d9%8a%d8%b3-one-piece-%d8%a7%d9%84%d8%ad%d9%84%d9%82%d8%a9-1180-%d9%85%d8%aa%d8%b1%d8%ac%d9%85%d8%a9/",
+              "naruto_movie1.html": "https://w1.anime4up.rest/anime/naruto-movie-1-dai-katsugeki-yuki-hime-ninpouchou-dattebayo/",
+              "naruto_movie1_ep.html": "https://w1.anime4up.rest/episode/%d9%81%d9%8a%d9%84%d9%85-naruto-movie-1-dai-katsugeki-yuki-hime-ninpouchou-dattebayo/",
+          }
+
+          js_urls = set()
+          for fname, url in PAGES.items():
+              html = smart_get(url)
+              print(f"Fetched {fname}: {len(html)} bytes")
+              with open(f"dump/{fname}", "w", encoding="utf-8") as f:
+                  f.write(html)
+              if html:
+                  soup = BeautifulSoup(html, "html.parser")
+                  for sc in soup.find_all("script", src=True):
+                      src = sc["src"]
+                      if "anime4up" in src or src.startswith("/"):
+                          full = urllib.parse.urljoin(url, src)
+                          js_urls.add(full)
+
+          for idx, jurl in enumerate(sorted(js_urls)):
+              jtxt = smart_get(jurl)
+              safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", jurl.split("/")[-1].split("?")[0]) or f"script_{idx}.js"
+              print(f"Fetched JS {safe_name} ({jurl}): {len(jtxt)} bytes")
+              with open(f"dump/js/{idx:02d}_{safe_name}", "w", encoding="utf-8") as f:
+                  f.write(f"// URL: {jurl}\n" + jtxt)
+          PYEOF
+
+      - name: Upload Anime4Up HTML/JS dump
+        uses: actions/upload-artifact@v4
+        with:
+          name: anime4up-dump
+          path: dump/
