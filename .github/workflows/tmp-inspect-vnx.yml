@@ -1,4 +1,4 @@
-name: Temp Inspect VnxPlayer
+name: Build Anime4Up v3 & Verify anime4up1 + anime4up2
 
 on:
   push:
@@ -6,27 +6,48 @@ on:
       - arena/aca5ffed-mehdigm-stream
     paths:
       - .github/workflows/tmp-inspect-vnx.yml
+      - Anime4Up/**
 
 permissions:
   contents: write
 
 jobs:
-  inspect:
+  build_and_verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
           ref: arena/aca5ffed-mehdigm-stream
 
-      - name: Install Python deps
-        run: |
-          pip install -q curl_cffi
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
 
-      - name: Test token IP-binding, S1 across episodes, subtitles, and download endpoints
+      - name: Accept Android SDK licenses
         run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+
+      - name: Build Anime4Up.cs3
+        run: |
+          set -eo pipefail
+          mkdir -p .tmp_vnx
+          chmod +x ./gradlew
+          ./gradlew :Anime4Up:make --no-daemon --stacktrace 2>&1 | tee .tmp_vnx/gradle_build.log
+          cp -f Anime4Up/build/Anime4Up.cs3 build/Anime4Up.cs3
+          ls -la build/Anime4Up.cs3
+          unzip -p build/Anime4Up.cs3 manifest.json > .tmp_vnx/cs3_manifest.json
+          cat .tmp_vnx/cs3_manifest.json
+
+      - name: Live End-to-End Verification of anime4up1 & anime4up2 on Target Episode
+        run: |
+          pip install -q curl_cffi beautifulsoup4
           python3 - << 'PYEOF'
-          import json, re
+          import json, re, time
+          from bs4 import BeautifulSoup
           from concurrent.futures import ThreadPoolExecutor, as_completed
           from curl_cffi import requests as creq
 
@@ -52,13 +73,13 @@ jobs:
                   if p:
                       kw["proxies"] = {"http": p, "https": p}
                   r = creq.get(url, **kw)
-                  if r.status_code == 200 and "Just a moment..." not in r.text[:2000] and "_cf_chl_opt" not in r.text[:4000]:
-                      return r.status_code, str(r.url), r.text, dict(r.headers), p
+                  if r.status_code == 200 and "Just a moment..." not in r.text[:2000] and "_cf_chl_opt" not in r.text[:4000] and "هذا الدومين غير مصرح" not in r.text:
+                      return r.status_code, str(r.url), r.text, p
               except Exception:
                   pass
               return None
 
-          def fetch_cf(url, headers):
+          def fetch_net(url, headers):
               if GOOD_PROXY[0]:
                   res = try_one(GOOD_PROXY[0], url, headers)
                   if res:
@@ -69,122 +90,88 @@ jobs:
                       for fut in as_completed(futs, timeout=15):
                           r = fut.result()
                           if r:
-                              GOOD_PROXY[0] = r[4]
+                              GOOD_PROXY[0] = r[3]
                               return r
               except Exception:
                   pass
-              return 0, "", "", {}, None
+              return 0, "", "", None
 
-          ep_ref = "https://w1.anime4up.rest/episode/%d8%a7%d9%86%d9%85%d9%8a-tokyo-revengers-santen-sensou-hen-%d8%a7%d9%84%d8%ad%d9%84%d9%82%d8%a9-4-%d9%85%d8%aa%d8%b1%d8%ac%d9%85%d8%a9/"
-          iframe_hdrs = {
-              "Referer": ep_ref,
-              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-              "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
-              "Sec-Fetch-Dest": "iframe",
-              "Sec-Fetch-Mode": "navigate",
-              "Sec-Fetch-Site": "same-origin",
-          }
+          ep_url = "https://w1.anime4up.rest/episode/%d8%a7%d9%86%d9%85%d9%8a-tokyo-revengers-santen-sensou-hen-%d8%a7%d9%84%d8%ad%d9%84%d9%82%d8%a9-4-%d9%85%d8%aa%d8%b1%d8%ac%d9%85%d8%a9/"
+          st, _, ep_html, px = fetch_net(ep_url, {"Referer": "https://w1.anime4up.rest/"})
+          soup = BeautifulSoup(ep_html, "html.parser")
+          servers = []
+          for li in soup.select("ul#episode-servers li[data-watch], li[data-watch]"):
+              w_url = li.get("data-watch", "")
+              s_el = li.select_one(".watch-server-name, span.server")
+              s_name = s_el.get_text(strip=True) if s_el else li.get_text(strip=True)
+              if "anime4up" in s_name.lower() or "c1oiijc.shop" in w_url:
+                  servers.append({"name": s_name, "watch_url": w_url})
 
-          out = {"episodes": {}, "downloads": {}, "subtitles": {}}
-
-          test_pages = {
-              "tr4_s1": "https://w1.anime4up.rest/Anime4up-S1/mal/59088/4/sub/?vnx_no_cache=1",
-              "tr4_s2": "https://w1.anime4up.rest/Anime4up-S2/mal/59088/4/sub/?vnx_no_cache=1",
-              "tr3_s1": "https://w1.anime4up.rest/Anime4up-S1/mal/59088/3/sub/?vnx_no_cache=1",
-              "tr3_s2": "https://w1.anime4up.rest/Anime4up-S2/mal/59088/3/sub/?vnx_no_cache=1",
-              "bc3_s1": "https://w1.anime4up.rest/Anime4up-S1/mal/61967/3/sub/?vnx_no_cache=1",
-              "bc3_s2": "https://w1.anime4up.rest/Anime4up-S2/mal/61967/3/sub/?vnx_no_cache=1",
-              "naruto500_s1": "https://w1.anime4up.rest/Anime4up-S1/mal/1735/500/sub/?vnx_no_cache=1",
-              "naruto500_s2": "https://w1.anime4up.rest/Anime4up-S2/mal/1735/500/sub/?vnx_no_cache=1",
-          }
-
+          e2e_report = {"episode_url": ep_url, "discovered_vnx_servers": servers, "extracted": {}}
+          site_origin = "https://w1.anime4up.rest"
           cdn_hdrs = {
               "Accept": "application/vnd.apple.mpegurl, application/x-mpegURL, */*",
-              "Referer": "https://w1.anime4up.rest/",
-              "Origin": "https://w1.anime4up.rest",
+              "Referer": site_origin + "/",
+              "Origin": site_origin,
           }
 
-          for label, u in test_pages.items():
-              st, fin_u, txt, hdrs, px = fetch_cf(u, iframe_hdrs)
-              m_su = re.search(r'let\s+streamUrl\s*=\s*"([^"]*)"', txt)
-              m_tr = re.search(r'const\s+tracks\s*=\s*(\[.*?\]);', txt)
-              su = m_su.group(1) if m_su else ""
-              entry = {"html_status": st, "proxy_used": px, "streamUrl": su, "tracks": m_tr.group(1) if m_tr else ""}
+          for srv in servers:
+              m_path = re.search(r"/(Anime4up-S(\d+)/[^?#]+)", srv["watch_url"], re.I)
+              canon_url = f"{site_origin}/{m_path.group(1).lstrip('/')}"
+              fetch_url = f"{canon_url}?vnx_no_cache={int(time.time()*1000)}"
+              hst, _, htxt, _ = fetch_net(fetch_url, {
+                  "Referer": ep_url,
+                  "Sec-Fetch-Dest": "iframe",
+                  "Sec-Fetch-Mode": "navigate",
+                  "Sec-Fetch-Site": "same-origin",
+              })
+              su_m = re.search(r'(?:let|var|const)\s+streamUrl\s*=\s*["\']([^"\']+)["\']', htxt)
+              tr_m = re.search(r'const\s+tracks\s*=\s*(\[[\s\S]*?\])\s*;', htxt)
+              stream_url = su_m.group(1) if su_m else ""
+              rc = creq.get(stream_url, headers=cdn_hdrs, impersonate="chrome124", timeout=10)
+              body = rc.text.lstrip("\ufeff").strip()
+              has_sep_audio = bool(re.search(r'#EXT-X-MEDIA:[^\r\n]*TYPE=AUDIO[^\r\n]*URI=["\'][^"\']+["\']', body, re.I))
+              variants = re.findall(r'#EXT-X-STREAM-INF:([^\r\n]+)\r?\n(https?://[^\r\n]+)', body)
+              # Verify first media segment HTTP 200!
+              seg_status = 0
+              if variants:
+                  rv = creq.get(variants[0][1].strip(), headers=cdn_hdrs, impersonate="chrome124", timeout=10)
+                  segs = [ln.strip() for ln in rv.text.splitlines() if ln.strip().startswith("http")]
+                  if segs:
+                      rs = creq.get(segs[0], headers={"Referer": site_origin + "/", "Range": "bytes=0-1023"}, impersonate="chrome124", timeout=10)
+                      seg_status = rs.status_code
 
-              if su:
-                  # Test 1: Fetch CDN URL DIRECTLY from runner IP (DIFFERENT IP from proxy!) WITH headers
-                  try:
-                      r_dir = creq.get(su, headers=cdn_hdrs, impersonate="chrome124", timeout=10)
-                      entry["cdn_direct_with_hdrs"] = {
-                          "status": r_dir.status_code,
-                          "len": len(r_dir.text),
-                          "preview": r_dir.text[:600],
-                      }
-                      # If master m3u8, also test fetching first variant!
-                      v_urls = [ln.strip() for ln in r_dir.text.splitlines() if ln.strip().startswith("http")]
-                      if v_urls:
-                          rv = creq.get(v_urls[0], headers=cdn_hdrs, impersonate="chrome124", timeout=10)
-                          entry["cdn_variant0_direct"] = {"status": rv.status_code, "len": len(rv.text), "preview": rv.text[:350]}
-                  except Exception as ex:
-                      entry["cdn_direct_with_hdrs"] = {"err": str(ex)}
+              sub_ok = False
+              sub_len = 0
+              if tr_m:
+                  t_arr = json.loads(tr_m.group(1))
+                  for cand in [t_arr[0].get("file", "")] + t_arr[0].get("fallbacks", []):
+                      sst, _, stxt, _ = fetch_net(cand, {"Referer": canon_url, "Accept": "text/vtt,*/*"})
+                      if sst == 200 and "-->" in stxt:
+                          sub_ok = True
+                          sub_len = len(stxt)
+                          break
 
-                  # Test 2: Fetch CDN URL DIRECTLY WITHOUT Referer/Origin headers (plain OkHttp/ExoPlayer check!)
-                  try:
-                      r_plain = creq.get(su, impersonate="chrome124", timeout=10)
-                      entry["cdn_direct_no_hdrs"] = {"status": r_plain.status_code, "len": len(r_plain.text), "preview": r_plain.text[:250]}
-                  except Exception as ex:
-                      entry["cdn_direct_no_hdrs"] = {"err": str(ex)}
-
-              # Test subtitles from tr4_s2 & bc3_s1
-              if label in ("tr4_s2", "bc3_s1") and m_tr:
-                  try:
-                      tr_arr = json.loads(m_tr.group(1))
-                      for t_obj in tr_arr:
-                          cand_list = [t_obj.get("file", "")] + t_obj.get("fallbacks", [])
-                          if t_obj.get("fallbacks"):
-                              # Also test fallback stripped of query!
-                              cand_list.append(t_obj["fallbacks"][0].split("?")[0])
-                          for cu in cand_list:
-                              if not cu:
-                                  continue
-                              # Direct without proxy
-                              try:
-                                  rd = creq.get(cu, headers={"Referer": "https://w1.anime4up.rest/"}, impersonate="chrome124", timeout=8)
-                                  d_info = {"status": rd.status_code, "len": len(rd.text), "has_cues": "-->" in rd.text}
-                              except Exception as ex:
-                                  d_info = {"err": str(ex)}
-                              # Via proxy
-                              pst, _, ptxt, _, ppx = fetch_cf(cu, {"Referer": "https://w1.anime4up.rest/", "Accept": "text/vtt,*/*"})
-                              p_info = {"status": pst, "len": len(ptxt), "has_cues": "-->" in ptxt, "preview": ptxt[:300]}
-                              out["subtitles"][cu] = {"direct": d_info, "via_proxy": p_info}
-                  except Exception as ex:
-                      out["subtitles"][label + "_err"] = str(ex)
-
-              out["episodes"][label] = entry
-
-          # Test /download/ endpoints!
-          for dlabel, du in [
-              ("tr4_s1_dl", "https://w1.anime4up.rest/Anime4up-S1/mal/59088/4/sub/download/?vnx_no_cache=1"),
-              ("tr4_s2_dl", "https://w1.anime4up.rest/Anime4up-S2/mal/59088/4/sub/download/?vnx_no_cache=1"),
-              ("bc3_s1_dl", "https://w1.anime4up.rest/Anime4up-S1/mal/61967/3/sub/download/?vnx_no_cache=1"),
-          ]:
-              st, fin_u, txt, _, px = fetch_cf(du, iframe_hdrs)
-              out["downloads"][dlabel] = {
-                  "status": st,
-                  "len": len(txt),
-                  "urls": list(set(re.findall(r'https?:\\?/\\?/[^"\'\\\s<>]+', txt)))[:30],
-                  "snippet": txt[:2500],
+              e2e_report["extracted"][srv["name"]] = {
+                  "canonical_url": canon_url,
+                  "playlist_http": rc.status_code,
+                  "has_separate_audio_tracks": has_sep_audio,
+                  "variant_count": len(variants),
+                  "variants_meta": [v[0] for v in variants],
+                  "first_segment_http": seg_status,
+                  "arabic_subtitle_verified": sub_ok,
+                  "arabic_subtitle_bytes": sub_len,
               }
 
-          with open(".tmp_vnx/verify_matrix.json", "w", encoding="utf-8") as f:
-              json.dump(out, f, ensure_ascii=False, indent=2)
-          print("MATRIX DONE")
+          with open(".tmp_vnx/e2e_report.json", "w", encoding="utf-8") as f:
+              json.dump(e2e_report, f, ensure_ascii=False, indent=2)
+          print(json.dumps(e2e_report, ensure_ascii=False, indent=2))
           PYEOF
 
-      - name: Commit matrix
+      - name: Commit build & verification artifacts
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -f .tmp_vnx/verify_matrix.json
-          git commit -m "chore: save vnxplayer verification matrix [skip ci]" || true
+          git add -f build/Anime4Up.cs3 .tmp_vnx/gradle_build.log .tmp_vnx/cs3_manifest.json .tmp_vnx/e2e_report.json
+          git commit -m "chore: build Anime4Up v3 cs3 and save e2e report [skip ci]" || true
           git push origin arena/aca5ffed-mehdigm-stream

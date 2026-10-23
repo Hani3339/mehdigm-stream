@@ -166,11 +166,20 @@ object Anime4UpNetwork {
         url: String,
         referer: String? = null,
         extraHeaders: Map<String, String> = emptyMap(),
-        requireSiteSignature: Boolean = true
+        requireSiteSignature: Boolean = true,
+        validator: ((String) -> Boolean)? = null
     ): String? = withContext(Dispatchers.IO) {
+        fun isAcceptable(code: Int, body: String): Boolean {
+            if (code !in 200..399) return false
+            if (isCloudflareChallenge(code, body)) return false
+            if (requireSiteSignature && !isValidAnime4UpHtml(body)) return false
+            if (validator != null && !validator(body)) return false
+            return true
+        }
+
         // 1. Try direct connection first (fastest path for residential/mobile connections)
         directGet(url, referer, extraHeaders)?.let { (code, body) ->
-            if (!isCloudflareChallenge(code, body) && (!requireSiteSignature || isValidAnime4UpHtml(body))) {
+            if (isAcceptable(code, body)) {
                 return@withContext body
             }
         }
@@ -185,7 +194,7 @@ object Anime4UpNetwork {
                 ?: proxyGet(url, proxySpec, referer, extraHeaders, timeoutSec = 14)
             if (attempt != null) {
                 val (code, body) = attempt
-                if (code in 200..399 && !isCloudflareChallenge(code, body) && (!requireSiteSignature || isValidAnime4UpHtml(body))) {
+                if (isAcceptable(code, body)) {
                     proxyFailCounts.remove(proxySpec)
                     return@withContext body
                 }
@@ -200,10 +209,10 @@ object Anime4UpNetwork {
             }
         }
 
-        // 3. Try silent Android WebView Cloudflare solver if an Activity is available
+        // 3. Try silent Android WebView Cloudflare Cookie Solver if an Activity is available
         cfMutex.withLock {
             directGet(url, referer, extraHeaders)?.let { (code, body) ->
-                if (!isCloudflareChallenge(code, body) && (!requireSiteSignature || isValidAnime4UpHtml(body))) {
+                if (isAcceptable(code, body)) {
                     return@withContext body
                 }
             }
@@ -217,7 +226,7 @@ object Anime4UpNetwork {
                     savePrefs()
 
                     directGet(url, referer, extraHeaders)?.let { (code, body) ->
-                        if (!isCloudflareChallenge(code, body) && (!requireSiteSignature || isValidAnime4UpHtml(body))) {
+                        if (isAcceptable(code, body)) {
                             return@withContext body
                         }
                     }
@@ -230,7 +239,7 @@ object Anime4UpNetwork {
             for (proxySpec in workingProxies.toList()) {
                 if (deadProxies.contains(proxySpec)) continue
                 proxyGet(url, proxySpec, referer, extraHeaders, timeoutSec = 14)?.let { (code, body) ->
-                    if (code in 200..399 && !isCloudflareChallenge(code, body) && (!requireSiteSignature || isValidAnime4UpHtml(body))) {
+                    if (isAcceptable(code, body)) {
                         proxyFailCounts.remove(proxySpec)
                         return@withContext body
                     }
@@ -241,7 +250,7 @@ object Anime4UpNetwork {
                 deadProxies.clear()
             }
 
-            discoverWorkingProxyAndFetch(url, referer, extraHeaders, requireSiteSignature)
+            discoverWorkingProxyAndFetch(url, referer, extraHeaders, requireSiteSignature, validator)
         }
     }
 
@@ -363,7 +372,8 @@ object Anime4UpNetwork {
         url: String,
         referer: String?,
         extraHeaders: Map<String, String>,
-        requireSiteSignature: Boolean
+        requireSiteSignature: Boolean,
+        validator: ((String) -> Boolean)? = null
     ): String? {
         val candidates = harvestCandidateProxies()
         if (candidates.isEmpty()) return null
@@ -385,7 +395,8 @@ object Anime4UpNetwork {
                                 val (code, body) = res
                                 val valid = code in 200..399 &&
                                     !isCloudflareChallenge(code, body) &&
-                                    (!requireSiteSignature || isValidAnime4UpHtml(body))
+                                    (!requireSiteSignature || isValidAnime4UpHtml(body)) &&
+                                    (validator == null || validator(body))
                                 if (valid) {
                                     if (!workingProxies.contains(spec)) {
                                         workingProxies.add(0, spec)

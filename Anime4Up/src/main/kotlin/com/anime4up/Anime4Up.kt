@@ -571,9 +571,15 @@ class Anime4Up : MainAPI() {
         // 1. Watch Servers (`ul#episode-servers li[data-watch]`)
         doc.select("ul#episode-servers li[data-watch], ul#watch-servers li[data-watch], li[data-watch]").forEach { li ->
             val watchUrl = li.attr("data-watch")
-            val sName = li.selectFirst("span.watch-server-name, span.server")?.text() ?: li.text()
+            val sName = li.selectFirst(".watch-server-name, span.server")?.text() ?: li.text()
             val qHint = li.selectFirst("span.quality")?.text()
-            val prio = if (watchUrl.contains("megamax") || watchUrl.contains("share4max") || watchUrl.contains("vkvideo")) 1 else 2
+            val prio = if (
+                watchUrl.contains("c1oiijc.shop") ||
+                watchUrl.contains("/Anime4up-S", ignoreCase = true) ||
+                watchUrl.contains("megamax") ||
+                watchUrl.contains("share4max") ||
+                watchUrl.contains("vkvideo")
+            ) 1 else 2
             registerCandidate(watchUrl, sName, qHint, prio)
         }
 
@@ -630,9 +636,21 @@ class Anime4Up : MainAPI() {
 
         val orderedCandidates = candidateMap.values.sortedBy { it.priority }
         val emittedUrls = ConcurrentHashMap.newKeySet<String>()
+        val linkLock = Any()
         val dedupCallback: (ExtractorLink) -> Unit = { link ->
             if (emittedUrls.add(link.url)) {
-                callback(link)
+                synchronized(linkLock) {
+                    callback(link)
+                }
+            }
+        }
+        val emittedSubUrls = ConcurrentHashMap.newKeySet<String>()
+        val subLock = Any()
+        val dedupSubCallback: (SubtitleFile) -> Unit = { sub ->
+            if (emittedSubUrls.add(sub.url)) {
+                synchronized(subLock) {
+                    subtitleCallback(sub)
+                }
             }
         }
 
@@ -646,7 +664,7 @@ class Anime4Up : MainAPI() {
                             referer = data,
                             qualityHint = item.qualityHint,
                             serverHint = item.serverName,
-                            subtitleCallback = subtitleCallback,
+                            subtitleCallback = dedupSubCallback,
                             callback = dedupCallback
                         )
                     }
