@@ -9,7 +9,6 @@ Here are the highlights of this release:
 For more details see https://docs.gradle.org/8.12/release-notes.html
 
 Starting a Gradle Daemon (subsequent builds will be faster)
-> Task :Anime4Up:clean UP-TO-DATE
 > Task :Anime4Up:checkKotlinGradlePluginConfigurationErrors SKIPPED
 > Task :Anime4Up:preBuild UP-TO-DATE
 > Task :Anime4Up:preDebugBuild UP-TO-DATE
@@ -28,5 +27,5 @@ Compiled dex to /home/runner/work/mehdigm-stream/mehdigm-stream/Anime4Up/build/i
 > Task :Anime4Up:make
 Made CloudStream package at /home/runner/work/mehdigm-stream/mehdigm-stream/Anime4Up/build/Anime4Up.cs3
 
-BUILD SUCCESSFUL in 36s
-10 actionable tasks: 9 executed, 1 up-to-date
+BUILD SUCCESSFUL in 34s
+9 actionable tasks: 9 executed
