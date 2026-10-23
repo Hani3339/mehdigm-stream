@@ -35,7 +35,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p .tmp_build_verify build
-          ./gradlew :Anime4Up:clean :Anime4Up:make --stacktrace 2>&1 | tee .tmp_build_verify/gradle_build.log
+          ./gradlew :Anime4Up:make --stacktrace 2>&1 | tee .tmp_build_verify/gradle_build.log
           cp Anime4Up/build/Anime4Up.cs3 build/Anime4Up.cs3
           stat -c%s build/Anime4Up.cs3 | tee .tmp_build_verify/cs3_bytes.txt
 
@@ -163,15 +163,17 @@ jobs:
           if [ -z "$CS_JAR" ]; then
             CS_JAR=$(find . /home/runner -name "cloudstream*.jar" 2>/dev/null | head -n 1)
           fi
+          ANDROID_JAR=$(find "$ANDROID_HOME/platforms" -name "android.jar" | sort -V | tail -n 1)
           GRADLE_JARS=$(find ~/.gradle/caches/modules-2/files-2.1 -name "*.jar" \
-            | grep -vE "(-sources\.jar|-javadoc\.jar|gradle|lint|aapt|kotlin-compiler|apkanalyzer)" \
+            | grep -E "(kotlin-stdlib|kotlin-reflect|kotlinx-coroutines|nicehttp|okhttp|okio|jsoup|jackson|gson|conscrypt)" \
+            | grep -vE "(-sources\.jar|-javadoc\.jar)" \
             | tr '\n' ':')
 
-          CP="$WORK_TMP/classes:$WORK_TMP/json.jar:$KOTLIN_CLASSES:$CS_JAR:$GRADLE_JARS"
+          CP="$WORK_TMP/classes:$WORK_TMP/json.jar:$KOTLIN_CLASSES:$CS_JAR:${GRADLE_JARS}${ANDROID_JAR}"
           javac -cp "$CP" -d "$WORK_TMP/classes" \
             "$WORK_TMP/src/android/util/Base64.java" \
             "$WORK_TMP/src/android/util/Log.java" \
-            "$WORK_TMP/src/VerifyMain.java"
+            "$WORK_TMP/src/VerifyMain.java" 2>&1 | tee .tmp_build_verify/javac_verify.log
 
           java -cp "$CP" VerifyMain 2>&1 | tee .tmp_build_verify/jvm_verify.log
 
