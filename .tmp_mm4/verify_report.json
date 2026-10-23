@@ -1,0 +1,158 @@
+{
+  "rpmshare": {
+    "trials": {
+      "https://rpmplay.me/api/v1/video?id=lrkws9&r=https%3A//share4max.com/": {
+        "status": 400,
+        "raw": "{\"message\": \"player is not recognized\"}\n",
+        "dec": null
+      },
+      "https://rpmplay.me/api/v1/video?id=lrkws9&w=1920&h=1080&r=https%3A//megamax.me": {
+        "status": 400,
+        "raw": "{\"message\": \"player is not recognized\"}\n",
+        "dec": null
+      },
+      "https://megamax.rpmplay.me/api/v1/video?id=lrkws9": {
+        "status": 200,
+        "raw": "2790f7d2c5debd75aa5c1dcf118bed76c91e13d6c821dded07cfa55a8f4a5fc5f52c580caada893918e8dacaefc4261aa6533d425e97b03017e0f668d2e63049ba6501289a0386f2606df9dde078a2e631a4281219686ef481263e22a02c7e6d487c3649",
+        "dec": "{\"cf\":\"https:\\/\\/sao.intelligentinfrastructure.space\\/v4\\/nc9\\/lrkws9\\/cf-master.1792783802.txt\",\"version\":\"1792783802\",\"player\":{\"id\":\"qym\",\"defaultSubtitle\":\"\",\"allowAdblock\":true,\"allowExternal\":false,\"pickSubtitle\":false,\"logo\":\"{\\\"url\\\":\\\"https:\\\\\\/\\\\\\/megamax.me\\\",\\\"position\\\":\\\"control-bar\\\",\\\"asset\\\":\\\"\\\\\\/0tVNRhKzR06YmC-ngsitYA\\\\\\/36\\\\\\/zbxs1dss\\\\\\/a6\\\\\\/2887.png\\\"}\",\"translation\":\"\",\"isP"
+      },
+      "https://megamax.rpmvid.com/api/v1/video?id=lrkws9": {
+        "status": 400,
+        "raw": "{\"message\": \"player is not recognized\"}\n",
+        "dec": null
+      },
+      "https://megamax.rpmvip.com/api/v1/video?id=lrkws9": {
+        "status": 400,
+        "raw": "{\"message\": \"player is not recognized\"}\n",
+        "dec": null
+      }
+    },
+    "hits_count": 19,
+    "hits": [
+      "redentials=\"include\":n.crossOrigin===\"anonymous\"?r.credentials=\"omit\":r.credentials=\"same-origin\",r}function i(n){if(n.ep)return;n.ep=!0;const r=t(n);fetch(n.href,r)}})();const qm=\"modulepreload\",Km=function(s){return\"/\"+s},Au={},zt=function(e,t,i){let n=Promise.resolve();if(t&&t.length>0){let l=function(c){return Promise.all(c.map(u=>Promise.resolve(u).then(d=>(",
+      ",VTTCue:a,VTTRegion:o}=await import(\"./prod-BXmdedSa.js\").then(l=>l.d);return{parseResponse:r,VTTCue:a,VTTRegion:o}},[]),i=this[Ke.crossOrigin]?.(),n=fetch(this.src,{headers:this.type===\"json\"?{\"Content-Type\":\"application/json\"}:void 0,credentials:na(i)});if(this.type===\"json\")this.#o(await(await n).text(),e,t);else{const{errors:r,metadata:a,regions:o,cues:l}=await s(n,{type:this.type,encoding:this.encoding});if(r[0]?.code===0)throw r[0];this.#s=a,t",
+      "\");oi(ct,\"startLoading\");oi(ct,\"startLoadingPoster\");oi(ct,\"requestAirPlay\");oi(ct,\"requestGoogleCast\");oi(ct,\"setAudioGain\");function Dy(s,e){return fetch(s,e).then(t=>t.text()).then(t=>/type=\"static\"/.test(t)?\"on-demand\":\"live\")}function d0(s,e){return fetch(s,e).then(t=>t.text()).then(t=>{const i=Oy(t);if(i)return d0(/^https?:/.test(i)?i:new URL(i,s).href",
+      "i(ct,\"setAudioGain\");function Dy(s,e){return fetch(s,e).then(t=>t.text()).then(t=>/type=\"static\"/.test(t)?\"on-demand\":\"live\")}function d0(s,e){return fetch(s,e).then(t=>t.text()).then(t=>{const i=Oy(t);if(i)return d0(/^https?:/.test(i)?i:new URL(i,s).href,e);const n=/EXT-X-PLAYLIST-TYPE:\\s*VOD/.test(t)?\"on-demand\":\"live\";return n===\"live\"&&My(t)>=10&&(/#EXT-",
+      "his.#l(t,e);if(e[0]?.src&&!i.src&&!i.type){const{crossOrigin:n}=s,r=na(n()),a=new AbortController;return Promise.all(e.map(o=>Ye(o.src)&&o.type===\"?\"?fetch(o.src,{method:\"HEAD\",credentials:r,signal:a.signal}).then(l=>(o.type=l.headers.get(\"content-type\")||\"??\",Bl.set(o.src,o.type),o)).catch(()=>o):o)).then(o=>{if(a.signal.aborted)return;const l=this.#l(Ne(s.source),o);Zn(),l.src||this.#s.notify(\"error\",{m",
+      "oopSn!==l&&(this.log(`buffer full after gaps in \"${n}\" playlist starting at sn: ${l}`),this.loopSn=l),null}}return this.loopSn=void 0,a}get primaryPrefetch(){if(zl(this.config)){var e;if((e=this.hls.interstitialsManager)==null||(e=e.playingItem)==null?void 0:e.event)return!0}return!1}filterReplacedPrimary(e,t){if(!e)return e;if(zl(this.config)&&(\"type\"in ",
+      ",i),snapshot:t=>t.slice()}:{event:s,field:e,equal:eE,snapshot:tE}),iE=new Map(Xg.map(s=>[s.event,s]));function sE(s){const{url:e}=s,t=Za(s,Tv);return fetch(e,t)}function nE(s){const{version:e=gr,eventTargets:t=[],sid:i=v0(),transmissionMode:n=bu}=s,r=Za(s,_v);return Ee(Ee({},r),{},{version:e,transmissionMode:n,sid:i,eventTargets:t.reduce((a,o)=>{var l,c,u;re",
+      "),e.timeout=o&&ae(o)?o:l,this.requestTimeout=self.setTimeout(()=>{this.loadtimeout()},e.timeout),(hr(this.request)?this.request.then(self.fetch):self.fetch(this.request)).then(u=>{var d;this.response=u;const h=Math.max(self.performance.now(),i.loading.start);if(self.clearTimeout(this.requestTimeout),e.timeout=l,this.requestTimeout=self.setTimeout(()=>{this.loadtimeou",
+      "st.totalBytes&&(this.expectedBytesLength=this.request.totalBytes-this.request.loadedBytes);const i=this.request.start({downloadSource:\"http\"},e);this.fetch(i)}async fetch(e){const{segment:t}=this.request;try{let i=await this.httpConfig.httpRequestSetup?.(t.url,t.byteRange,this.abortController.signal,this.requestByteRange);if(!i){const o=new Headers(this.re",
+      "(this.expectedBytesLength=this.request.totalBytes-this.request.loadedBytes);const i=this.request.start({downloadSource:\"http\"},e);this.fetch(i)}async fetch(e){const{segment:t}=this.request;try{let i=await this.httpConfig.httpRequestSetup?.(t.url,t.byteRange,this.abortController.signal,this.requestByteRange);if(!i){const o=new Headers(this.requestByteRange?",
+      "ller.signal})}if(this.abortController.signal.aborted)throw new DOMException(\"Request aborted before request fetch\",\"AbortError\");const n=await window.fetch(i);if(this.handleResponseHeaders(n),!n.body)throw new Wt(\"http-error\",\"Missing response body\");e.firstBytesReceived();const r=n.body.getReader();for await(const o of MS(r))e.addLoadedChunk(o),this.onChu",
+      "q)[x(179)]}catch{}if(q=q[x(388)](x(379),\"\"),q&&q!==x(440))return q}return null},re=async()=>{const x=fe,p=V();if(!p)return[null,x(521)];const L=await fetch(x(458)+p);return await oe(L)},Se=async(x=null)=>{const p=fe,L=V();if(!L)return[null,\"No videoId found\"];const k=parseInt(window.screen[p(572)]),q=parseInt(window[p(399)][p(469)]),F=Z()||\"\",H=x?.token&&x?.[p",
+      "Int(window[p(399)][p(469)]),F=Z()||\"\",H=x?.token&&x?.[p(446)]?p(575)+encodeURIComponent(x[p(652)])+(p(228)+encodeURIComponent(x[p(446)])):\"\",le=await fetch(p(631)+L+\"&w=\"+k+p(288)+q+p(636)+F+H);return await oe(le)},ye=async()=>{const x=fe,p=V();if(!p)return[null,x(521)];const L=parseInt(window[x(399)][x(572)]),k=parseInt(window[x(399)][x(469)]),q=Z()||\"\",F=awa",
+      "ye=async()=>{const x=fe,p=V();if(!p)return[null,x(521)];const L=parseInt(window[x(399)][x(572)]),k=parseInt(window[x(399)][x(469)]),q=Z()||\"\",F=await fetch(\"/api/v1/download?id=\"+p+x(363)+L+\"&h=\"+k+\"&r=\"+q);return await oe(F)},Le=async(x,p)=>{const L=fe;if(!u||!i)return;const k=p?x:await U(JSON[L(312)](Object[L(630)]({},x,{sessionId:l,userId:i[L(660)],playerId:i.playerId,videoId:i.vid",
+      "ssionId:l,userId:i[L(660)],playerId:i.playerId,videoId:i.videoId,country:i[L(665)],platform:i[L(333)],browser:i[L(516)],os:i.os})));try{const q=await fetch(L(486)+k),F=await q[L(161)]();F&&F.k&&(window.__pk={k:F.k,kx:F.kx})}catch{}u&&(c=setTimeout(()=>Le(k,!0),1e4))},he=async x=>{const p=fe;if(!i||r&&!ut(\"at\"))return;const L=Object.assign({},i,x),k=await U(JSO"
+    ]
+  },
+  "firestream": {
+    "1080p": {
+      "final_url": "https://firestream.site/e/3osh2Oyi?parent_ref=https%3A%2F%2Fshare4max.com%2Fiframe%2FWJH4dVV5cgxk0",
+      "resolve_status": 200,
+      "resolved": {
+        "signedVideoUrl": "https://us-cdn-1.firestream.to/encodings/e885268d-dabb-4193-95ad-505d52b5960e/0a73dd99-195d-4a9d-9314-6bb0e4907588/0809afb2-5373-4d07-974e-7519eea30200/video.mp4/video.m3u8?md5=xNtk4lrkgWBzsyUmxQHVig&expires=1792796487",
+        "signedVideoSdUrl": null
+      },
+      "probe": {
+        "status": 200,
+        "head": "#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXT-X-ALLOW-CACHE:YES\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-VERSION:3\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:4.463,\nseg-1-v1-a1.ts?md5=xNtk4lrkgWBzsyUmxQHVig&expires=1792796487\n#EXTINF:2.002,\nseg-3-v1-a1.ts?md5=xNtk4lrkgWBzsyUmxQHVig&expires=1792796487\n#EXTINF:6.548,\nseg-4-v1-a1"
+      }
+    },
+    "720p": {
+      "final_url": "https://firestream.site/e/PdNM1fXr?parent_ref=https%3A%2F%2Fshare4max.com%2Fiframe%2FWJH4dVV5cgxk0",
+      "resolve_status": 200,
+      "resolved": {
+        "signedVideoUrl": "https://fr-encoder-1.firestream.to/uploads/e885268d-dabb-4193-95ad-505d52b5960e/8e8d60c0-5281-41aa-971c-d7bc787cd1eb.mp4?md5=UY3thX2ZpJsg20gzy4Hm0g&expires=1792796490",
+        "signedVideoSdUrl": null
+      },
+      "probe": {
+        "status": 206,
+        "ct": "video/mp4",
+        "cr": "bytes 0-1023/263272635"
+      }
+    },
+    "480p": {
+      "final_url": "https://firestream.site/e/Chb8QlzT?parent_ref=https%3A%2F%2Fshare4max.com%2Fiframe%2FWJH4dVV5cgxk0",
+      "resolve_status": 200,
+      "resolved": {
+        "signedVideoUrl": "https://fr-encoder-1.firestream.to/uploads/e885268d-dabb-4193-95ad-505d52b5960e/fc0b499e-e498-4594-91a2-a50b7e7faec3.mp4?md5=M1R50KbaaHCxGNHNu6Cw9g&expires=1792796494",
+        "signedVideoSdUrl": null
+      },
+      "probe": {
+        "status": 206,
+        "ct": "video/mp4",
+        "cr": "bytes 0-1023/125812150"
+      }
+    }
+  },
+  "vidara": {
+    "1080p": {
+      "final_url": "https://vidaraa.cc/e/mEPt8avnFhvHv",
+      "api_status": 200,
+      "json": {
+        "default_sub_lang": "English",
+        "filecode": "mEPt8avnFhvHv",
+        "streaming_url": "https://s1-s501740.97bf1.com/hls/ofVuK7bP3fbjgDCeYPwo7npwv8x5oAQ4/master.m3u8?token=e22bfe34e3a7e42f75749dfa677e02b3-1792818096-57.154.167.18-c57b00f7a130e8bf93cbf137997f7172458bf37ac5da122668739b78c953a9f0",
+        "subtitles": null,
+        "thumbnail": "https://m996yefd.s1q2105.com/thumbnail/HVulRSaDZi/mEPt8avnFhvHv.jpg",
+        "title": "[Anime4up.rest] TRSSH EP 04 FHD [source]",
+        "vast_ads": "",
+        "vast_provider": ""
+      },
+      "probe": {
+        "status": 200,
+        "head": "#EXTM3U\n#EXT-X-VERSION:6\n#EXT-X-STREAM-INF:BANDWIDTH=5000000,AVERAGE-BANDWIDTH=5000000,CODECS=\"avc1.640028,mp4a.40.2\",RESOLUTION=1920x1080,FRAME-RATE=30.000\nindex_1920x1080.m3u8?token=e22bfe34e3a7e42f75749dfa677e02b3-1792818096-57.154.167.18-c57b00f7a130e8bf93cbf137997f7172458bf37ac5da122668739b78c9"
+      }
+    },
+    "720p": {
+      "final_url": "https://vidaraa.cc/e/614Rgo59CT0lg",
+      "api_status": 200,
+      "json": {
+        "default_sub_lang": "English",
+        "filecode": "614Rgo59CT0lg",
+        "streaming_url": "https://s1-s501740.97bf1.com/hls/ytKqdEYol1R2SJOGiKz0FwdKGUdo0t92/master.m3u8?token=efe281ebce26252db76df5561aa557d8-1792818098-57.154.167.18-5a8623146ec84c9ce2018e464b42d96d11f4583c6f6f999903db20cb7c20f992",
+        "subtitles": null,
+        "thumbnail": "https://m996yefd.s1q2105.com/thumbnail/Q4bd5ExJVO/614Rgo59CT0lg.jpg",
+        "title": "[Anime4up.rest] TRSSH EP 04 FHD [720p]",
+        "vast_ads": "",
+        "vast_provider": ""
+      },
+      "probe": {
+        "status": 200,
+        "head": "#EXTM3U\n#EXT-X-VERSION:6\n#EXT-X-STREAM-INF:BANDWIDTH=3000000,AVERAGE-BANDWIDTH=3000000,CODECS=\"avc1.640020,mp4a.40.2\",RESOLUTION=1280x720,FRAME-RATE=30.000\nindex_1280x720.m3u8?token=efe281ebce26252db76df5561aa557d8-1792818098-57.154.167.18-5a8623146ec84c9ce2018e464b42d96d11f4583c6f6f999903db20cb7c20"
+      }
+    },
+    "480p": {
+      "final_url": "https://vidaraa.cc/e/o9txLgb4P9Dcp",
+      "api_status": 200,
+      "json": {
+        "default_sub_lang": "English",
+        "filecode": "o9txLgb4P9Dcp",
+        "streaming_url": "https://s1-s501740.97bf1.com/hls/vPA5QJEqGm9im5lh37BkWlhpFLPaUBjc/master.m3u8?token=e464cd02836187e04255dafe21041588-1792818099-57.154.167.18-eb9ee473eb7d391e10e98539032e60d19ac39d799b52780dcc81614e56359bb0",
+        "subtitles": null,
+        "thumbnail": "https://m996yefd.s1q2105.com/thumbnail/TjYa8lnAMr/o9txLgb4P9Dcp.jpg",
+        "title": "[Anime4up.rest] TRSSH EP 04 FHD [480p]",
+        "vast_ads": "",
+        "vast_provider": ""
+      },
+      "probe": {
+        "status": 200,
+        "head": "#EXTM3U\n#EXT-X-VERSION:6\n#EXT-X-STREAM-INF:BANDWIDTH=1500000,AVERAGE-BANDWIDTH=1500000,CODECS=\"avc1.64001f,mp4a.40.2\",RESOLUTION=854x480,FRAME-RATE=30.000\nindex_854x480.m3u8?token=e464cd02836187e04255dafe21041588-1792818099-57.154.167.18-eb9ee473eb7d391e10e98539032e60d19ac39d799b52780dcc81614e56359b"
+      }
+    }
+  },
+  "earnvids": {
+    "hls2": {
+      "url": "https://pfabiWMFmEza.dramiyos-cdn.com/hls2/01/08738/ka4qkcbjefdb_n/master.m3u8?t=dbZT84XaC75qvi6ZmggF4k8MTUfqkKaaKWEWeXZIjH4&s=1792789301&e=129600&f=43690551&srv=xn5dxrjuptwa6f&i=0.4&sp=500&p1=xn5dxrjuptwa6f&p2=xn5dxrjuptwa6f&asn=8075",
+      "status": 502,
+      "head": "<html>\n<head>\n<title>500</title>\n<style>\nbody { font-family: Tahoma, Verdana, Arial, sans-serif; }\n</style>\n</head>\n<body bgcolor=\"white\" text=\"black\">\n500 ERROR\n</body>\n</html>\n"
+    },
+    "hls3": {
+      "url": "https://pfabiWMFmEza.oakmeadowdesignstudio.cfd/xn5dxrjuptwa6f/hls3/01/08738/ka4qkcbjefdb_n/master.txt",
+      "status": 502,
+      "head": "<!DOCTYPE html>\n<!--[if lt IE 7]> <html class=\"no-js ie6 oldie\" lang=\"en-US\"> <![endif]-->\n<!--[if IE 7]>    <html class=\"no-js ie7 oldie\" lang=\"en-US\"> <![endif]-->\n<!--[if IE 8]>    <html class=\"no-js ie8 oldie\" lang=\"en-US\"> <![endif]-->\n<!--[if gt IE 8]><!--> <html class=\"no-js\" lang=\"en-US\"> <!"
+    }
+  },
+  "byse_err": "Traceback (most recent call last):\n  File \"<stdin>\", line 139, in <module>\nKeyError: 'playback'\n"
+}
