@@ -1,0 +1,400 @@
+{
+  "homepage_cards_count": 50,
+  "series_episode_test": {
+    "label": "recent_homepage_series_episode",
+    "title": "مسلسل الموت الحاتم Death is Coming الحلقة 27 والاخيرة مترجمة",
+    "url": "https://shaahidd4u.net/episode/مسلسل-الموت-الحاتم-death-is-coming-الحلقة-27-والاخيرة-مترجمة",
+    "watch_buttons": 9,
+    "watch_resolved": 0,
+    "download_resolved": 9,
+    "unique_jobs": 9,
+    "playable_streams_count": 6,
+    "providers_verified_200_ok": [
+      "FastVid",
+      "MixDrop",
+      "SaveFiles",
+      "Uqload",
+      "VOE",
+      "VOE MP4"
+    ],
+    "qualities_verified": [
+      720,
+      544,
+      480
+    ],
+    "details": [
+      {
+        "provider": "DoodStream",
+        "playable": false,
+        "canonical_key": "dood:7orwb5i2rdji"
+      },
+      {
+        "canonical_key": "vinovo:7qq7p05qh8on4v",
+        "playable": false,
+        "error": "Expecting value: line 1 column 1 (char 0)"
+      },
+      {
+        "provider": "Uqload",
+        "type": "HLS",
+        "qualities": [
+          544
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "uqload:t3un2ix72zsy"
+      },
+      {
+        "canonical_key": "byse:m7bx8pddwrp2",
+        "playable": false,
+        "error": "Expecting value: line 1 column 1 (char 0)"
+      },
+      {
+        "provider": "MixDrop",
+        "type": "MP4",
+        "qualities": [
+          720
+        ],
+        "playable": true,
+        "status": 206,
+        "ct": "video/mp4",
+        "canonical_key": "mixdrop:8ll307m8i6g6jge"
+      },
+      {
+        "provider": "FastVid",
+        "type": "HLS",
+        "qualities": [
+          544
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "earnvids:s4do3enu1jl6"
+      },
+      {
+        "provider": "VOE",
+        "type": "HLS",
+        "qualities": [
+          480
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "voe:t40g0yygetqc"
+      },
+      {
+        "provider": "VOE MP4",
+        "type": "MP4",
+        "qualities": [
+          720
+        ],
+        "playable": true,
+        "status": 206,
+        "ct": "video/mp4",
+        "canonical_key": "voe:t40g0yygetqc"
+      },
+      {
+        "provider": "Upzur",
+        "playable": false,
+        "canonical_key": "upzur:xxvwagro4efx"
+      },
+      {
+        "provider": "SaveFiles",
+        "type": "HLS",
+        "qualities": [
+          544
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "savefiles:n45dx1694f3a"
+      }
+    ]
+  },
+  "movie_test": {
+    "label": "recent_homepage_movie",
+    "title": "فيلم The Intern 2026 مترجم اون لاين",
+    "url": "https://shaahidd4u.net/film/فيلم-the-intern-2026-مترجم-اون-لاين",
+    "watch_buttons": 9,
+    "watch_resolved": 0,
+    "download_resolved": 27,
+    "unique_jobs": 27,
+    "playable_streams_count": 21,
+    "providers_verified_200_ok": [
+      "FastVid",
+      "MixDrop",
+      "SaveFiles",
+      "Upzur",
+      "Uqload",
+      "VOE",
+      "VOE MP4"
+    ],
+    "qualities_verified": [
+      1080,
+      720,
+      480
+    ],
+    "details": [
+      {
+        "provider": "DoodStream",
+        "playable": false,
+        "canonical_key": "dood:9k7o1hk6gnat"
+      },
+      {
+        "canonical_key": "vinovo:488new3jfw04y5",
+        "playable": false,
+        "error": "Expecting value: line 1 column 1 (char 0)"
+      },
+      {
+        "canonical_key": "byse:zvrtidm5ur5b",
+        "playable": false,
+        "error": "Expecting value: line 1 column 1 (char 0)"
+      },
+      {
+        "provider": "Uqload",
+        "type": "HLS",
+        "qualities": [
+          1080
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "uqload:1reyu9zi7y8c"
+      },
+      {
+        "provider": "MixDrop",
+        "type": "MP4",
+        "qualities": [
+          1080
+        ],
+        "playable": true,
+        "status": 206,
+        "ct": "video/mp4",
+        "canonical_key": "mixdrop:033plj89f6w399"
+      },
+      {
+        "canonical_key": "vinovo:eeeq67g5tg0wy9",
+        "playable": false,
+        "error": "Expecting value: line 1 column 1 (char 0)"
+      },
+      {
+        "provider": "DoodStream",
+        "playable": false,
+        "canonical_key": "dood:48otas8uu9rf"
+      },
+      {
+        "provider": "FastVid",
+        "type": "HLS",
+        "qualities": [
+          1080
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "earnvids:tnnfc7tqqzb0"
+      },
+      {
+        "provider": "SaveFiles",
+        "type": "HLS",
+        "qualities": [
+          720
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "savefiles:20f8fq1ocyzp"
+      },
+      {
+        "canonical_key": "byse:ix7rb400ut0r",
+        "playable": false,
+        "error": "Expecting value: line 1 column 1 (char 0)"
+      },
+      {
+        "provider": "VOE",
+        "type": "HLS",
+        "qualities": [
+          720
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "voe:loksjtsu722f"
+      },
+      {
+        "provider": "VOE MP4",
+        "type": "MP4",
+        "qualities": [
+          1080
+        ],
+        "playable": true,
+        "status": 206,
+        "ct": "video/mp4",
+        "canonical_key": "voe:loksjtsu722f"
+      },
+      {
+        "provider": "MixDrop",
+        "type": "MP4",
+        "qualities": [
+          720
+        ],
+        "playable": true,
+        "status": 206,
+        "ct": "video/mp4",
+        "canonical_key": "mixdrop:mkk8en9xulwv3m"
+      },
+      {
+        "provider": "Uqload",
+        "type": "HLS",
+        "qualities": [
+          720
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "uqload:ow7nkntrcy5n"
+      },
+      {
+        "canonical_key": "vinovo:v226ngvdaknqk0",
+        "playable": false,
+        "error": "Expecting value: line 1 column 1 (char 0)"
+      },
+      {
+        "provider": "Upzur",
+        "type": "MP4",
+        "qualities": [
+          1080
+        ],
+        "playable": true,
+        "status": 206,
+        "ct": "application/octet-stream",
+        "canonical_key": "upzur:4rktwr32qabr"
+      },
+      {
+        "provider": "DoodStream",
+        "playable": false,
+        "canonical_key": "dood:0bm96i9ydyhq"
+      },
+      {
+        "provider": "FastVid",
+        "type": "HLS",
+        "qualities": [
+          720
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "earnvids:6sk4dq6mxrk9"
+      },
+      {
+        "provider": "SaveFiles",
+        "type": "HLS",
+        "qualities": [
+          720
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "savefiles:s5srkhnnn12z"
+      },
+      {
+        "provider": "Uqload",
+        "type": "HLS",
+        "qualities": [
+          480
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "uqload:sp8n5y0m0rd3"
+      },
+      {
+        "canonical_key": "byse:tabt4sulrq58",
+        "playable": false,
+        "error": "Expecting value: line 1 column 1 (char 0)"
+      },
+      {
+        "provider": "MixDrop",
+        "type": "MP4",
+        "qualities": [
+          480
+        ],
+        "playable": true,
+        "status": 206,
+        "ct": "video/mp4",
+        "canonical_key": "mixdrop:jddp1k6lu7r77d"
+      },
+      {
+        "provider": "VOE",
+        "type": "HLS",
+        "qualities": [
+          720
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "voe:wzbbtuhhqaul"
+      },
+      {
+        "provider": "VOE MP4",
+        "type": "MP4",
+        "qualities": [
+          720
+        ],
+        "playable": true,
+        "status": 206,
+        "ct": "video/mp4",
+        "canonical_key": "voe:wzbbtuhhqaul"
+      },
+      {
+        "provider": "FastVid",
+        "type": "HLS",
+        "qualities": [
+          480
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "earnvids:7drcjzhn1lgs"
+      },
+      {
+        "provider": "Upzur",
+        "type": "MP4",
+        "qualities": [
+          720
+        ],
+        "playable": true,
+        "status": 206,
+        "ct": "application/octet-stream",
+        "canonical_key": "upzur:z4ijnsi105fy"
+      },
+      {
+        "provider": "SaveFiles",
+        "type": "HLS",
+        "qualities": [
+          480
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "savefiles:c64k14r6v30x"
+      },
+      {
+        "provider": "VOE",
+        "type": "HLS",
+        "qualities": [
+          480
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "voe:epwujsrtp1vi"
+      },
+      {
+        "provider": "VOE MP4",
+        "type": "MP4",
+        "qualities": [
+          480
+        ],
+        "playable": true,
+        "status": 206,
+        "ct": "video/mp4",
+        "canonical_key": "voe:epwujsrtp1vi"
+      },
+      {
+        "provider": "Upzur",
+        "type": "MP4",
+        "qualities": [
+          480
+        ],
+        "playable": true,
+        "status": 206,
+        "ct": "application/octet-stream",
+        "canonical_key": "upzur:l7hsijt3m7yl"
+      }
+    ]
+  }
+}
