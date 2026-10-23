@@ -1,4 +1,4 @@
-name: Test Byse New PoW & Playback Flow
+name: Build Anime4Up v4 & Run Live Kotlin MegaMax E2E
 
 on:
   push:
@@ -9,9 +9,9 @@ permissions:
   contents: write
 
 jobs:
-  test-byse:
+  build-and-e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
 
     steps:
       - name: Checkout repository
@@ -19,254 +19,169 @@ jobs:
         with:
           ref: arena/b5447323-mehdigm-stream
 
-      - name: Test Byse 1080p / 720p / 480p live
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Accept Android SDK licenses
         run: |
-          pip install -q requests pycryptodome
-          mkdir -p .tmp_build_verify
-          python3 - <<'PY'
-          import base64, hashlib, json, os, time, traceback, urllib.parse, requests
-          from Crypto.Cipher import AES
-          from Crypto.Hash import SHA256
-          from Crypto.PublicKey import ECC
-          from Crypto.Signature import DSS
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+          chmod +x gradlew
 
-          UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+      - name: Build Anime4Up.cs3 (version 4)
+        run: |
+          set -euo pipefail
+          mkdir -p .tmp_build_verify build
+          ./gradlew :Anime4Up:clean :Anime4Up:make --stacktrace 2>&1 | tee .tmp_build_verify/gradle_build.log
+          cp Anime4Up/build/Anime4Up.cs3 build/Anime4Up.cs3
+          stat -c%s build/Anime4Up.cs3 | tee .tmp_build_verify/cs3_bytes.txt
 
-          def rotl32(x, k):
-              x &= 0xFFFFFFFF
-              return ((x << k) | (x >> (32 - k))) & 0xFFFFFFFF
+      - name: Execute compiled Anime4UpMegaMaxExtractor live on JVM
+        run: |
+          set -euo pipefail
+          WORK_TMP="/tmp/a4u_jvm_verify"
+          mkdir -p "$WORK_TMP/src/android/util" "$WORK_TMP/classes"
 
-          def imul32(a, b):
-              return ((a & 0xFFFFFFFF) * (b & 0xFFFFFFFF)) & 0xFFFFFFFF
+          # Download standalone org.json & kotlinc if needed, or compile shim with javac + Anime4Up printClasspath
+          curl -sSL "https://repo1.maven.org/maven2/org/json/json/20240303/json-20240303.jar" -o "$WORK_TMP/json.jar"
 
-          def ye(e):
-              e[0] = (e[0] + e[1]) & 0xFFFFFFFF
-              e[3] = rotl32(e[3] ^ e[0], 16)
-              e[2] = (e[2] + e[3]) & 0xFFFFFFFF
-              e[1] = rotl32(e[1] ^ e[2], 12)
-              e[0] = (e[0] + e[1]) & 0xFFFFFFFF
-              e[3] = rotl32(e[3] ^ e[0], 8)
-              e[2] = (e[2] + e[3]) & 0xFFFFFFFF
-              e[1] = rotl32(e[1] ^ e[2], 7)
-
-          def gr(data: bytes):
-              e = [1779033703, 3144134277, 1013904242, 2773480762]
-              for b in data:
-                  e[0] = (e[0] + b) & 0xFFFFFFFF
-                  e[0] = rotl32(e[0], 7)
-                  ye(e)
-              for _ in range(8):
-                  ye(e)
-              r = [0] * 512
-              for i in range(512):
-                  ye(e)
-                  r[i] = (e[0] ^ e[2]) & 0xFFFFFFFF
-              for _ in range(2):
-                  for s in range(512):
-                      a = r[s] & 511
-                      c = (r[s] + r[a]) & 0xFFFFFFFF
-                      c = rotl32(c, 13)
-                      c = (c ^ imul32(r[(s + 1) & 511], 2654435761)) & 0xFFFFFFFF
-                      r[s] = c
-                      e[0] = (e[0] ^ c) & 0xFFFFFFFF
-                      ye(e)
-              n = [0] * 8
-              for i in range(8):
-                  ye(e)
-                  s = e[0]
-                  base = i * 64
-                  for c_idx in range(64):
-                      d = r[base + c_idx]
-                      s = (s + d) & 0xFFFFFFFF
-                      s = rotl32(s, 5)
-                      s = (s ^ imul32(d, 2246822519)) & 0xFFFFFFFF
-                  n[i] = (s ^ e[2]) & 0xFFFFFFFF
-              return n
-
-          def clz_words(words):
-              lz = 0
-              for w in words:
-                  if w == 0:
-                      lz += 32
-                  else:
-                      lz += 32 - w.bit_length()
-                      break
-              return lz
-
-          def solve_pow(nonce_str: str, difficulty: int) -> str:
-              prefix = (nonce_str + ":").encode("latin1")
-              s = 0
-              while s < 5_000_000:
-                  if clz_words(gr(prefix + str(s).encode("ascii"))) >= difficulty:
-                      return str(s)
-                  s += 1
-              return None
-
-          def b64u_enc(b: bytes) -> str:
-              return base64.urlsafe_b64encode(b).decode("ascii").rstrip("=")
-
-          def b64u_dec(s: str) -> bytes:
-              s = s.strip().replace("-", "+").replace("_", "/")
-              rem = len(s) % 4
-              if rem:
-                  s += "=" * (4 - rem)
-              return base64.b64decode(s)
-
-          def attest_device(sess: requests.Session, embed_origin: str, base_h: dict):
-              ch_r = sess.post(f"{embed_origin}/api/videos/access/challenge", headers=base_h, timeout=12)
-              if ch_r.status_code != 200:
-                  return {"error_challenge": ch_r.status_code, "text": ch_r.text[:300]}
-              ch = ch_r.json()
-              key = ECC.generate(curve="P-256")
-              pub_x = int(key.pointQ.x).to_bytes(32, "big")
-              pub_y = int(key.pointQ.y).to_bytes(32, "big")
-              signer = DSS.new(key, "fips-186-3")
-              sig = signer.sign(SHA256.new(ch["nonce"].encode("utf-8")))
-              attest_payload = {
-                  "viewer_id": "",
-                  "device_id": "",
-                  "challenge_id": ch["challenge_id"],
-                  "nonce": ch["nonce"],
-                  "signature": b64u_enc(sig),
-                  "public_key": {"kty": "EC", "crv": "P-256", "x": b64u_enc(pub_x), "y": b64u_enc(pub_y)},
-                  "client": {
-                      "user_agent": UA,
-                      "pixel_ratio": 1,
-                      "screen_width": 1920,
-                      "screen_height": 1080,
-                      "color_depth": 24,
-                      "languages": ["en-US", "en"],
-                      "timezone": "UTC",
-                      "hardware_concurrency": 8,
-                      "device_memory": 8,
-                      "touch_points": 0,
-                      "webgl_vendor": "Google Inc. (Intel)",
-                      "webgl_renderer": "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)",
-                      "pointer_type": "fine,hover",
-                      "extra": {"vendor": "Google Inc.", "appVersion": UA.replace("Mozilla/", "")},
-                  },
-                  "storage": {},
-                  "attributes": {"entropy": "medium"},
-              }
-              at_r = sess.post(
-                  f"{embed_origin}/api/videos/access/attest",
-                  headers={**base_h, "Content-Type": "application/json"},
-                  json=attest_payload,
-                  timeout=12,
-              )
-              if at_r.status_code != 200:
-                  return {"error_attest": at_r.status_code, "text": at_r.text[:300]}
-              d = at_r.json()
-              return {
-                  "token": d["token"],
-                  "viewer_id": d["viewer_id"],
-                  "device_id": d["device_id"],
-                  "confidence": d.get("confidence", "medium"),
-              }
-
-          results = {}
-          for tier, code in [("1080p", "emvm2es54ipg"), ("720p", "1340s9004e5e"), ("480p", "a4r52h18f8z8")]:
-              try:
-                  sess = requests.Session()
-                  det = sess.get(
-                      f"https://byseraguci.com/api/videos/{code}/embed/details",
-                      headers={"User-Agent": UA, "Accept": "application/json", "Referer": f"https://byseraguci.com/e/{code}"},
-                      timeout=12,
-                  ).json()
-                  embed_url = det["embed_frame_url"]
-                  pu = urllib.parse.urlparse(embed_url)
-                  embed_origin = f"{pu.scheme}://{pu.netloc}"
-                  base_h = {
-                      "User-Agent": UA,
-                      "Accept": "*/*",
-                      "Origin": embed_origin,
-                      "Referer": embed_url,
-                      "X-Embed-Origin": "byseraguci.com",
-                      "X-Embed-Referer": "https://share4max.com/",
-                      "X-Embed-Parent": f"https://byseraguci.com/e/{code}",
+          cat > "$WORK_TMP/src/android/util/Base64.java" <<'JAVA'
+          package android.util;
+          public class Base64 {
+              public static final int DEFAULT = 0;
+              public static final int NO_PADDING = 1;
+              public static final int NO_WRAP = 2;
+              public static final int URL_SAFE = 8;
+              public static byte[] decode(String str, int flags) {
+                  String clean = str.trim();
+                  if ((flags & URL_SAFE) != 0 || clean.indexOf('-') >= 0 || clean.indexOf('_') >= 0) {
+                      clean = clean.replace('-', '+').replace('_', '/');
                   }
-                  settings = sess.get(f"{embed_origin}/api/videos/{code}/embed/settings", headers=base_h, timeout=12).json()
-                  fp = attest_device(sess, embed_origin, base_h)
-                  cap_tok = None
-                  cap_r = {}
-                  solve_ms = 0
-                  if settings.get("captcha_required"):
-                      cap_body = {"fingerprint": fp} if "token" in fp else {}
-                      cap_r = sess.post(
-                          f"{embed_origin}/api/videos/{code}/embed/captcha",
-                          headers={**base_h, "Content-Type": "application/json"},
-                          json=cap_body,
-                          timeout=12,
-                      ).json()
-                      t0 = time.time()
-                      sol = solve_pow(cap_r["pow_nonce"], int(cap_r["pow_difficulty"]))
-                      solve_ms = round((time.time() - t0) * 1000, 1)
-                      ver_body = {"pow_token": cap_r["pow_token"], "solution": sol}
-                      if "token" in fp:
-                          ver_body["fingerprint"] = fp
-                      ver_r = sess.post(
-                          f"{embed_origin}/api/videos/{code}/embed/captcha/verify",
-                          headers={**base_h, "Content-Type": "application/json"},
-                          json=ver_body,
-                          timeout=12,
-                      ).json()
-                      cap_tok = ver_r.get("token")
+                  clean = clean.replaceAll("\\s+", "");
+                  int rem = clean.length() % 4;
+                  if (rem != 0) clean += "====".substring(rem);
+                  return java.util.Base64.getDecoder().decode(clean);
+              }
+              public static String encodeToString(byte[] input, int flags) {
+                  java.util.Base64.Encoder enc = ((flags & URL_SAFE) != 0)
+                      ? java.util.Base64.getUrlEncoder()
+                      : java.util.Base64.getEncoder();
+                  if ((flags & NO_PADDING) != 0) enc = enc.withoutPadding();
+                  String out = enc.encodeToString(input);
+                  return out;
+              }
+          }
+          JAVA
 
-                  pb_h = {**base_h, "Content-Type": "application/json"}
-                  if cap_tok:
-                      pb_h["X-Captcha-Token"] = cap_tok
-                  if "token" in fp:
-                      pb_r = sess.post(f"{embed_origin}/api/videos/{code}/embed/playback", headers=pb_h, json={"fingerprint": fp}, timeout=12)
-                  else:
-                      pb_r = sess.get(f"{embed_origin}/api/videos/{code}/embed/playback", headers=pb_h, timeout=12)
+          cat > "$WORK_TMP/src/android/util/Log.java" <<'JAVA'
+          package android.util;
+          public class Log {
+              public static int d(String t, String m) { return 0; }
+              public static int e(String t, String m) { return 0; }
+              public static int e(String t, String m, Throwable tr) { return 0; }
+              public static int i(String t, String m) { return 0; }
+              public static int w(String t, String m) { return 0; }
+          }
+          JAVA
 
-                  pb_json = pb_r.json()
-                  pb = pb_json.get("playback") or {}
-                  if not pb:
-                      results[tier] = {"pb_status": pb_r.status_code, "pb_json": pb_json, "fp": fp, "cap_r": cap_r}
-                      continue
-                  kp = pb.get("key_parts", [])
-                  ver = int(str(pb.get("version", "1")).strip() or "1")
-                  a_idx, b_idx = ver, 31 - ver
-                  if 1 <= a_idx <= len(kp) and 1 <= b_idx <= len(kp):
-                      key = b64u_dec(kp[a_idx - 1]) + b64u_dec(kp[b_idx - 1])
-                  else:
-                      key = b"".join(b64u_dec(x) for x in kp)
-                  iv = b64u_dec(pb["iv"])
-                  ct_tag = b64u_dec(pb["payload"])
-                  dec = json.loads(AES.new(key, AES.MODE_GCM, nonce=iv).decrypt_and_verify(ct_tag[:-16], ct_tag[-16:]).decode("utf-8"))
-                  srcs = dec.get("sources", [])
-                  m3u8_status = None
-                  m3u8_head = None
-                  if srcs:
-                      su = srcs[0]["url"]
-                      mr = sess.get(su, headers={"User-Agent": UA, "Referer": f"{embed_origin}/", "Origin": embed_origin}, timeout=12)
-                      m3u8_status = mr.status_code
-                      m3u8_head = mr.text[:200]
-                  results[tier] = {
-                      "fp_ok": "token" in fp,
-                      "pow_difficulty": cap_r.get("pow_difficulty"),
-                      "pow_solve_ms": solve_ms,
-                      "pb_status": pb_r.status_code,
-                      "sources_count": len(srcs),
-                      "sources": [{"label": x.get("label"), "quality": x.get("quality"), "height": x.get("height")} for x in srcs],
-                      "m3u8_status": m3u8_status,
-                      "m3u8_head": m3u8_head,
+          cat > "$WORK_TMP/src/VerifyMain.java" <<'JAVA'
+          import com.anime4up.Anime4UpMegaMaxExtractor;
+          import com.lagradost.cloudstream3.SubtitleFile;
+          import com.lagradost.cloudstream3.utils.ExtractorLink;
+          import java.util.*;
+          import java.util.concurrent.CopyOnWriteArrayList;
+          import kotlin.Unit;
+          import kotlin.coroutines.*;
+          import kotlinx.coroutines.BuildersKt;
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+
+          public class VerifyMain {
+              public static void main(String[] args) throws Exception {
+                  List<ExtractorLink> links = new CopyOnWriteArrayList<>();
+                  List<SubtitleFile> subs = new CopyOnWriteArrayList<>();
+                  long t0 = System.currentTimeMillis();
+
+                  BuildersKt.runBlocking(
+                      EmptyCoroutineContext.INSTANCE,
+                      (scope, cont) -> new Anime4UpMegaMaxExtractor().extractWithHint(
+                          "https://share4max.com/iframe/WJH4dVV5cgxk0",
+                          "https://w1.anime4up.rest/episode/%d8%a7%d9%86%d9%85%d9%8a-tokyo-revengers-santen-sensou-hen-%d8%a7%d9%84%d8%ad%d9%84%d9%82%d8%a9-4-%d9%85%d8%aa%d8%b1%d8%ac%d9%85%d8%a9/",
+                          "FHD - 1080p",
+                          sub -> { subs.add(sub); return Unit.INSTANCE; },
+                          link -> { links.add(link); return Unit.INSTANCE; },
+                          cont
+                      )
+                  );
+
+                  long elapsedMs = System.currentTimeMillis() - t0;
+                  Map<String, List<Integer>> bySource = new TreeMap<>();
+                  JSONArray arr = new JSONArray();
+                  Set<String> uniqueUrls = new LinkedHashSet<>();
+
+                  for (ExtractorLink l : links) {
+                      if (!uniqueUrls.add(l.getUrl())) continue;
+                      bySource.computeIfAbsent(l.getSource(), k -> new ArrayList<>()).add(l.getQuality());
+                      JSONObject o = new JSONObject();
+                      o.put("source", l.getSource());
+                      o.put("name", l.getName());
+                      o.put("quality", l.getQuality());
+                      o.put("type", String.valueOf(l.getType()));
+                      o.put("referer", l.getReferer());
+                      o.put("url_host", new java.net.URI(l.getUrl()).getHost());
+                      o.put("url_sample", l.getUrl().substring(0, Math.min(120, l.getUrl().length())));
+                      arr.put(o);
                   }
-              except Exception as exc:
-                  results[tier] = {"error": repr(exc), "trace": traceback.format_exc()[-1000:]}
 
-          with open(".tmp_build_verify/byse_live_test.json", "w") as fh:
-              json.dump(results, fh, indent=2)
-          print(json.dumps(results, indent=2))
-          PY
+                  JSONObject summary = new JSONObject();
+                  summary.put("elapsed_ms", elapsedMs);
+                  summary.put("total_emitted", links.size());
+                  summary.put("unique_links", uniqueUrls.size());
+                  summary.put("subtitles_count", subs.size());
+                  JSONObject grouped = new JSONObject();
+                  for (Map.Entry<String, List<Integer>> e : bySource.entrySet()) {
+                      grouped.put(e.getKey(), new JSONArray(e.getValue()));
+                  }
+                  summary.put("by_source_qualities", grouped);
+                  summary.put("links", arr);
 
-      - name: Commit Byse live test results
+                  java.nio.file.Files.writeString(
+                      java.nio.file.Path.of(".tmp_build_verify/live_kotlin_links.json"),
+                      summary.toString(2)
+                  );
+                  System.out.println("Elapsed ms: " + elapsedMs + ", Unique links: " + uniqueUrls.size());
+                  System.out.println(grouped.toString(2));
+              }
+          }
+          JAVA
+
+          # Collect all jars from ~/.gradle caches + cloudstream.jar + Anime4Up compiled classes
+          KOTLIN_CLASSES=$(find Anime4Up/build -type d -path "*kotlin-classes/debug" | head -n 1)
+          CS_JAR=$(find ~/.gradle -name "cloudstream*.jar" -o -name "cloudstream.jar" 2>/dev/null | head -n 1)
+          if [ -z "$CS_JAR" ]; then
+            CS_JAR=$(find . /home/runner -name "cloudstream*.jar" 2>/dev/null | head -n 1)
+          fi
+          GRADLE_JARS=$(find ~/.gradle/caches/modules-2/files-2.1 -name "*.jar" \
+            | grep -E "(kotlin-stdlib|kotlinx-coroutines|nicehttp|okhttp|okio|jsoup|jackson)" \
+            | tr '\n' ':')
+
+          CP="$WORK_TMP/classes:$WORK_TMP/json.jar:$KOTLIN_CLASSES:$CS_JAR:$GRADLE_JARS"
+          javac -cp "$CP" -d "$WORK_TMP/classes" \
+            "$WORK_TMP/src/android/util/Base64.java" \
+            "$WORK_TMP/src/android/util/Log.java" \
+            "$WORK_TMP/src/VerifyMain.java"
+
+          java -cp "$CP" VerifyMain
+
+      - name: Commit build & live Kotlin E2E report
         if: always()
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add -f .tmp_build_verify/byse_live_test.json || true
-          git commit --allow-empty -m "chore: verify byse new pow + attest live [skip ci]"
+          git add -f build/Anime4Up.cs3 .tmp_build_verify/ || true
+          git commit --allow-empty -m "chore: build Anime4Up v4 & run live Kotlin MegaMax E2E [skip ci]"
           git pull --rebase origin arena/b5447323-mehdigm-stream || true
           git push origin arena/b5447323-mehdigm-stream
