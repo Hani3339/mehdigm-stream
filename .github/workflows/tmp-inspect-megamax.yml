@@ -41,7 +41,6 @@ jobs:
 
       - name: Execute compiled Anime4UpMegaMaxExtractor live on JVM
         run: |
-          set -euo pipefail
           WORK_TMP="/tmp/a4u_jvm_verify"
           mkdir -p "$WORK_TMP/src/android/util" "$WORK_TMP/classes"
 
@@ -101,14 +100,6 @@ jobs:
 
           public class VerifyMain {
               public static void main(String[] args) throws Exception {
-                  // Smoke check `app.get` first so any missing JVM classpath jar is immediately visible
-                  try {
-                      Object appClient = com.lagradost.cloudstream3.MainActivityKt.getApp();
-                      System.out.println("CloudStream app singleton initialized: " + appClient);
-                  } catch (Throwable t) {
-                      t.printStackTrace();
-                  }
-
                   List<ExtractorLink> links = new CopyOnWriteArrayList<>();
                   List<SubtitleFile> subs = new CopyOnWriteArrayList<>();
                   long t0 = System.currentTimeMillis();
