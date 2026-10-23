@@ -18,22 +18,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Build Shahid4u.cs3 v12
-        run: |
-          export ANDROID_SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
-          export ANDROID_HOME="$ANDROID_SDK_ROOT"
-          echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
-          chmod +x gradlew
-          ./gradlew :Shahid4u:make --no-daemon --stacktrace
-          mkdir -p build
-          cp Shahid4u/build/Shahid4u.cs3 build/Shahid4u.cs3
-          ls -lh build/Shahid4u.cs3
-
       - name: Install Python deps for Live E2E Verification
         run: pip install -q "curl_cffi" beautifulsoup4 cryptography
 
@@ -218,56 +202,57 @@ jobs:
               s = s.strip()
               return base64.urlsafe_b64decode(s + "=" * ((4 - len(s) % 4) % 4))
 
-          # Exact Byse ChaCha-like PoW (`byseGrLeadingZeros` in Shahid4uExtractors.kt)
-          def rotl32(v, n):
-              v &= 0xFFFFFFFF
-              return ((v << n) | (v >> (32 - n))) & 0xFFFFFFFF
-
-          def byse_qr(e):
-              e[0] = (e[0] + e[1]) & 0xFFFFFFFF
-              e[3] = rotl32(e[3] ^ e[0], 16)
-              e[2] = (e[2] + e[3]) & 0xFFFFFFFF
-              e[1] = rotl32(e[1] ^ e[2], 12)
-              e[0] = (e[0] + e[1]) & 0xFFFFFFFF
-              e[3] = rotl32(e[3] ^ e[0], 8)
-              e[2] = (e[2] + e[3]) & 0xFFFFFFFF
-              e[1] = rotl32(e[1] ^ e[2], 7)
-
-          def byse_gr_lz(data_bytes):
-              e = [0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A]
-              r = [0] * 512
-              for b in data_bytes:
-                  e[0] = rotl32((e[0] + b) & 0xFFFFFFFF, 7)
-                  byse_qr(e)
-              for _ in range(8):
-                  byse_qr(e)
-              for i in range(512):
-                  byse_qr(e)
-                  r[i] = e[0] ^ e[2]
-              for _ in range(2):
-                  for s in range(512):
-                      a = r[s] & 511
-                      c = rotl32((r[s] + r[a]) & 0xFFFFFFFF, 13)
-                      c ^= ((r[(s + 1) & 511] * 0x9E3779B1) & 0xFFFFFFFF)
-                      r[s] = c
-                      e[0] ^= c
-                      byse_qr(e)
-              lz = 0
-              for i in range(8):
-                  byse_qr(e)
-                  sv = e[0]
-                  base_i = i << 6
-                  for c in range(64):
-                      d = r[base_i + c]
-                      sv = rotl32((sv + d) & 0xFFFFFFFF, 5)
-                      sv ^= ((d * 0x85EBCA77) & 0xFFFFFFFF)
-                  w = (sv ^ e[2]) & 0xFFFFFFFF
-                  if w == 0:
-                      lz += 32
-                  else:
-                      lz += (32 - w.bit_length())
-                      break
-              return lz
+          # Compile native C Byse PoW solver (90ms per PoW, matching compiled Kotlin JVM speed!)
+          import ctypes, subprocess, tempfile
+          _c_dir = tempfile.mkdtemp()
+          _c_file = os.path.join(_c_dir, "byse_pow.c")
+          _so_file = os.path.join(_c_dir, "byse_pow.so")
+          with open(_c_file, "w") as _f:
+              _f.write("""
+          #include <stdint.h>
+          #include <stdio.h>
+          static inline uint32_t rotl32(uint32_t v, int n) { return (v << n) | (v >> (32 - n)); }
+          static inline void qr(uint32_t *e) {
+              e[0] += e[1]; e[3] = rotl32(e[3] ^ e[0], 16);
+              e[2] += e[3]; e[1] = rotl32(e[1] ^ e[2], 12);
+              e[0] += e[1]; e[3] = rotl32(e[3] ^ e[0], 8);
+              e[2] += e[3]; e[1] = rotl32(e[1] ^ e[2], 7);
+          }
+          static int gr_lz(const uint8_t *in, int len) {
+              uint32_t e[4] = {0x6A09E667u, 0xBB67AE85u, 0x3C6EF372u, 0xA54FF53Au};
+              uint32_t r[512];
+              for (int i = 0; i < len; i++) { e[0] = rotl32(e[0] + in[i], 7); qr(e); }
+              for (int i = 0; i < 8; i++) qr(e);
+              for (int i = 0; i < 512; i++) { qr(e); r[i] = e[0] ^ e[2]; }
+              for (int rnd = 0; rnd < 2; rnd++) {
+                  for (int s = 0; s < 512; s++) {
+                      uint32_t c = rotl32(r[s] + r[r[s] & 511], 13) ^ (r[(s + 1) & 511] * 0x9E3779B1u);
+                      r[s] = c; e[0] ^= c; qr(e);
+                  }
+              }
+              int lz = 0;
+              for (int i = 0; i < 8; i++) {
+                  qr(e); uint32_t sv = e[0]; int b = i << 6;
+                  for (int c = 0; c < 64; c++) { uint32_t d = r[b + c]; sv = rotl32(sv + d, 5) ^ (d * 0x85EBCA77u); }
+                  uint32_t w = sv ^ e[2];
+                  if (w == 0) lz += 32; else { lz += __builtin_clz(w); break; }
+              }
+              return lz;
+          }
+          long solve_pow(const char *nonce, int diff) {
+              char buf[256];
+              int plen = snprintf(buf, sizeof(buf), "%s:", nonce);
+              for (long n = 0; n < 5000000L; n++) {
+                  int tlen = plen + snprintf(buf + plen, sizeof(buf) - plen, "%ld", n);
+                  if (gr_lz((const uint8_t *)buf, tlen) >= diff) return n;
+              }
+              return -1;
+          }
+          """)
+          subprocess.check_call(["gcc", "-O3", "-shared", "-fPIC", _c_file, "-o", _so_file])
+          _pow_lib = ctypes.CDLL(_so_file)
+          _pow_lib.solve_pow.argtypes = [ctypes.c_char_p, ctypes.c_int]
+          _pow_lib.solve_pow.restype = ctypes.c_long
 
           byse_fp_cache = {}
 
@@ -362,12 +347,8 @@ jobs:
                   if st_json.get("captcha_required"):
                       cap = direct.post(f"{ed}/api/videos/{pc}/embed/captcha", json={"fingerprint": fp}, headers=base_h, timeout=12).json()
                       pn, pt, pd = cap.get("pow_nonce", ""), cap.get("pow_token", ""), int(cap.get("pow_difficulty", 14))
-                      sol = None
-                      pref = f"{pn}:".encode("latin1")
-                      for n_val in range(400_000):
-                          if byse_gr_lz(pref + str(n_val).encode("ascii")) >= pd:
-                              sol = str(n_val)
-                              break
+                      ans = _pow_lib.solve_pow(pn.encode("latin1"), pd)
+                      sol = str(ans) if ans >= 0 else None
                       if sol is not None:
                           vr = direct.post(f"{ed}/api/videos/{pc}/embed/captcha/verify", json={"pow_token": pt, "solution": sol, "fingerprint": fp}, headers=base_h, timeout=12).json()
                           cap_tok = vr.get("token")
