@@ -1,0 +1,274 @@
+name: Inspect Anime4up1 & Anime4up2
+
+on:
+  push:
+    branches:
+      - 'arena/**'
+
+permissions:
+  contents: write
+
+jobs:
+  inspect-vnx:
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - name: Install curl_cffi, bs4, and Playwright Chromium
+        run: |
+          pip install -q curl_cffi beautifulsoup4 playwright
+          playwright install chromium
+
+      - name: Capture Anime4up1 & Anime4up2 HTML, JS, and Network Traffic
+        run: |
+          python3 -u - << 'PYEOF'
+          import json, os, re, time, urllib.parse
+          from concurrent.futures import ThreadPoolExecutor, as_completed
+          from bs4 import BeautifulSoup
+          from curl_cffi import requests as creq
+          from playwright.sync_api import sync_playwright
+
+          os.makedirs(".tmp_vnx/scripts", exist_ok=True)
+
+          EP_URL = "https://w1.anime4up.rest/episode/%d8%a7%d9%86%d9%85%d9%8a-tokyo-revengers-santen-sensou-hen-%d8%a7%d9%84%d8%ad%d9%84%d9%82%d8%a9-4-%d9%85%d8%aa%d8%b1%d8%ac%d9%85%d8%a9/"
+
+          PROXY_FEEDS = [
+              ("http", "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/https.txt"),
+              ("http", "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/http.txt"),
+              ("http", "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt"),
+              ("socks5", "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt"),
+              ("http", "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt"),
+              ("socks5", "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/socks5/data.txt"),
+              ("http", "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=6500&country=all&ssl=yes&anonymity=all"),
+              ("http", "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt"),
+              ("socks5", "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt"),
+          ]
+
+          def is_valid_a4u(t):
+              return bool(t and len(t) > 1200 and "just a moment" not in t.lower() and ("episode-servers" in t or "anime4up" in t.lower()))
+
+          def fetch_episode_html(url):
+              try:
+                  r = creq.get(url, impersonate="chrome124", timeout=12)
+                  if r.status_code == 200 and is_valid_a4u(r.text):
+                      print("[Direct] Got episode HTML directly!")
+                      return r.text
+              except Exception as e:
+                  print("[Direct] Failed:", e)
+
+              per_feed = []
+              for proto, feed in PROXY_FEEDS:
+                  try:
+                      r = creq.get(feed, timeout=8)
+                      if r.status_code == 200:
+                          lst = [
+                              (ln.strip() if "://" in ln.strip() else f"{proto}://{ln.strip()}")
+                              for ln in r.text.splitlines()[:160]
+                              if ":" in ln and not ln.strip().startswith("#")
+                          ]
+                          per_feed.append(lst)
+                  except Exception:
+                      pass
+              cands, seen = [], set()
+              for i in range(max((len(x) for x in per_feed), default=0)):
+                  for lst in per_feed:
+                      if i < len(lst) and lst[i] not in seen:
+                          seen.add(lst[i])
+                          cands.append(lst[i])
+                  if len(cands) >= 550:
+                      break
+
+              print(f"[Proxy] Testing {len(cands)} proxies...")
+              def probe(p):
+                  try:
+                      r = creq.get(url, headers={"Referer": "https://w1.anime4up.rest/"}, impersonate="chrome124", proxies={"http": p, "https": p}, timeout=10)
+                      if r.status_code == 200 and is_valid_a4u(r.text):
+                          return p, r.text
+                  except Exception:
+                      pass
+                  return None
+
+              ex = ThreadPoolExecutor(max_workers=50)
+              try:
+                  futs = [ex.submit(probe, p) for p in cands]
+                  for f in as_completed(futs):
+                      res = f.result()
+                      if res:
+                          print(f"[Proxy] Got episode HTML via {res[0]}")
+                          ex.shutdown(wait=False, cancel_futures=True)
+                          return res[1]
+              finally:
+                  ex.shutdown(wait=False, cancel_futures=True)
+              return ""
+
+          ep_html = fetch_episode_html(EP_URL)
+          with open(".tmp_vnx/episode.html", "w", encoding="utf-8") as f:
+              f.write(ep_html)
+
+          servers = []
+          if ep_html:
+              soup = BeautifulSoup(ep_html, "html.parser")
+              for li in soup.select("ul#episode-servers li[data-watch], li[data-watch]"):
+                  sname = li.select_one(".watch-server-name")
+                  qname = li.select_one(".quality")
+                  servers.append({
+                      "name": sname.get_text(strip=True) if sname else li.get_text(strip=True),
+                      "quality": qname.get_text(strip=True) if qname else "",
+                      "url": li.get("data-watch", ""),
+                      "attrs": dict(li.attrs),
+                  })
+              # Also save inline scripts from episode page that handle server switching
+              ep_scripts = [sc.get_text() for sc in soup.find_all("script") if "episode-servers" in sc.get_text() or "data-watch" in sc.get_text()]
+              with open(".tmp_vnx/ep_inline_scripts.js", "w", encoding="utf-8") as f:
+                  f.write("\n\n// --- SCRIPT ---\n\n".join(ep_scripts))
+
+          print("Discovered watch servers:", json.dumps(servers, ensure_ascii=False, indent=2))
+
+          target_vnx = [s for s in servers if "anime4up" in s["name"].lower() or "c1oiijc" in s["url"].lower()]
+          if not target_vnx:
+              target_vnx = [
+                  {"name": "anime4up1_tr4", "url": "https://4x.c1oiijc.shop/Anime4up-S1/mal/59088/4/sub/"},
+                  {"name": "anime4up2_tr4", "url": "https://4x.c1oiijc.shop/Anime4up-S2/mal/59088/4/sub/"},
+              ]
+          target_vnx.extend([
+              {"name": "anime4up1_bc3", "url": "https://4x.c1oiijc.shop/Anime4up-S1/mal/61967/3/sub/"},
+              {"name": "anime4up2_bc3", "url": "https://4x.c1oiijc.shop/Anime4up-S2/mal/61967/3/sub/"},
+          ])
+
+          curl_results = {}
+          script_idx = 0
+          for item in target_vnx:
+              label = re.sub(r"[^a-zA-Z0-9_-]", "_", item["name"])
+              u = item["url"]
+              hdrs = {
+                  "Referer": "https://w1.anime4up.rest/",
+                  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                  "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
+                  "Sec-Fetch-Dest": "iframe",
+                  "Sec-Fetch-Mode": "navigate",
+                  "Sec-Fetch-Site": "cross-site",
+                  "Upgrade-Insecure-Requests": "1",
+              }
+              try:
+                  r = creq.get(u, headers=hdrs, impersonate="chrome124", timeout=15)
+                  curl_results[label] = {
+                      "url": u,
+                      "final_url": str(r.url),
+                      "status": r.status_code,
+                      "headers": dict(r.headers),
+                      "len": len(r.text),
+                  }
+                  with open(f".tmp_vnx/{label}.html", "w", encoding="utf-8") as f:
+                      f.write(r.text)
+                  s = BeautifulSoup(r.text, "html.parser")
+                  for sc in s.find_all("script", src=True):
+                      js_url = urllib.parse.urljoin(str(r.url), sc["src"])
+                      try:
+                          jr = creq.get(js_url, headers={"Referer": str(r.url)}, impersonate="chrome124", timeout=12)
+                          fname = f"{script_idx:02d}_{label}_" + re.sub(r"[^a-zA-Z0-9._-]", "_", js_url.split("/")[-1].split("?")[0])[:50]
+                          script_idx += 1
+                          with open(f".tmp_vnx/scripts/{fname}.js", "w", encoding="utf-8") as jf:
+                              jf.write(f"// URL: {js_url}\n// STATUS: {jr.status_code}\n" + jr.text)
+                      except Exception as je:
+                          print("JS fetch err:", js_url, je)
+              except Exception as e:
+                  curl_results[label] = {"url": u, "error": str(e)}
+
+          # Now run real Headless Chromium with parent page mocked at https://w1.anime4up.rest/episode/test/
+          pw_logs = {}
+          with sync_playwright() as p:
+              browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
+              for item in target_vnx[:4]:
+                  label = re.sub(r"[^a-zA-Z0-9_-]", "_", item["name"])
+                  iframe_url = item["url"]
+                  print(f"[Playwright] Loading {label} -> {iframe_url}")
+                  context = browser.new_context(
+                      user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                      locale="ar",
+                  )
+                  page = context.new_page()
+                  events = []
+
+                  def handle_route(route):
+                      req = route.request
+                      if req.url == "https://w1.anime4up.rest/episode/mock-parent/":
+                          route.fulfill(
+                              status=200,
+                              content_type="text/html; charset=utf-8",
+                              body=f'<!DOCTYPE html><html><head><meta name="referrer" content="origin-when-cross-origin"></head><body><iframe id="p" src="{iframe_url}" width="800" height="450" allowfullscreen></iframe></body></html>',
+                          )
+                      else:
+                          route.continue_()
+
+                  page.route("https://w1.anime4up.rest/episode/mock-parent/", handle_route)
+
+                  def on_response(resp):
+                      try:
+                          u = resp.url
+                          if u == "https://w1.anime4up.rest/episode/mock-parent/":
+                              return
+                          ct = resp.headers.get("content-type", "")
+                          entry = {
+                              "url": u,
+                              "method": resp.request.method,
+                              "resource_type": resp.request.resource_type,
+                              "req_headers": dict(resp.request.headers),
+                              "post_data": resp.request.post_data,
+                              "status": resp.status,
+                              "content_type": ct,
+                              "resp_headers": dict(resp.headers),
+                          }
+                          if any(k in ct.lower() for k in ("json", "text", "javascript", "mpegurl", "vtt", "xml")) or any(ext in u.lower() for ext in (".m3u8", ".vtt", ".srt", ".ass", "api", "source", "ajax", "embed", "mal")):
+                              try:
+                                  body_bytes = resp.body()
+                                  if len(body_bytes) < 400_000:
+                                      entry["body_preview"] = body_bytes.decode("utf-8", errors="replace")[:25000]
+                              except Exception as be:
+                                  entry["body_err"] = str(be)
+                          events.append(entry)
+                      except Exception:
+                          pass
+
+                  page.on("response", on_response)
+                  try:
+                      page.goto("https://w1.anime4up.rest/episode/mock-parent/", wait_until="domcontentloaded", timeout=25000)
+                      page.wait_for_timeout(10000)
+                      # Try clicking inside iframe if there's a play button
+                      for frame in page.frames:
+                          if frame.url != "https://w1.anime4up.rest/episode/mock-parent/":
+                              try:
+                                  with open(f".tmp_vnx/pw_frame_{label}.html", "w", encoding="utf-8") as ff:
+                                      ff.write(frame.content())
+                              except Exception:
+                                  pass
+                              try:
+                                  frame.click("body", timeout=2000)
+                              except Exception:
+                                  pass
+                      page.wait_for_timeout(6000)
+                  except Exception as pe:
+                      print("PW nav err:", pe)
+
+                  pw_logs[label] = events
+                  context.close()
+              browser.close()
+
+          with open(".tmp_vnx/summary.json", "w", encoding="utf-8") as f:
+              json.dump({"servers": servers, "curl_results": curl_results, "pw_logs": pw_logs}, f, ensure_ascii=False, indent=2)
+          print("=== DONE CAPTURING VNX ===")
+          PYEOF
+
+      - name: Commit captured VNX artifacts
+        if: always()
+        run: |
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f .tmp_vnx/
+          git commit --allow-empty -m "chore: capture anime4up1 & anime4up2 network trace [skip ci]"
+          git pull --rebase origin "${{ github.ref_name }}" || true
+          git push origin "${{ github.ref_name }}"
