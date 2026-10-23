@@ -1,4 +1,4 @@
-name: Fetch Byse PoW & Video Bundles
+name: Test Byse New PoW & Playback Flow
 
 on:
   push:
@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  fetch-bundles:
+  test-byse:
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
@@ -19,18 +19,245 @@ jobs:
         with:
           ref: arena/b5447323-mehdigm-stream
 
-      - name: Fetch pow & videoPagesBundle
+      - name: Test Byse 1080p / 720p / 480p live
         run: |
+          pip install -q requests pycryptodome
           mkdir -p .tmp_build_verify
-          curl -sS "https://n1mwq.org/assets/pow-DEJGtdh2.js" -o .tmp_build_verify/pow.js
-          curl -sS "https://n1mwq.org/assets/videoPagesBundle-Bgi0QmPo.js" -o .tmp_build_verify/videoPagesBundle.js
-          ls -lh .tmp_build_verify/pow.js .tmp_build_verify/videoPagesBundle.js
+          python3 - <<'PY'
+          import base64, hashlib, json, os, time, urllib.parse, requests
+          from Crypto.Cipher import AES
+          from Crypto.PublicKey import ECC
+          from Crypto.Signature import DSS
 
-      - name: Commit bundles
+          UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+          def rotl32(x, k):
+              x &= 0xFFFFFFFF
+              return ((x << k) | (x >> (32 - k))) & 0xFFFFFFFF
+
+          def imul32(a, b):
+              return ((a & 0xFFFFFFFF) * (b & 0xFFFFFFFF)) & 0xFFFFFFFF
+
+          def ye(e):
+              e[0] = (e[0] + e[1]) & 0xFFFFFFFF
+              e[3] = rotl32(e[3] ^ e[0], 16)
+              e[2] = (e[2] + e[3]) & 0xFFFFFFFF
+              e[1] = rotl32(e[1] ^ e[2], 12)
+              e[0] = (e[0] + e[1]) & 0xFFFFFFFF
+              e[3] = rotl32(e[3] ^ e[0], 8)
+              e[2] = (e[2] + e[3]) & 0xFFFFFFFF
+              e[1] = rotl32(e[1] ^ e[2], 7)
+
+          def gr(data: bytes):
+              e = [1779033703, 3144134277, 1013904242, 2773480762]
+              for b in data:
+                  e[0] = (e[0] + b) & 0xFFFFFFFF
+                  e[0] = rotl32(e[0], 7)
+                  ye(e)
+              for _ in range(8):
+                  ye(e)
+              r = [0] * 512
+              for i in range(512):
+                  ye(e)
+                  r[i] = (e[0] ^ e[2]) & 0xFFFFFFFF
+              for _ in range(2):
+                  for s in range(512):
+                      a = r[s] & 511
+                      c = (r[s] + r[a]) & 0xFFFFFFFF
+                      c = rotl32(c, 13)
+                      c = (c ^ imul32(r[(s + 1) & 511], 2654435761)) & 0xFFFFFFFF
+                      r[s] = c
+                      e[0] = (e[0] ^ c) & 0xFFFFFFFF
+                      ye(e)
+              n = [0] * 8
+              for i in range(8):
+                  ye(e)
+                  s = e[0]
+                  base = i * 64
+                  for c_idx in range(64):
+                      d = r[base + c_idx]
+                      s = (s + d) & 0xFFFFFFFF
+                      s = rotl32(s, 5)
+                      s = (s ^ imul32(d, 2246822519)) & 0xFFFFFFFF
+                  n[i] = (s ^ e[2]) & 0xFFFFFFFF
+              return n
+
+          def clz_words(words):
+              lz = 0
+              for w in words:
+                  if w == 0:
+                      lz += 32
+                  else:
+                      lz += 32 - w.bit_length()
+                      break
+              return lz
+
+          def solve_pow(nonce_str: str, difficulty: int) -> str:
+              prefix = (nonce_str + ":").encode("latin1")
+              s = 0
+              while s < 5_000_000:
+                  if clz_words(gr(prefix + str(s).encode("ascii"))) >= difficulty:
+                      return str(s)
+                  s += 1
+              return None
+
+          def b64u_enc(b: bytes) -> str:
+              return base64.urlsafe_b64encode(b).decode("ascii").rstrip("=")
+
+          def b64u_dec(s: str) -> bytes:
+              s = s.strip().replace("-", "+").replace("_", "/")
+              rem = len(s) % 4
+              if rem:
+                  s += "=" * (4 - rem)
+              return base64.b64decode(s)
+
+          def attest_device(sess: requests.Session, embed_origin: str, base_h: dict):
+              ch_r = sess.post(f"{embed_origin}/api/videos/access/challenge", headers=base_h, timeout=12)
+              if ch_r.status_code != 200:
+                  return {"error_challenge": ch_r.status_code, "text": ch_r.text[:300]}
+              ch = ch_r.json()
+              key = ECC.generate(curve="P-256")
+              pub_x = int(key.pointQ.x).to_bytes(32, "big")
+              pub_y = int(key.pointQ.y).to_bytes(32, "big")
+              signer = DSS.new(key, "fips-186-3")
+              sig = signer.sign(hashlib.sha256(ch["nonce"].encode("utf-8")).digest())
+              attest_payload = {
+                  "viewer_id": "",
+                  "device_id": "",
+                  "challenge_id": ch["challenge_id"],
+                  "nonce": ch["nonce"],
+                  "signature": b64u_enc(sig),
+                  "public_key": {"kty": "EC", "crv": "P-256", "x": b64u_enc(pub_x), "y": b64u_enc(pub_y)},
+                  "client": {
+                      "user_agent": UA,
+                      "pixel_ratio": 1,
+                      "screen_width": 1920,
+                      "screen_height": 1080,
+                      "color_depth": 24,
+                      "languages": ["en-US", "en"],
+                      "timezone": "UTC",
+                      "hardware_concurrency": 8,
+                      "device_memory": 8,
+                      "touch_points": 0,
+                      "webgl_vendor": "Google Inc. (Intel)",
+                      "webgl_renderer": "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)",
+                      "pointer_type": "fine,hover",
+                      "extra": {"vendor": "Google Inc.", "appVersion": UA.replace("Mozilla/", "")},
+                  },
+                  "storage": {},
+                  "attributes": {"entropy": "medium"},
+              }
+              at_r = sess.post(
+                  f"{embed_origin}/api/videos/access/attest",
+                  headers={**base_h, "Content-Type": "application/json"},
+                  json=attest_payload,
+                  timeout=12,
+              )
+              if at_r.status_code != 200:
+                  return {"error_attest": at_r.status_code, "text": at_r.text[:300]}
+              d = at_r.json()
+              return {
+                  "token": d["token"],
+                  "viewer_id": d["viewer_id"],
+                  "device_id": d["device_id"],
+                  "confidence": d.get("confidence", "medium"),
+              }
+
+          results = {}
+          for tier, code in [("1080p", "emvm2es54ipg"), ("720p", "1340s9004e5e"), ("480p", "a4r52h18f8z8")]:
+              sess = requests.Session()
+              det = sess.get(
+                  f"https://byseraguci.com/api/videos/{code}/embed/details",
+                  headers={"User-Agent": UA, "Accept": "application/json", "Referer": f"https://byseraguci.com/e/{code}"},
+                  timeout=12,
+              ).json()
+              embed_url = det["embed_frame_url"]
+              pu = urllib.parse.urlparse(embed_url)
+              embed_origin = f"{pu.scheme}://{pu.netloc}"
+              base_h = {
+                  "User-Agent": UA,
+                  "Accept": "*/*",
+                  "Origin": embed_origin,
+                  "Referer": embed_url,
+                  "X-Embed-Origin": "byseraguci.com",
+                  "X-Embed-Referer": "https://share4max.com/",
+                  "X-Embed-Parent": f"https://byseraguci.com/e/{code}",
+              }
+              settings = sess.get(f"{embed_origin}/api/videos/{code}/embed/settings", headers=base_h, timeout=12).json()
+              fp = attest_device(sess, embed_origin, base_h)
+              cap_tok = None
+              if settings.get("captcha_required"):
+                  cap_body = {"fingerprint": fp} if "token" in fp else {}
+                  cap_r = sess.post(
+                      f"{embed_origin}/api/videos/{code}/embed/captcha",
+                      headers={**base_h, "Content-Type": "application/json"},
+                      json=cap_body,
+                      timeout=12,
+                  ).json()
+                  t0 = time.time()
+                  sol = solve_pow(cap_r["pow_nonce"], int(cap_r["pow_difficulty"]))
+                  solve_ms = round((time.time() - t0) * 1000, 1)
+                  ver_body = {"pow_token": cap_r["pow_token"], "solution": sol}
+                  if "token" in fp:
+                      ver_body["fingerprint"] = fp
+                  ver_r = sess.post(
+                      f"{embed_origin}/api/videos/{code}/embed/captcha/verify",
+                      headers={**base_h, "Content-Type": "application/json"},
+                      json=ver_body,
+                      timeout=12,
+                  ).json()
+                  cap_tok = ver_r.get("token")
+
+              pb_h = {**base_h, "Content-Type": "application/json"}
+              if cap_tok:
+                  pb_h["X-Captcha-Token"] = cap_tok
+              if "token" in fp:
+                  pb_r = sess.post(f"{embed_origin}/api/videos/{code}/embed/playback", headers=pb_h, json={"fingerprint": fp}, timeout=12)
+              else:
+                  pb_r = sess.get(f"{embed_origin}/api/videos/{code}/embed/playback", headers=pb_h, timeout=12)
+
+              pb_json = pb_r.json()
+              pb = pb_json.get("playback") or {}
+              kp = pb.get("key_parts", [])
+              ver = int(str(pb.get("version", "1")).strip() or "1")
+              a_idx, b_idx = ver, 31 - ver
+              if 1 <= a_idx <= len(kp) and 1 <= b_idx <= len(kp):
+                  key = b64u_dec(kp[a_idx - 1]) + b64u_dec(kp[b_idx - 1])
+              else:
+                  key = b"".join(b64u_dec(x) for x in kp)
+              iv = b64u_dec(pb["iv"])
+              ct_tag = b64u_dec(pb["payload"])
+              dec = json.loads(AES.new(key, AES.MODE_GCM, nonce=iv).decrypt_and_verify(ct_tag[:-16], ct_tag[-16:]).decode("utf-8"))
+              srcs = dec.get("sources", [])
+              m3u8_status = None
+              m3u8_head = None
+              if srcs:
+                  su = srcs[0]["url"]
+                  mr = sess.get(su, headers={"User-Agent": UA, "Referer": f"{embed_origin}/", "Origin": embed_origin}, timeout=12)
+                  m3u8_status = mr.status_code
+                  m3u8_head = mr.text[:200]
+              results[tier] = {
+                  "fp_ok": "token" in fp,
+                  "pow_difficulty": cap_r.get("pow_difficulty") if settings.get("captcha_required") else 0,
+                  "pow_solve_ms": solve_ms if settings.get("captcha_required") else 0,
+                  "pb_status": pb_r.status_code,
+                  "sources_count": len(srcs),
+                  "sources": [{"label": x.get("label"), "quality": x.get("quality"), "height": x.get("height")} for x in srcs],
+                  "m3u8_status": m3u8_status,
+                  "m3u8_head": m3u8_head,
+              }
+
+          with open(".tmp_build_verify/byse_live_test.json", "w") as fh:
+              json.dump(results, fh, indent=2)
+          print(json.dumps(results, indent=2))
+          PY
+
+      - name: Commit Byse live test results
+        if: always()
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add -f .tmp_build_verify/pow.js .tmp_build_verify/videoPagesBundle.js
-          git commit --allow-empty -m "chore: fetch byse pow and videoPagesBundle [skip ci]"
+          git add -f .tmp_build_verify/byse_live_test.json || true
+          git commit --allow-empty -m "chore: verify byse new pow + attest live [skip ci]"
           git pull --rebase origin arena/b5447323-mehdigm-stream || true
           git push origin arena/b5447323-mehdigm-stream
