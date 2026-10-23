@@ -1,0 +1,1 @@
+import{Sn as e,bn as t,nn as n,wn as r}from"./DmhPvdRv3NMapvwoP7Gi.js";function i(){let i=e(!1);return n(()=>{window.requestAnimationFrame(()=>{i.value=!0})}),{ssrBootStyles:r(()=>i.value?void 0:{transition:`none !important`}),isBooted:t(i)}}export{i as t};

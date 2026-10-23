@@ -1,0 +1,1 @@
+var e=e=>e==null||e===``?!0:!!(Array.isArray(e)&&e.length===0),t=e=>e==null,n=e=>Array.isArray(e)&&e.length===0,r=()=>{if(typeof window>`u`||window.parent===window)return!1;try{var e=window.frameElement}catch{e=null}return e===null?document.domain===``?location.protocol!==`data:`:!1:!!e.hasAttribute(`sandbox`)};export{r as i,n,t as r,e as t};
