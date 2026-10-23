@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="robots" content="noindex, nofollow, nosnippet, noarchive, noimageindex" />
+<style>
+body{ 
+  background-repeat: no-repeat;
+  background-position: center center;
+  background-color: #000;
+  overflow: hidden;
+  margin:0;
+  padding:0;
+  width:100%;
+  height:100%;
+}
+#desk { width:100%; height:100%; display:block; overflow:hidden; margin: 0; position:absolute; xcursor: pointer; }
+#vid_play { 
+background: 50% 0% transparent;
+display: block;
+height: 102px;
+left: 50%;
+margin-left: -51px;
+margin-top: -51px;
+position: absolute;
+top: 50%;
+width: 102px;
+z-index: 99;
+border:0;
+padding:0;
+cursor: pointer;
+}
+#vid_play:hover {
+height: 122px;
+width: 122px;
+margin-left: -61px;
+margin-top: -61px;
+}
+.grecaptcha-badge { 
+    visibility: hidden;
+}
+</style>
+
+<!-- Privacy-friendly analytics by Plausible --><script async src="https://pla.uqload.vc/js/pa-goXS7XjHByR3ra1IS9oLZ.js"></script><script>window.plausible=window.plausible||function(){(plausible.q=plausible.q||[]).push(arguments)},plausible.init=plausible.init||function(i){plausible.o=i||{}};plausible.init()</script></head>
+<body topmargin=0 leftmargin=0>
+<form id="F1" action="/dl" method="POST">
+<input type="hidden" name="op" value="embed">
+<input type="hidden" name="file_code" value="">
+<input type="hidden" name="auto" value="1">
+<input type="hidden" name="referer" value="">
+
+ <div id='desk'>
+	<button id="vid_play">
+		<img src="/images2/play-button.png" style="width:100%;height:100%;">
+	</button>
+ </div>
+
+</form>
+
+<script>
+var image_proxy_url='';
+
+var path = window.location.pathname;
+path = path.replace('.html','');
+var code = path.split("/").pop().split("-").pop();
+
+//var arr = window.location.search.substring(1).split(/=/);
+//var code = arr[0];
+var url='';
+if(code){
+    if(window.location.search.substring(1)){ 
+    	url='//'+window.location.search.substring(1)+'.jpg';
+    } else if(image_proxy_url) {
+		url=image_proxy_url+'/'+code+'.jpg';
+	}
+	if(window.location.search.substring(1)){
+		var searchParams = new URLSearchParams(window.location.search);
+		if(searchParams.has('poster'))url = searchParams.get('poster');
+	}
+	if(url) document.getElementById('desk').style.background = 'center / contain no-repeat url('+url+')';
+
+	document.forms['F1'].file_code.value = code;
+	document.forms['F1'].referer.value = document.referrer;
+}
+</script>
+
+
+<script type="module" src="https://static.cloudflareinsights.com/beacon.min.js/vce701823e78c4301a35b7e07294d87301792088814092" integrity="sha512-UKNk8GbxkABxKcXYuLkO16EleLGUkcvJWtpSNmExE0Too3ZaFAxTscNWEc1OdAv5/BikHawapSCaiD2XCmp+Bw==" data-cf-beacon='{"version":"2024.11.0","token":"c3f9779449114c958e42dd11552785ba","r":1,"spa":2}' crossorigin="anonymous"></script>
+</body>
+</html>
