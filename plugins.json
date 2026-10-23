@@ -3,7 +3,7 @@
         "iconUrl": "https://raw.githubusercontent.com/mehdigm4life/mehdigm-stream/main/build/Anime4Up.png",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-        "fileSize": 115889,
+        "fileSize": 168096,
         "status": 1,
         "language": "ar",
         "authors": [
@@ -17,7 +17,7 @@
             "Movie",
             "OVA"
         ],
-        "version": 3,
+        "version": 4,
         "internalName": "Anime4Up",
         "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/Anime4Up.cs3",
         "name": "انمي فور اب (Anime4Up)",
