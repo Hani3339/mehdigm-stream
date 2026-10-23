@@ -1,0 +1,46 @@
+{
+  "details": {
+    "id": 61665034,
+    "code": "emvm2es54ipg",
+    "title": "[Anime4up rest] TRSSH EP 04 FHD [source]",
+    "poster_url": "https://img-place.com/emvm2es54ipg.jpg",
+    "description": "",
+    "created_at": "2026-10-23T18:21:25Z",
+    "owner_private": false,
+    "embed_frame_url": "https://n1mwq.org/1mivw/emvm2es54ipg",
+    "cache_status": "hit"
+  },
+  "embed_status": 200,
+  "saved_js": [
+    {
+      "url": "https://n1mwq.org/assets/index-DocunfmE.js",
+      "len": 282104,
+      "file": ".tmp_build_verify/byse_js_0.js"
+    }
+  ],
+  "settings_status": 200,
+  "settings": {
+    "code": "emvm2es54ipg",
+    "premium_only": false,
+    "download_allowed": true,
+    "allowed_countries": "All",
+    "banned_countries": "All",
+    "embed_domain_allowed": "",
+    "subtitle": {
+      "autoplay": false
+    },
+    "audio_autoplay": false,
+    "download_button": false,
+    "vpn_access_disabled": false,
+    "residential_proxy_access_disabled": false,
+    "ads_mode": "0",
+    "ads_mode_dl": "0",
+    "captcha_required": true,
+    "cache_status": "hit"
+  },
+  "captcha": {
+    "error": "method not allowed"
+  },
+  "pb_status": 400,
+  "pb_text": "{\"error\":\"invalid request body\"}\n"
+}
