@@ -22,11 +22,7 @@ Daemon will be stopped at the end of the build
 > Task :Anime4Up:packageDebugResources
 > Task :Anime4Up:parseDebugLocalResources
 > Task :Anime4Up:generateDebugRFile
-
 > Task :Anime4Up:compileDebugKotlin
-w: file:///home/runner/work/mehdigm-stream/mehdigm-stream/Anime4Up/src/main/kotlin/com/anime4up/Anime4UpExtractors.kt:1161:34 'constructor(lang: String, url: String): SubtitleFile' is deprecated. Use newSubtitleFile method.
-w: file:///home/runner/work/mehdigm-stream/mehdigm-stream/Anime4Up/src/main/kotlin/com/anime4up/Anime4UpNetwork.kt:383:47 This declaration needs opt-in. Its usage should be marked with '@kotlinx.coroutines.ExperimentalCoroutinesApi' or '@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)'
-w: file:///home/runner/work/mehdigm-stream/mehdigm-stream/Anime4Up/src/main/kotlin/com/anime4up/Anime4UpNetwork.kt:442:21 'var databaseEnabled: Boolean' is deprecated. Deprecated in Java.
 
 > Task :Anime4Up:compileDex
 Compiled dex to /home/runner/work/mehdigm-stream/mehdigm-stream/Anime4Up/build/intermediates/classes.dex
@@ -37,11 +33,10 @@ Compiled dex to /home/runner/work/mehdigm-stream/mehdigm-stream/Anime4Up/build/i
 > Task :Cimawbas:generateDebugResources
 > Task :Cimawbas:packageDebugResources
 > Task :Cimawbas:parseDebugLocalResources
+> Task :Cimawbas:generateDebugRFile
 
 > Task :Anime4Up:make
 Made CloudStream package at /home/runner/work/mehdigm-stream/mehdigm-stream/Anime4Up/build/Anime4Up.cs3
-
-> Task :Cimawbas:generateDebugRFile
 
 > Task :Cimawbas:compileDebugKotlin
 w: file:///home/runner/work/mehdigm-stream/mehdigm-stream/Cimawbas/src/main/kotlin/com/cimawbas/BysebuhoCustom.kt:107:17 'constructor(source: String, name: String, url: String, referer: String, quality: Int, headers: Map<String, String> = ..., extractorData: String? = ..., type: ExtractorLinkType, audioTracks: List<AudioFile> = ...): ExtractorLink' is deprecated. Use newExtractorLink.
@@ -57,5 +52,5 @@ Compiled dex to /home/runner/work/mehdigm-stream/mehdigm-stream/Cimawbas/build/i
 > Task :Cimawbas:make
 Made CloudStream package at /home/runner/work/mehdigm-stream/mehdigm-stream/Cimawbas/build/Cimawbas.cs3
 
-BUILD SUCCESSFUL in 26s
+BUILD SUCCESSFUL in 23s
 20 actionable tasks: 18 executed, 2 up-to-date
