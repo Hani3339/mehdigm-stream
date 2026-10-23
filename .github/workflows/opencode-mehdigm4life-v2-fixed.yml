@@ -49,6 +49,12 @@ name: 🧬 OpenCode v2 AI Cloud — 4Life Full Persistence
 #  after state restoration and before public tunnel publication.
 #  The startup browser test intercepts session creation; it spends no tokens.
 #
+#  Cold-start guard: v2 can answer the very first /api/agent (and
+#  /api/model//api/provider) request for a location with an empty list
+#  while configuration is still loading. A tiny same-origin script is
+#  injected by nginx so the browser retries those reads before the
+#  composer sees them, preventing the "Select an agent and model" toast.
+#
 #  v2-specific notes:
 #    • `opencode serve` is the v2 API + web server (there is no
 #      separate `opencode web` subcommand in v2).
@@ -998,6 +1004,81 @@ jobs:
           fi
           echo "PASS: visible primary Build agent and enabled Big Pickle model are available."
 
+      - name: 🔥 Warm every project location
+        timeout-minutes: 6
+        run: |
+          set -uo pipefail
+
+          : "${OPENCODE_SERVER_PASSWORD:?internal OpenCode password is missing}"
+
+          BASE=http://127.0.0.1:4096
+          DB_PATH="${OPENCODE_DB_PATH:-$HOME/.local/share/opencode/opencode.db}"
+
+          collect_dirs() {
+            printf '%s\n' "${GITHUB_WORKSPACE:?}"
+            if [ -f "$DB_PATH" ]; then
+              sqlite3 "$DB_PATH" \
+                "SELECT worktree FROM project WHERE time_archived IS NULL;" \
+                2>/dev/null || true
+            fi
+            if [ -d "${GITHUB_WORKSPACE:?}" ]; then
+              find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -type d \
+                ! -name '.git' ! -name 'build' ! -name '.gradle' \
+                ! -name '.idea' ! -name 'node_modules' 2>/dev/null || true
+            fi
+          }
+
+          DIRS="$(collect_dirs | awk 'NF' | sort -u)"
+          TOTAL="$(printf '%s\n' "$DIRS" | awk 'NF' | wc -l | tr -d ' ')"
+          echo "🔥 Warming $TOTAL project location(s)..."
+
+          WARMED=0
+          FAILED=0
+          while IFS= read -r DIR; do
+            [ -n "$DIR" ] || continue
+            [ -d "$DIR" ] || continue
+
+            READY=0
+            for _ in $(seq 1 8); do
+              curl -fsSG --max-time 10 \
+                -u "opencode:${OPENCODE_SERVER_PASSWORD}" \
+                --data-urlencode "location[directory]=$DIR" \
+                "$BASE/api/location" >/dev/null 2>&1 || true
+
+              AGENTS="$(curl -fsSG --max-time 10 \
+                -u "opencode:${OPENCODE_SERVER_PASSWORD}" \
+                --data-urlencode "location[directory]=$DIR" \
+                "$BASE/api/agent" 2>/dev/null || true)"
+              MODELS="$(curl -fsSG --max-time 10 \
+                -u "opencode:${OPENCODE_SERVER_PASSWORD}" \
+                --data-urlencode "location[directory]=$DIR" \
+                "$BASE/api/model" 2>/dev/null || true)"
+
+              if printf '%s' "$AGENTS" | \
+                   jq -e '.data | any(.id == "build" and .hidden != true)' >/dev/null 2>&1 &&
+                 printf '%s' "$MODELS" | \
+                   jq -e '.data | any(.providerID == "opencode" and .id == "big-pickle")' >/dev/null 2>&1; then
+                READY=1
+                break
+              fi
+              sleep 0.5
+            done
+
+            if [ "$READY" = 1 ]; then
+              WARMED=$((WARMED + 1))
+            else
+              FAILED=$((FAILED + 1))
+              echo "⚠️ Location did not warm up: $DIR"
+            fi
+          done <<< "$DIRS"
+
+          echo "✅ Warm locations: $WARMED (failed: $FAILED)"
+
+          if [ "$WARMED" -eq 0 ]; then
+            echo "::error::No OpenCode location could be warmed; the web composer would have no agents."
+            exit 1
+          fi
+
       - name: 🛡️ Start public login proxy
         timeout-minutes: 3
         run: |
@@ -1027,6 +1108,236 @@ jobs:
             base64 -w0
           )"
 
+          # Same-origin shim: retry the first empty list reads that a
+          # cold or evicted v2 location can return while its config is
+          # still loading. The app bundle is unchanged; nginx only adds
+          # this script to the HTML <head>.
+          RETRY_JS="$RUNNER_TEMP/opencode-client-retry.js"
+
+          cat > "$RETRY_JS" <<'JAVASCRIPT'
+          (() => {
+            if (window.__ocRetryInstalled) return;
+            window.__ocRetryInstalled = true;
+
+            const retryPaths = new Set(["/api/agent", "/api/model", "/api/provider"]);
+            const originalFetch = window.fetch.bind(window);
+            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const retryable = (input) => {
+              try {
+                const url = new URL(typeof input === "string" ? input : input.url, location.href);
+                return retryPaths.has(url.pathname);
+              } catch {
+                return false;
+              }
+            };
+
+            window.fetch = async (input, init) => {
+              const method = String(
+                (init && init.method) || (input instanceof Request ? input.method : "GET"),
+              ).toUpperCase();
+              if (method !== "GET" || !retryable(input)) return originalFetch(input, init);
+
+              const cloneInput = () => (input instanceof Request ? input.clone() : input);
+              let response = await originalFetch(cloneInput(), init);
+
+              for (let attempt = 0; attempt < 24; attempt++) {
+                if (!response || !response.ok) return response;
+
+                let body;
+                try {
+                  body = await response.clone().json();
+                } catch {
+                  return response;
+                }
+
+                if (Array.isArray(body && body.data) && body.data.length > 0) return response;
+                if (init && init.signal && init.signal.aborted) return response;
+
+                await sleep(250);
+                response = await originalFetch(cloneInput(), init);
+              }
+
+              return response;
+            };
+          })();
+          JAVASCRIPT
+          chmod 644 "$RETRY_JS"
+
+          # Server-side half of the guard. The v2 server can return an
+          # empty agent/model/provider list on the first request for a
+          # location while its services initialize. This tiny proxy
+          # retries those JSON reads upstream, so the browser never
+          # receives the transient empty list at all. nginx sends only
+          # the three list endpoints here and keeps everything else
+          # (SSE, WebSocket, uploads) on the direct path.
+          RETRY_PROXY_PORT=4097
+          RETRY_PROXY_JS="$RUNNER_TEMP/opencode-list-retry-proxy.cjs"
+          RETRY_PROXY_LOG="$RUNNER_TEMP/opencode-logs/retry-proxy.log"
+          RETRY_PROXY_PID="$RUNNER_TEMP/opencode-retry-proxy.pid"
+
+          cat > "$RETRY_PROXY_JS" <<'JAVASCRIPT'
+          const http = require("node:http")
+
+          const upstreamHost = "127.0.0.1"
+          const upstreamPort = Number(process.env.OPENCODE_UPSTREAM_PORT || "4096")
+          const listenPort = Number(process.env.OPENCODE_RETRY_PORT || "4097")
+          const retryPaths = new Set(["/api/agent", "/api/model", "/api/provider"])
+          const maxAttempts = 40
+          const delayMs = 200
+          const timeoutMs = 60000
+
+          const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+          function forward(req, body) {
+            return new Promise((resolve, reject) => {
+              const headers = { ...req.headers }
+              delete headers.host
+              delete headers.connection
+              delete headers["content-length"]
+              delete headers["accept-encoding"]
+              headers.host = `${upstreamHost}:${upstreamPort}`
+              if (body.length) headers["content-length"] = String(body.length)
+
+              const upstream = http.request(
+                { host: upstreamHost, port: upstreamPort, path: req.url, method: req.method, headers },
+                (res) => {
+                  const chunks = []
+                  res.on("data", (chunk) => chunks.push(chunk))
+                  res.on("end", () =>
+                    resolve({
+                      status: res.statusCode || 502,
+                      headers: res.headers,
+                      body: Buffer.concat(chunks),
+                    }),
+                  )
+                },
+              )
+              upstream.on("error", reject)
+              upstream.setTimeout(timeoutMs, () => upstream.destroy(new Error("upstream timeout")))
+              if (body.length) upstream.write(body)
+              upstream.end()
+            })
+          }
+
+          function isEmptyList(result) {
+            if (result.status !== 200) return false
+            const type = String(result.headers["content-type"] || "")
+            if (!type.includes("application/json")) return false
+            try {
+              const json = JSON.parse(result.body.toString("utf8"))
+              return Array.isArray(json.data) && json.data.length === 0
+            } catch {
+              return false
+            }
+          }
+
+          http
+            .createServer(async (req, res) => {
+              const path = String(req.url || "").split("?")[0]
+              const chunks = []
+              for await (const chunk of req) chunks.push(chunk)
+              const body = Buffer.concat(chunks)
+              const retry = req.method === "GET" && retryPaths.has(path)
+
+              let result
+              try {
+                result = await forward(req, body)
+                if (retry) {
+                  for (let attempt = 1; attempt < maxAttempts && isEmptyList(result); attempt++) {
+                    await sleep(delayMs)
+                    result = await forward(req, body)
+                  }
+                }
+              } catch {
+                res.writeHead(502, { "content-type": "text/plain" })
+                res.end("Bad Gateway")
+                return
+              }
+
+              const headers = { ...result.headers }
+              delete headers["transfer-encoding"]
+              delete headers.connection
+              delete headers["keep-alive"]
+              delete headers["content-length"]
+              headers["content-length"] = String(result.body.length)
+              res.writeHead(result.status, headers)
+              res.end(result.body)
+            })
+            .listen(listenPort, "127.0.0.1", () => {
+              console.log(`OpenCode list retry proxy: 127.0.0.1:${listenPort} -> 127.0.0.1:${upstreamPort}`)
+            })
+          JAVASCRIPT
+          chmod 644 "$RETRY_PROXY_JS"
+
+          : > "$RETRY_PROXY_LOG"
+
+          OPENCODE_UPSTREAM_PORT=4096 \
+          OPENCODE_RETRY_PORT="$RETRY_PROXY_PORT" \
+            setsid node "$RETRY_PROXY_JS" \
+            </dev/null >> "$RETRY_PROXY_LOG" 2>&1 &
+
+          RETRY_PROXY_PID_VALUE=$!
+          echo "$RETRY_PROXY_PID_VALUE" > "$RETRY_PROXY_PID"
+          disown || true
+
+          PROXY_READY=0
+          for _ in $(seq 1 50); do
+            RETRY_PROXY_CODE="$(
+              curl -s -o /dev/null --max-time 2 \
+                -u "opencode:${OPENCODE_SERVER_PASSWORD}" \
+                -w '%{http_code}' \
+                "http://127.0.0.1:${RETRY_PROXY_PORT}/api/info" \
+                2>/dev/null || echo '000'
+            )"
+            if [ "$RETRY_PROXY_CODE" = "200" ]; then
+              PROXY_READY=1
+              break
+            fi
+            if ! kill -0 "$RETRY_PROXY_PID_VALUE" 2>/dev/null; then
+              break
+            fi
+            sleep 0.2
+          done
+
+          if [ "$PROXY_READY" -ne 1 ]; then
+            echo "❌ OpenCode list retry proxy did not become ready."
+            cat "$RETRY_PROXY_LOG" || true
+            exit 1
+          fi
+
+          echo "✅ OpenCode list retry proxy is ready (127.0.0.1:${RETRY_PROXY_PORT})."
+
+          # Shared proxy headers; the Authorization rewrite hides the
+          # internal v2 credentials from the public client.
+          PROXY_HEADERS="$RUNNER_TEMP/opencode-proxy-headers.conf"
+
+          cat > "$PROXY_HEADERS" <<'PROXYHEADERS'
+          proxy_http_version 1.1;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection $connection_upgrade;
+          proxy_set_header Authorization "Basic __INTERNAL_AUTH__";
+          proxy_set_header Accept-Encoding "";
+          proxy_read_timeout 86400s;
+          proxy_send_timeout 86400s;
+          PROXYHEADERS
+          sed -i "s|__INTERNAL_AUTH__|$INTERNAL_AUTH|" "$PROXY_HEADERS"
+          chmod 600 "$PROXY_HEADERS"
+
+          # nginx only gets sub_filter when the module is compiled in.
+          # Ubuntu's nginx package includes it; keep a graceful fallback.
+          SUB_FILTER=""
+          if nginx -V 2>&1 | grep -q -- '--with-http_sub_module'; then
+            SUB_FILTER="                sub_filter_once on;
+                sub_filter_types text/html;
+                sub_filter '</head>' '<script src=\"/__opencode_retry.js\"></script></head>';"
+          else
+            echo "⚠️ nginx lacks http_sub_module; client cold-start retry shim is disabled."
+          fi
+
           cat > "$NGINX_CONF" <<EOF
           user $(id -un);
           worker_processes 1;
@@ -1045,6 +1356,14 @@ jobs:
               ''      close;
             }
 
+            # List reads go through the retrying proxy first. If that
+            # proxy is unavailable, nginx falls back to the v2 server
+            # directly instead of breaking the web UI.
+            upstream opencode_lists {
+              server 127.0.0.1:$RETRY_PROXY_PORT max_fails=1 fail_timeout=10s;
+              server 127.0.0.1:4096 backup;
+            }
+
             server {
               listen 127.0.0.1:$PROXY_PORT;
               server_name _;
@@ -1052,19 +1371,44 @@ jobs:
               auth_basic "OpenCode";
               auth_basic_user_file $HTPASSWD;
 
+              # Served to the authenticated app shell. Keeping it as a
+              # separate same-origin file satisfies the v2 CSP
+              # (script-src 'self') without weakening it.
+              location = /__opencode_retry.js {
+                auth_basic off;
+                alias $RETRY_JS;
+                default_type application/javascript;
+                add_header Cache-Control "no-store" always;
+              }
+
+              # Retry the first empty list read for a cold location
+              # before the browser ever sees it.
+              location = /api/agent {
+                proxy_pass http://opencode_lists;
+                proxy_next_upstream error timeout http_502 http_503 http_504;
+                include $PROXY_HEADERS;
+                proxy_buffering off;
+              }
+
+              location = /api/model {
+                proxy_pass http://opencode_lists;
+                proxy_next_upstream error timeout http_502 http_503 http_504;
+                include $PROXY_HEADERS;
+                proxy_buffering off;
+              }
+
+              location = /api/provider {
+                proxy_pass http://opencode_lists;
+                proxy_next_upstream error timeout http_502 http_503 http_504;
+                include $PROXY_HEADERS;
+                proxy_buffering off;
+              }
+
               location / {
                 proxy_pass http://127.0.0.1:4096;
-                proxy_http_version 1.1;
+                include $PROXY_HEADERS;
 
-                proxy_set_header Host \$host;
-                proxy_set_header X-Real-IP \$remote_addr;
-                proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-                proxy_set_header X-Forwarded-Proto \$scheme;
-                proxy_set_header Upgrade \$http_upgrade;
-                proxy_set_header Connection \$connection_upgrade;
-
-                # Replace the public login with the internal v2 auth.
-                proxy_set_header Authorization "Basic $INTERNAL_AUTH";
+                $SUB_FILTER
 
                 proxy_buffering off;
                 proxy_cache off;
@@ -1072,8 +1416,6 @@ jobs:
                 proxy_hide_header Cache-Control;
                 add_header Cache-Control "no-store" always;
                 proxy_connect_timeout 10s;
-                proxy_read_timeout 86400s;
-                proxy_send_timeout 86400s;
               }
             }
           }
@@ -1176,7 +1518,30 @@ jobs:
               }});
               const page = await context.newPage();
               page.setDefaultTimeout(45000);
+
+              // Reproduce the cold-location race: the first two agent
+              // reads are forced to an empty list, exactly what v2 can
+              // return while configuration is loading. The injected
+              // client shim must retry until the real list arrives.
+              let agentHits = 0;
+              await page.route('**/api/agent*', async route => {
+                if (route.request().method() !== 'GET') return route.continue();
+                agentHits += 1;
+                if (agentHits <= 2) {
+                  const requested = new URL(route.request().url()).searchParams.get('location[directory]') || '';
+                  return route.fulfill({
+                    status: 200,
+                    contentType: 'application/json',
+                    body: JSON.stringify({ location: { directory: requested }, data: [] }),
+                  });
+                }
+                return route.continue();
+              });
+
               await page.goto(base, { waitUntil: 'domcontentloaded' });
+              if (!(await page.evaluate(() => window.__ocRetryInstalled === true))) {
+                throw new Error('Cold-start retry shim was not injected into the app shell');
+              }
               await page.getByRole('button', { name: 'Add project', exact: true }).first().click();
               await page.getByRole('button', { name: 'Select folder', exact: true }).click();
               await page.getByRole('button', { name: 'New session', exact: true }).first().click();
@@ -1194,9 +1559,18 @@ jobs:
                 await route.abort('aborted');
               });
               await page.locator('[contenteditable=true]').fill('OpenCode startup selection test');
+              // The shim resolves asynchronously; let the retried empty
+              // reads settle before the composer validates the selection.
+              for (let i = 0; i < 50 && agentHits < 3; i += 1) {
+                await page.waitForTimeout(100);
+              }
+              await page.waitForTimeout(1200);
               await page.getByRole('button', { name: 'Send', exact: true }).click();
               let payload;
               try { payload = await attempted; } finally { clearTimeout(timeout); }
+              if (agentHits < 3) {
+                throw new Error('Injected cold-start shim did not retry the empty agent reads');
+              }
               if (payload.agent !== 'build' || payload.model?.providerID !== 'opencode' || payload.model?.id !== 'big-pickle') {
                 throw new Error('Invalid selected agent/model in real composer request: ' + JSON.stringify(payload));
               }
@@ -1326,6 +1700,7 @@ jobs:
             echo ""
             echo "- Login: protected by the \`OPENCODE_WEB_USERNAME\` / \`OPENCODE_WEB_PASSWORD\` repository secrets (same as the v1 workflow)."
             echo "- Credentials are never printed here for security."
+            echo "- Cold-start guard: empty agent/model/provider reads are retried before the composer sees them."
             echo ""
             echo "## 📦 Persistence"
             echo ""
@@ -2165,7 +2540,17 @@ jobs:
             kill "$(cat "$RUNNER_TEMP/opencode-proxy.pid")" 2>/dev/null || true
             rm -f "$RUNNER_TEMP/opencode-proxy.pid"
           fi
-          rm -f "$RUNNER_TEMP/opencode-proxy.conf" "$RUNNER_TEMP/opencode-proxy.htpasswd" 2>/dev/null || true
+          if [ -f "$RUNNER_TEMP/opencode-retry-proxy.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/opencode-retry-proxy.pid")" 2>/dev/null || true
+            rm -f "$RUNNER_TEMP/opencode-retry-proxy.pid"
+          fi
+          rm -f \
+            "$RUNNER_TEMP/opencode-proxy.conf" \
+            "$RUNNER_TEMP/opencode-proxy.htpasswd" \
+            "$RUNNER_TEMP/opencode-proxy-headers.conf" \
+            "$RUNNER_TEMP/opencode-client-retry.js" \
+            "$RUNNER_TEMP/opencode-list-retry-proxy.cjs" \
+            2>/dev/null || true
 
       - name: 🧹 Shutdown OpenCode and helper processes
         if: always()
