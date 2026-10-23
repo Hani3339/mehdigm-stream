@@ -1,4 +1,4 @@
-name: Inspect Shahid4u Live Architecture & Providers
+name: Inspect Shahid4u Sub-Host Protocols
 
 on:
   push:
@@ -11,7 +11,7 @@ permissions:
 jobs:
   inspect:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 6
 
     steps:
       - name: Checkout repository
@@ -19,315 +19,166 @@ jobs:
         with:
           ref: arena/67b3a643-mehdigm-stream
 
-      - name: Resolve all real watch & download providers (honeytoken-immune) & probe sub-hosts
+      - name: Probe sub-host player JS & APIs directly
         run: |
-          pip install -q requests "curl_cffi>=0.7" beautifulsoup4 PySocks
-          mkdir -p .tmp_s4u/hosts
+          pip install -q requests "curl_cffi>=0.7" urllib3
+          mkdir -p .tmp_s4u/subprobe
           python3 - <<'PY'
-          import concurrent.futures, json, os, random, re, time, urllib.parse
+          import json, re, urllib3
           import requests
-          from bs4 import BeautifulSoup
           from curl_cffi import requests as creq
+          urllib3.disable_warnings()
 
-          BASE = "https://shaahidd4u.net"
-          ep_slug = "مسلسل-tulsa-king-الموسم-الرابع-الحلقة-1-مترجمة"
-          film_slug = "فيلم-rise-of-the-footsoldier-retribution-2026-مترجم"
+          UA_DESK = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+          REF = "https://shaahidd4u.net/"
+          cs = creq.Session(impersonate="chrome124")
+          out = {}
 
-          def safe_url(u: str) -> str:
-              p = urllib.parse.urlsplit(u)
-              path = urllib.parse.quote(urllib.parse.unquote(p.path), safe="/%")
-              query = urllib.parse.quote_plus(urllib.parse.unquote_plus(p.query), safe="=&%")
-              return urllib.parse.urlunsplit((p.scheme, p.netloc, path, query, p.fragment))
+          # 1. vinovo.to embed.js + API test
+          try:
+              r_vin_js = cs.get("https://vinovo.to/scripts/embed.js?v=1.0.0", headers={"Referer": "https://vinovo.to/e/199ke4xpb4x45v"}, timeout=12)
+              open(".tmp_s4u/subprobe/vinovo_embed.js", "w", encoding="utf-8").write(r_vin_js.text)
+              out["vinovo_embed_js_len"] = len(r_vin_js.text)
+              # Also fetch /d/ page to see if /d/ has direct download or token
+              r_vin_d = cs.get("https://vinovo.to/d/199ke4xpb4x45v", headers={"Referer": REF}, timeout=12)
+              open(".tmp_s4u/subprobe/vinovo_d.html", "w", encoding="utf-8").write(r_vin_d.text)
+              out["vinovo_d_len"] = len(r_vin_d.text)
+          except Exception as e:
+              out["vinovo_err"] = repr(e)
 
-          def is_valid_s4u(status: int, html: str) -> bool:
-              if status != 200 or not html or len(html) < 2000:
-                  return False
-              low = html.lower()
-              if "just a moment" in low or "attention required" in low or "_cf_chl_opt" in low or "sorry, you have been blocked" in low:
-                  return False
-              return "shaahidd4u" in low or "shahid4u" in low or "شاهد فور يو" in html
+          # 2. vids.st (SSL verify=False)
+          try:
+              r_vids = requests.get("https://vids.st/e/185056", headers={"User-Agent": UA_DESK, "Referer": REF}, verify=False, timeout=12)
+              open(".tmp_s4u/subprobe/vids_st.html", "w", encoding="utf-8").write(r_vids.text)
+              out["vids_st"] = {"status": r_vids.status_code, "len": len(r_vids.text), "final": r_vids.url}
+          except Exception as e:
+              out["vids_st_err"] = repr(e)
 
-          def make_session(proxy_url: str):
-              s = creq.Session(impersonate="chrome124")
-              if proxy_url:
-                  s.proxies = {"http": proxy_url, "https": proxy_url}
-              return s
-
-          feeds = [
-              ("socks5h", "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt"),
-              ("socks4", "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks4.txt"),
-              ("http", "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt"),
-              ("socks5h", "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt"),
-              ("http", "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt"),
-          ]
-          cands = []
-          for proto, fu in feeds:
-              try:
-                  fr = requests.get(fu, timeout=8)
-                  for ln in fr.text.splitlines()[:140]:
-                      ln = ln.strip()
-                      if ":" in ln and not ln.startswith("#"):
-                          cands.append(f"{proto}://{ln}")
-              except Exception:
-                  pass
-
-          def probe_proxy(pu):
-              try:
-                  ps = make_session(pu)
-                  r = ps.get(BASE + "/", timeout=8)
-                  if is_valid_s4u(r.status_code, r.text):
-                      return pu
-              except Exception:
-                  pass
-              return None
-
-          good_proxies = []
-          with concurrent.futures.ThreadPoolExecutor(max_workers=50) as ex:
-              futs = [ex.submit(probe_proxy, pu) for pu in cands[:400]]
-              for ft in concurrent.futures.as_completed(futs):
-                  res_p = ft.result()
-                  if res_p:
-                      good_proxies.append(res_p)
-                      if len(good_proxies) >= 3:
-                          break
-
-          assert good_proxies, "No working proxies found"
-          print("Found clean proxies:", good_proxies)
-          sess = make_session(good_proxies[0])
-
-          def get_page(url: str, save_as: str, ref: str = BASE + "/"):
-              global sess
-              for attempt_idx in range(len(good_proxies)):
-                  time.sleep(0.45)
+          # 3. vidaraa.cc & vidara.so /api/stream
+          out["vidara"] = {}
+          for dom in ("vidaraa.cc", "vidara.so", "vidaraa.so"):
+              for fc in ("fDuha6YpbU8ps", "PLo7KiK82X0wD"):
                   try:
-                      r = sess.get(
-                          safe_url(url),
-                          headers={
-                              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                              "Accept-Language": "ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7",
-                              "Referer": safe_url(ref),
-                          },
-                          timeout=20,
+                      rv = cs.post(
+                          f"https://{dom}/api/stream",
+                          headers={"Content-Type": "application/json", "Origin": f"https://{dom}", "Referer": f"https://{dom}/e/{fc}"},
+                          data=json.dumps({"filecode": fc}),
+                          timeout=10,
                       )
-                      if is_valid_s4u(r.status_code, r.text):
-                          with open(f".tmp_s4u/{save_as}", "w", encoding="utf-8") as fh:
-                              fh.write(r.text)
-                          print(f"OK {save_as}: len={len(r.text)}")
-                          return r.text
-                      print(f"Warn {save_as}: status={r.status_code} len={len(r.text)}, rotating proxy...")
-                  except Exception as exc:
-                      print(f"Err {save_as}: {exc}, rotating proxy...")
-                  if attempt_idx + 1 < len(good_proxies):
-                      sess = make_session(good_proxies[attempt_idx + 1])
-              return ""
+                      out["vidara"][f"{dom}_{fc}"] = {"status": rv.status_code, "body": rv.text[:500]}
+                  except Exception as e:
+                      out["vidara"][f"{dom}_{fc}"] = {"err": repr(e)}
+          # Also check https://vidaraa.cc/v/fDuha6YpbU8ps
+          try:
+              rvv = cs.get("https://vidaraa.cc/v/fDuha6YpbU8ps", headers={"Referer": REF}, timeout=10)
+              open(".tmp_s4u/subprobe/vidaraa_v.html", "w", encoding="utf-8").write(rvv.text)
+              out["vidara"]["v_page"] = {"status": rvv.status_code, "len": len(rvv.text), "final": str(rvv.url)}
+          except Exception as e:
+              out["vidara"]["v_err"] = repr(e)
 
-          def is_trap_or_hidden(el) -> bool:
-              cur = el
-              while cur is not None and hasattr(cur, "attrs") and cur.attrs is not None:
-                  if cur.name == "template":
-                      return True
-                  if cur.has_attr("hidden") or cur.has_attr("data-honeytoken") or cur.has_attr("data-trap"):
-                      return True
-                  if str(cur.get("aria-hidden", "")).lower() == "true":
-                      return True
-                  if str(cur.get("tabindex", "")) == "-1":
-                      return True
-                  if str(cur.get("id", "")).lower() == "download-primary-server":
-                      return True
-                  st = str(cur.get("style", "")).replace(" ", "").lower()
-                  if "display:none" in st or "visibility:hidden" in st or "opacity:0" in st:
-                      return True
-                  cls = " ".join(cur.get("class", [])).lower()
-                  if "d-none" in cls or "visually-hidden" in cls:
-                      return True
-                  cur = cur.parent
-              return False
-
-          def follow_m_once(m_url: str, ref: str):
-              if "/m/" not in m_url:
-                  return {"direct": m_url}
-              time.sleep(0.4)
-              rr = sess.get(
-                  safe_url(m_url),
-                  headers={"Referer": safe_url(ref)},
-                  allow_redirects=False,
-                  timeout=15,
+          # 4. uqload.vc POST /dl & /embed-ID.html & /d/ID.html
+          out["uqload"] = {}
+          try:
+              ru1 = cs.post(
+                  "https://uqload.vc/dl",
+                  headers={"Origin": "https://uqload.vc", "Referer": "https://uqload.vc/e/wiiivnj29lbz.html"},
+                  data={"op": "embed", "file_code": "wiiivnj29lbz", "auto": "1", "referer": REF},
+                  timeout=12,
               )
-              loc = rr.headers.get("Location") or rr.headers.get("location")
-              return {"status": rr.status_code, "location": loc, "body_snip": "" if loc else rr.text[:160]}
+              open(".tmp_s4u/subprobe/uqload_dl_post.html", "w", encoding="utf-8").write(ru1.text)
+              out["uqload"]["post_dl"] = {"status": ru1.status_code, "len": len(ru1.text), "mp4": re.findall(r'https?://[^\s"\'<>]+\.mp4[^\s"\'<>]*', ru1.text), "m3u8": re.findall(r'https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*', ru1.text)}
+              ru2 = cs.get("https://uqload.vc/embed-wiiivnj29lbz.html", headers={"Referer": REF}, timeout=12)
+              out["uqload"]["embed_html"] = {"status": ru2.status_code, "len": len(ru2.text), "mp4": re.findall(r'https?://[^\s"\'<>]+\.mp4[^\s"\'<>]*', ru2.text)}
+              ru3 = cs.get("https://uqload.vc/d/wiiivnj29lbz.html", headers={"Referer": REF}, timeout=12)
+              open(".tmp_s4u/subprobe/uqload_d.html", "w", encoding="utf-8").write(ru3.text)
+              out["uqload"]["d_html"] = {"status": ru3.status_code, "len": len(ru3.text)}
+          except Exception as e:
+              out["uqload"]["err"] = repr(e)
 
-          def resolve_watch_clean(watch_url: str, save_fname: str, ref_url: str):
-              html = get_page(watch_url, save_fname, ref_url)
-              if not html:
-                  return []
-              sp = BeautifulSoup(html, "html.parser")
+          # 5. streamhls.to POST /dl
+          try:
+              rs1 = cs.post(
+                  "https://streamhls.to/dl",
+                  headers={"Origin": "https://streamhls.to", "Referer": "https://streamhls.to/e/x7ari9qrmc39"},
+                  data={"op": "embed", "file_code": "x7ari9qrmc39", "auto": "1", "referer": REF},
+                  timeout=12,
+              )
+              open(".tmp_s4u/subprobe/streamhls_dl_post.html", "w", encoding="utf-8").write(rs1.text)
+              out["streamhls"] = {"status": rs1.status_code, "len": len(rs1.text), "m3u8": re.findall(r'https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*', rs1.text)}
+          except Exception as e:
+              out["streamhls_err"] = repr(e)
 
-              # Collect ALL trap tokens anywhere in DOM so we NEVER touch them!
-              trap_tokens = set()
-              for btn in sp.select("[data-token]"):
-                  tok = (btn.get("data-token") or "").strip()
-                  if tok and is_trap_or_hidden(btn):
-                      trap_tokens.add(tok)
+          # 6. VOE target derricknationtop.com
+          try:
+              rvoe = cs.get("https://derricknationtop.com/e/rvcgcbswuttp", headers={"Referer": "https://voe.sx/"}, timeout=12)
+              open(".tmp_s4u/subprobe/voe_target.html", "w", encoding="utf-8").write(rvoe.text)
+              out["voe_target"] = {"status": rvoe.status_code, "len": len(rvoe.text), "final": str(rvoe.url)}
+          except Exception as e:
+              out["voe_err"] = repr(e)
 
-              visible_buttons = []
-              for btn in sp.select("#servers .items_container button.btn-server[data-token]"):
-                  if is_trap_or_hidden(btn):
-                      continue
-                  tok = (btn.get("data-token") or "").strip()
-                  if not tok or tok in trap_tokens:
-                      continue
-                  sname = btn.get_text(" ", strip=True)
-                  visible_buttons.append((sname, tok))
+          # 7. bysevepoin.com embed/details
+          try:
+              rby = cs.get("https://bysevepoin.com/api/videos/hnsio65agyjd/embed/details", headers={"Referer": "https://bysevepoin.com/e/hnsio65agyjd"}, timeout=10)
+              out["byse_details"] = {"status": rby.status_code, "body": rby.text[:400]}
+          except Exception as e:
+              out["byse_err"] = repr(e)
 
-              m_key = re.search(r'watchResolveKey\s*=\s*["\']([^"\']+)["\']', html)
-              m_csrf = re.search(r'csrfToken\s*=\s*["\']([^"\']+)["\']', html) or re.search(r'<meta\s+name=["\']csrf-token["\']\s+content=["\']([^"\']+)["\']', html)
-              m_res = re.search(r'resolveUrl\s*=\s*["\']([^"\']+)["\']', html)
-              if not (m_key and m_csrf):
-                  return [{"error": "missing_key_or_csrf"}]
-              key = m_key.group(1)
-              csrf = m_csrf.group(1)
-              res_url = urllib.parse.urljoin(BASE, m_res.group(1).replace("\\/", "/")) if m_res else f"{BASE}/watch/resolve"
-
-              out = []
-              elapsed = 380
-              clicks = 2
-              for sname, tok in visible_buttons:
-                  time.sleep(0.55)
-                  elapsed += random.randint(450, 900)
-                  clicks += 1
-                  human_sig = {
-                      "version": 1,
-                      "elapsed_ms": elapsed,
-                      "visible_ms": elapsed - 25,
-                      "pointer": 5 + clicks,
-                      "click": clicks,
-                      "touch": 0,
-                      "scroll": 2,
-                      "key": 0,
-                  }
-                  pr = sess.post(
-                      safe_url(res_url),
-                      headers={
-                          "Accept": "application/json",
-                          "Content-Type": "application/json",
-                          "X-CSRF-TOKEN": csrf,
-                          "X-Requested-With": "XMLHttpRequest",
-                          "X-FP-Event-ID": "",
-                          "Origin": BASE,
-                          "Referer": safe_url(watch_url),
-                      },
-                      data=json.dumps({"key": key, "token": tok, "human_signal": human_sig}),
-                      timeout=15,
-                  )
-                  try:
-                      pj = pr.json()
-                  except Exception:
-                      pj = {"raw_text": pr.text[:250]}
-                  target = pj.get("url") if isinstance(pj, dict) else None
-                  final_t = None
-                  if target:
-                      abs_t = urllib.parse.urljoin(BASE, target)
-                      final_t = follow_m_once(abs_t, watch_url)
-                  out.append({
-                      "name": sname,
-                      "token_prefix": tok[:10],
-                      "post_status": pr.status_code,
-                      "resp": pj,
-                      "final_target": final_t,
-                  })
-              return {"trap_tokens_skipped": list(trap_tokens), "resolved": out}
-
-          def resolve_download_clean(dl_url: str, save_fname: str, ref_url: str):
-              html = get_page(dl_url, save_fname, ref_url)
-              if not html:
-                  return {}
-              sp = BeautifulSoup(html, "html.parser")
-              traps_found = []
-              items = []
-              seen_base = set()
-
-              # Check all elements with /m/ or data-honeytoken on download page
-              for el in sp.find_all(True):
-                  if el.has_attr("data-honeytoken") or el.get("id") == "download-primary-server":
-                      traps_found.append(str(el)[:220])
-
-              for a in sp.select("div.down-container a.btn-down[href], a.btn-down[href]"):
-                  href = urllib.parse.urljoin(BASE, a.get("href", ""))
-                  txt = " ".join(a.stripped_strings)
-                  span_name = a.select_one(".info span")
-                  sname = span_name.get_text(strip=True) if span_name else txt
-                  if is_trap_or_hidden(a) or "/media/" in href.lower():
-                      traps_found.append(f"BTN_TRAP:{sname}:{a.get('id','')}:{href}")
-                      continue
-                  base_host = re.sub(r'(1080|720|480|360|p|\.)+', '', sname.lower()).strip()
-                  loc_info = None
-                  if base_host not in seen_base:
-                      seen_base.add(base_host)
-                      loc_info = follow_m_once(href, dl_url)
-                  items.append({"name": sname, "text": txt, "href": href, "resolved": loc_info})
-              return {"traps_skipped": traps_found, "items": items}
-
-          res2 = {}
-          res2["download_ep"] = resolve_download_clean(f"{BASE}/download/{ep_slug}", "download_ep.html", f"{BASE}/episode/{ep_slug}")
-          res2["download_film"] = resolve_download_clean(f"{BASE}/download/{film_slug}", "download_film.html", f"{BASE}/film/{film_slug}")
-          res2["watch_ep"] = resolve_watch_clean(f"{BASE}/watch/{ep_slug}", "watch_ep_clean.html", f"{BASE}/episode/{ep_slug}")
-          res2["watch_film"] = resolve_watch_clean(f"{BASE}/watch/{film_slug}", "watch_film.html", f"{BASE}/film/{film_slug}")
-
-          # Probe every distinct external video host URL directly
-          direct_s = make_session(None)
-          ext_urls = []
-          for wkey in ("watch_ep", "watch_film"):
-              wdata = res2.get(wkey) or {}
-              for entry in (wdata.get("resolved") if isinstance(wdata, dict) else []):
-                  ft = entry.get("final_target") or {}
-                  u = ft.get("location") or ft.get("direct")
-                  if u and u.startswith("http"):
-                      ext_urls.append(("watch_" + entry.get("name", "unk"), u))
-          for dkey in ("download_ep", "download_film"):
-              ddata = res2.get(dkey) or {}
-              for entry in (ddata.get("items") if isinstance(ddata, dict) else []):
-                  rs = entry.get("resolved") or {}
-                  u = rs.get("location") or rs.get("direct")
-                  if u and u.startswith("http"):
-                      ext_urls.append(("dl_" + entry.get("name", "unk"), u))
-
-          probed = {}
-          seen_doms = set()
-          for tag, eu in ext_urls:
-              dom = urllib.parse.urlsplit(eu).netloc.lower().replace("www.", "")
-              if not dom or dom in seen_doms:
-                  continue
-              seen_doms.add(dom)
-              safe_tag = re.sub(r'[^a-zA-Z0-9_.-]+', '_', f"{tag}_{dom}")[:65]
+          # 8. upzur.com & usersdrive.com POST download2
+          out["xfs_dl"] = {}
+          for name, u, fid in [("upzur", "https://upzur.com/nnsi98dm00rj", "nnsi98dm00rj"), ("usersdrive", "https://usersdrive.com/sws8zp7y3xmo.html", "sws8zp7y3xmo")]:
               try:
-                  pr = direct_s.get(eu, headers={"Referer": BASE + "/"}, timeout=14)
-                  if pr.status_code in (403, 503) or len(pr.text) < 400:
-                      pr2 = sess.get(eu, headers={"Referer": BASE + "/"}, timeout=14)
-                      if pr2.status_code == 200 and len(pr2.text) > len(pr.text):
-                          pr = pr2
-                  with open(f".tmp_s4u/hosts/{safe_tag}.html", "w", encoding="utf-8") as fh:
-                      fh.write(pr.text[:250000])
-                  probed[safe_tag] = {
-                      "input_url": eu,
-                      "final_url": str(pr.url),
-                      "status": pr.status_code,
-                      "len": len(pr.text),
-                  }
-              except Exception as exc:
-                  probed[safe_tag] = {"input_url": eu, "error": repr(exc)}
-          res2["probed_hosts"] = probed
+                  rx = cs.post(u, headers={"Origin": u.rsplit("/", 1)[0], "Referer": u}, data={"op": "download2", "id": fid, "rand": "", "referer": REF, "method_free": "", "method_premium": ""}, timeout=12)
+                  open(f".tmp_s4u/subprobe/{name}_post.html", "w", encoding="utf-8").write(rx.text)
+                  mp4s = re.findall(r'https?://[^\s"\'<>]+\.mp4[^\s"\'<>]*', rx.text)
+                  hrefs = re.findall(r'href=["\'](https?://[^"\']+/d/[^"\']+|https?://[^"\']*cdn[^"\']+|https?://[^"\']*\.mp4[^"\']*)["\']', rx.text, re.I)
+                  out["xfs_dl"][name] = {"status": rx.status_code, "len": len(rx.text), "mp4s": mp4s[:5], "hrefs": hrefs[:5]}
+              except Exception as e:
+                  out["xfs_dl"][name] = {"err": repr(e)}
 
-          with open(".tmp_s4u/report2.json", "w", encoding="utf-8") as fh:
-              json.dump(res2, fh, indent=2, ensure_ascii=False)
-          print("DONE! Probed hosts count:", len(probed), list(probed.keys()))
+          # 9. GoFile API
+          try:
+              r_gf_js = cs.get("https://gofile.io/dist/js/config.js", timeout=10)
+              if r_gf_js.status_code != 200:
+                  r_gf_js = cs.get("https://gofile.io/dist/js/global.js", timeout=10)
+              wt_m = re.findall(r'wt\s*[:=]\s*["\']([^"\']+)["\']', r_gf_js.text)
+              r_acc = cs.post("https://api.gofile.io/accounts", json={}, timeout=10).json()
+              tok = r_acc.get("data", {}).get("token", "")
+              wt = wt_m[0] if wt_m else "4fd6sg89d7s6"
+              r_cnt = cs.get(
+                  f"https://api.gofile.io/contents/85Q3QEjk?wt={wt}",
+                  headers={"Authorization": f"Bearer {tok}", "X-Website-Token": wt, "Origin": "https://gofile.io", "Referer": "https://gofile.io/"},
+                  timeout=10,
+              ).json()
+              out["gofile"] = {"wt_found": wt_m, "wt_used": wt, "status": r_cnt.get("status"), "children_keys": list((r_cnt.get("data", {}).get("children") or {}).keys()), "sample": str(r_cnt)[:500]}
+          except Exception as e:
+              out["gofile_err"] = repr(e)
+
+          # 10. OK.ru movie videoembed
+          try:
+              rok = requests.get("https://ok.ru/videoembed/16080370993814", headers={"User-Agent": UA_DESK, "Referer": REF}, timeout=12)
+              has_opt = "data-options" in rok.text
+              open(".tmp_s4u/subprobe/ok_film.html", "w", encoding="utf-8").write(rok.text[:120000])
+              out["ok_film"] = {"status": rok.status_code, "len": len(rok.text), "has_data_options": has_opt}
+          except Exception as e:
+              out["ok_film_err"] = repr(e)
+
+          # 11. VikingFile API check
+          try:
+              rvk = open(".tmp_s4u/hosts/dl_vikingfile_vikingfile.com.html", encoding="utf-8", errors="ignore").read()
+              out["viking_scripts"] = [re.sub(r'\s+', ' ', s)[:350] for s in re.findall(r'<script[^>]*>([\s\S]*?)</script>', rvk) if len(s.strip()) > 20 and len(s.strip()) < 4000][:6]
+          except Exception as e:
+              out["viking_err"] = repr(e)
+
+          open(".tmp_s4u/subprobe/summary.json", "w", encoding="utf-8").write(json.dumps(out, indent=2, ensure_ascii=False))
+          print("SUBPROBE DONE!")
           PY
 
-      - name: Commit inspection results
+      - name: Commit subprobe results
         if: always()
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add -f .tmp_s4u/ || true
-          git commit --allow-empty -m "chore: resolve all real watch & download providers [skip ci]"
+          git add -f .tmp_s4u/subprobe/ || true
+          git commit --allow-empty -m "chore: subprobe novel video host protocols [skip ci]"
           git pull --rebase origin arena/67b3a643-mehdigm-stream || true
           git push origin arena/67b3a643-mehdigm-stream
