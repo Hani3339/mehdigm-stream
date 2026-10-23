@@ -18,6 +18,22 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: gradle
+
+      - name: Build Shahid4u.cs3 & copy to build/
+        run: |
+          chmod +x gradlew
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          ./gradlew :Shahid4u:make --no-daemon --stacktrace
+          mkdir -p build
+          cp -f Shahid4u/build/Shahid4u.cs3 build/Shahid4u.cs3
+          ls -lh build/Shahid4u.cs3
+
       - name: Install Python deps for Live E2E Verification
         run: pip install -q "curl_cffi" beautifulsoup4 cryptography
 
@@ -256,42 +272,52 @@ jobs:
 
           byse_fp_cache = {}
 
+          def make_sess(px=None):
+              return creq.Session(impersonate="chrome124", proxies={"http": px, "https": px} if px else None)
+
           def extract_provider(ext_url, ref, q_hint):
               u = urllib.parse.urlparse(ext_url)
               host = u.netloc.lower().removeprefix("www.")
               origin = f"{u.scheme}://{u.netloc}"
               seg = u.path.strip("/").split("/")[-1].removeprefix("embed-").removesuffix(".html")
 
-              # 1. Vinovo (with diagnostic if CF challenges Azure IP)
+              # 1. Vinovo (direct first, non-Azure proxy fallback if CF challenges Azure IP)
               if "vinovo" in host:
                   last_diag = ""
-                  for vo in [origin, "https://vinovo.to", "https://vinovo.si"]:
-                      try:
-                          vs = creq.Session(impersonate="chrome124")
-                          emb = f"{vo}/e/{seg}"
-                          r1 = vs.get(emb, headers={"Referer": ref}, timeout=12)
-                          sp = BeautifulSoup(r1.text, "html.parser")
-                          mt_el = sp.select_one("meta[name=token]")
-                          fc_el = sp.select_one("meta[name=file_code]")
-                          vd_el = sp.select_one("video[data-base]")
-                          mt = mt_el["content"] if mt_el and mt_el.has_attr("content") else ""
-                          fc = fc_el["content"] if fc_el and fc_el.has_attr("content") else seg
-                          db = vd_el["data-base"] if vd_el and vd_el.has_attr("data-base") else vo
-                          if not mt:
-                              last_diag = f"{vo}:no_meta_token:{r1.status_code}"
-                              continue
-                          r2 = vs.post(f"{vo}/api/file/url/{fc}", data={"recaptcha": "", "token": mt}, headers={"Referer": emb, "Origin": vo, "Accept": "*/*", "X-Requested-With": "XMLHttpRequest"}, timeout=12)
-                          if r2.text.strip().startswith("{"):
-                              tok = r2.json().get("token", "")
-                              if tok:
-                                  mp4 = f"{db.rstrip('/')}/stream/{urllib.parse.unquote(tok).lstrip('/')}"
-                                  ok, st, ct = probe_mp4(mp4, {"Referer": vo + "/"})
-                                  return [{"provider": "Vinovo", "type": "MP4", "qualities": [q_hint or 1080], "playable": ok, "status": st, "ct": ct}]
-                              last_diag = f"{vo}:json_no_token:{r2.text[:160]}"
-                          else:
-                              last_diag = f"{vo}:status={r2.status_code}:body={r2.text[:160]}"
-                      except Exception as e:
-                          last_diag = str(e)
+                  px_opts = [None] + good_proxies[:3]
+                  for px in px_opts:
+                      for vo in ["https://vinovo.to", "https://vinovo.si"]:
+                          try:
+                              vs = make_sess(px)
+                              emb = f"{vo}/e/{seg}"
+                              r1 = vs.get(emb, headers={"Referer": BASE + "/"}, timeout=12)
+                              sp = BeautifulSoup(r1.text, "html.parser")
+                              mt_el = sp.select_one("meta[name=token]")
+                              fc_el = sp.select_one("meta[name=file_code]")
+                              vd_el = sp.select_one("video[data-base]")
+                              mt = mt_el["content"] if mt_el and mt_el.has_attr("content") else ""
+                              fc = fc_el["content"] if fc_el and fc_el.has_attr("content") else seg
+                              db = vd_el["data-base"] if vd_el and vd_el.has_attr("data-base") else vo
+                              if not mt:
+                                  last_diag = f"{vo}:no_meta_token:{r1.status_code}"
+                                  continue
+                              r2 = vs.post(f"{vo}/api/file/url/{fc}", data={"recaptcha": "", "token": mt}, headers={"Referer": emb, "Origin": vo, "Accept": "*/*", "X-Requested-With": "XMLHttpRequest"}, timeout=12)
+                              if r2.text.strip().startswith("{"):
+                                  tok = r2.json().get("token", "")
+                                  if tok:
+                                      mp4 = f"{db.rstrip('/')}/stream/{urllib.parse.unquote(tok).lstrip('/')}"
+                                      ok, st, ct = probe_mp4(mp4, {"Referer": vo + "/"})
+                                      if not ok and px:
+                                          pr = vs.get(mp4, headers={"Referer": vo + "/", "Range": "bytes=0-1023"}, timeout=12)
+                                          ct = pr.headers.get("content-type", "")
+                                          ok = pr.status_code in (200, 206) and ("video" in ct.lower() or "octet-stream" in ct.lower())
+                                          st = pr.status_code
+                                      return [{"provider": "Vinovo", "type": "MP4", "qualities": [q_hint or 1080], "playable": ok, "status": st, "ct": ct}]
+                                  last_diag = f"{vo}:json_no_token:{r2.text[:160]}"
+                              else:
+                                  last_diag = f"{vo}:status={r2.status_code}:body={r2.text[:160]}"
+                          except Exception as e:
+                              last_diag = str(e)
                   return [{"provider": "Vinovo", "playable": False, "diag": last_diag}]
 
               # 2. Vidara
@@ -392,25 +418,31 @@ jobs:
                               return [{"provider": "MixDrop", "type": "MP4", "qualities": [q_hint or 1080], "playable": ok, "status": st, "ct": ct}]
                   return [{"provider": "MixDrop", "playable": False}]
 
-              # 6. DoodStream / Playmogo + Multi-Mirror Fallbacks
+              # 6. DoodStream / Playmogo + Multi-Mirror + Non-Azure IP Fallback
               if any(x in host for x in ["playmogo", "dood", "dsvplay", "myvidplay", "d000", "vide0"]):
-                  for cand in [f"{origin}/e/{seg}", f"https://myvidplay.com/e/{seg}", f"https://dsvplay.com/e/{seg}", f"https://d000d.com/e/{seg}", f"https://vide0.net/e/{seg}"]:
-                      try:
-                          ds = creq.Session(impersonate="chrome124")
-                          r = ds.get(cand, headers={"Referer": ref}, timeout=12)
-                          fo = f"{urllib.parse.urlparse(r.url).scheme}://{urllib.parse.urlparse(r.url).netloc}"
-                          m = re.search(r"/pass_md5/[^'\"\s<>]+", r.text)
-                          if not m:
-                              continue
-                          pmd5 = m.group(0)
-                          mb = ds.get(fo + pmd5, headers={"Referer": r.url, "X-Requested-With": "XMLHttpRequest"}, timeout=12).text.strip()
-                          if mb.startswith("http"):
-                              r10 = "".join(random.choices(string.ascii_letters + string.digits, k=10))
-                              mp4 = f"{mb}{r10}?token={pmd5.split('/')[-1]}&expiry={int(time.time()*1000)}"
-                              ok, st, ct = probe_mp4(mp4, {"Referer": fo + "/"})
-                              return [{"provider": "DoodStream", "type": "MP4", "qualities": [q_hint or 1080], "playable": ok, "status": st, "ct": ct, "mirror": fo}]
-                      except Exception:
-                          pass
+                  for px in ([None] + good_proxies[:3]):
+                      for cand in [f"{origin}/e/{seg}", f"https://myvidplay.com/e/{seg}", f"https://dsvplay.com/e/{seg}"]:
+                          try:
+                              ds = make_sess(px)
+                              r = ds.get(cand, headers={"Referer": BASE + "/"}, timeout=12)
+                              fo = f"{urllib.parse.urlparse(r.url).scheme}://{urllib.parse.urlparse(r.url).netloc}"
+                              m = re.search(r"/pass_md5/[^'\"\s<>]+", r.text)
+                              if not m:
+                                  continue
+                              pmd5 = m.group(0)
+                              mb = ds.get(fo + pmd5, headers={"Referer": r.url, "X-Requested-With": "XMLHttpRequest"}, timeout=12).text.strip()
+                              if mb.startswith("http"):
+                                  r10 = "".join(random.choices(string.ascii_letters + string.digits, k=10))
+                                  mp4 = f"{mb}{r10}?token={pmd5.split('/')[-1]}&expiry={int(time.time()*1000)}"
+                                  ok, st, ct = probe_mp4(mp4, {"Referer": fo + "/"})
+                                  if not ok and px:
+                                      pr = ds.get(mp4, headers={"Referer": fo + "/", "Range": "bytes=0-1023"}, timeout=12)
+                                      ct = pr.headers.get("content-type", "")
+                                      ok = pr.status_code in (200, 206) and ("video" in ct.lower() or "octet-stream" in ct.lower())
+                                      st = pr.status_code
+                                  return [{"provider": "DoodStream", "type": "MP4", "qualities": [q_hint or 1080], "playable": ok, "status": st, "ct": ct, "mirror": fo}]
+                          except Exception:
+                              pass
                   return [{"provider": "DoodStream", "playable": False}]
 
               # 7. VOE
@@ -491,22 +523,67 @@ jobs:
                       return [{"provider": "Upzur", "type": "MP4", "qualities": [q_hint or 1080], "playable": ok, "status": st, "ct": ct}]
                   return [{"provider": "Upzur", "playable": False}]
 
-              # 12. Ok.ru
+              # 12. 1CloudFile (WASM Single-Byte XOR Decoder)
+              if "1cloudfile" in host:
+                  cs1 = creq.Session(impersonate="chrome124")
+                  r = cs1.get(ext_url, headers={"Referer": ref}, timeout=12)
+                  for hm in re.finditer(r'["\']([0-9a-fA-F]{80,})["\']', r.text):
+                      hx = hm.group(1)
+                      if len(hx) % 2 != 0:
+                          continue
+                      raw = bytes.fromhex(hx)
+                      xk = raw[0] ^ ord("h")
+                      dec_u = bytes(b ^ xk for b in raw).decode("utf-8", errors="ignore").strip()
+                      if dec_u.startswith("http"):
+                          ok, st, ct = probe_mp4(dec_u, {"Referer": ext_url})
+                          return [{"provider": "1CloudFile", "type": "MP4", "qualities": [q_hint or 1080], "playable": ok, "status": st, "ct": ct}]
+                  return [{"provider": "1CloudFile", "playable": False}]
+
+              # 13. KoramaUp (Yetishare ?pt= Direct MP4)
+              if "koramaup" in host:
+                  ks = creq.Session(impersonate="chrome124")
+                  r = ks.get(ext_url, headers={"Referer": ref}, timeout=12)
+                  mp = re.search(r"https?://[^'\"\s<>]*koramaup\.com/[^'\"\s<>]+\?pt=[^'\"\s<>]+", r.text, re.I)
+                  if mp:
+                      ptu = mp.group(0).replace("\\/", "/")
+                      ms = re.search(r"var\s+seconds\s*=\s*(\d+)", r.text)
+                      time.sleep(min(max(int(ms.group(1)) if ms else 3, 1), 5) + 0.4)
+                      r2 = ks.get(ptu, headers={"Referer": ext_url, "Range": "bytes=0-1023"}, allow_redirects=False, timeout=14)
+                      if r2.status_code in (301, 302, 303, 307, 308):
+                          loc = r2.headers.get("location", "")
+                          if loc.startswith("http"):
+                              ok, st, ct = probe_mp4(loc, {"Referer": ext_url})
+                              return [{"provider": "KoramaUp", "type": "MP4", "qualities": [q_hint or 1080], "playable": ok, "status": st, "ct": ct}]
+                      elif r2.status_code in (200, 206):
+                          ct = r2.headers.get("content-type", "")
+                          ok = "video" in ct.lower() or "octet-stream" in ct.lower()
+                          return [{"provider": "KoramaUp", "type": "MP4", "qualities": [q_hint or 1080], "playable": ok, "status": r2.status_code, "ct": ct}]
+                  return [{"provider": "KoramaUp", "playable": False}]
+
+              # 14. Ok.ru
               if "ok.ru" in host:
                   r = direct.get(ext_url, headers={"Referer": "https://ok.ru/"}, timeout=12)
                   if "vp_video_stub" in r.text:
                       return [{"provider": "Ok.ru", "type": "DELETED_UPSTREAM", "qualities": [], "playable": False, "status": "vp_video_stub"}]
+                  sp_ok = BeautifulSoup(r.text, "html.parser")
+                  do_el = sp_ok.select_one("[data-options]")
+                  if do_el and do_el.has_attr("data-options"):
+                      meta = json.loads(json.loads(do_el["data-options"]).get("flashvars", {}).get("metadata", "{}"))
+                      hls_u = meta.get("hlsManifestUrl") or meta.get("ondemandHls") or ""
+                      if hls_u.startswith("http"):
+                          ok, qs, st = parse_m3u8_qualities(hls_u, {"Referer": "https://ok.ru/", "Origin": "https://ok.ru"}, q_hint)
+                          return [{"provider": "Ok.ru", "type": "HLS", "qualities": qs, "playable": ok, "status": st}]
                   return [{"provider": "Ok.ru", "playable": False}]
 
               return [{"provider": host, "type": "UNKNOWN", "qualities": [], "playable": False}]
 
-          SUPPORTED = ("vinovo", "vidara", "fastvid", "earnvids", "byse", "mixdrop", "m1xdrop", "dood", "playmogo", "voe", "uqload", "savefiles", "streamhls", "vids", "upzur", "ok")
+          SUPPORTED = ("vinovo", "vidara", "fastvid", "earnvids", "byse", "mixdrop", "m1xdrop", "dood", "playmogo", "voe", "uqload", "savefiles", "streamhls", "vids", "upzur", "1cloudfile", "koramaup", "ok")
 
           def canonical_key(url):
               u = urllib.parse.urlparse(url)
               h = u.netloc.lower().removeprefix("www.")
               seg = u.path.strip("/").split("/")[-1].removeprefix("embed-").removesuffix(".html")
-              for fam, keys in [("vinovo", ["vinovo"]), ("vidara", ["vidara"]), ("earnvids", ["fastvid", "earnvids"]), ("byse", ["byse", "n1mwq"]), ("mixdrop", ["m1xdrop", "mxdrop", "mixdrop"]), ("dood", ["playmogo", "dood", "myvidplay", "dsvplay"]), ("voe", ["voe.", "derricknationtop"]), ("uqload", ["uqload"]), ("savefiles", ["savefiles", "streamhls"]), ("vidsst", ["vids.st"]), ("upzur", ["upzur"]), ("okru", ["ok.ru"])]:
+              for fam, keys in [("vinovo", ["vinovo"]), ("vidara", ["vidara"]), ("earnvids", ["fastvid", "earnvids"]), ("byse", ["byse", "n1mwq"]), ("mixdrop", ["m1xdrop", "mxdrop", "mixdrop"]), ("dood", ["playmogo", "dood", "myvidplay", "dsvplay"]), ("voe", ["voe.", "derricknationtop"]), ("uqload", ["uqload"]), ("savefiles", ["savefiles", "streamhls"]), ("vidsst", ["vids.st"]), ("upzur", ["upzur"]), ("1cloudfile", ["1cloudfile"]), ("koramaup", ["koramaup"]), ("okru", ["ok.ru"])]:
                   if any(k in h for k in keys):
                       return f"{fam}:{seg}"
               return url
@@ -518,33 +595,45 @@ jobs:
               dl_url = enc_url(f"{BASE}/download/{slug}")
               jobs = {}
 
-              # Watch page with dedicated sticky proxy session + FIXED inline csrfToken extraction!
-              wsess, wr, next_p = fetch_sticky_page(watch_url, item_url, start_p)
-              wr_ref = enc_url(wr.url)
-              wsoup, wtraps = sanitize_soup(wr.text)
-              m_csrf = re.search(r'csrfToken\s*=\s*["\']([^"\']+)["\']', wr.text)
-              csrf_el = wsoup.select_one("meta[name=csrf-token]")
-              csrf = m_csrf.group(1) if m_csrf else (csrf_el["content"] if csrf_el and csrf_el.has_attr("content") else "")
-              m_key = re.search(r'watchResolveKey\s*=\s*["\']([^"\']+)["\']', wr.text)
-              wkey = m_key.group(1) if m_key else ""
-              btns = [b for b in wsoup.select("#servers button.btn-server[data-token]") if b["data-token"] not in wtraps]
+              # Watch page with dedicated sticky proxy session + retry on proxy death!
+              btns = []
               watch_resolved_count = 0
-              for idx, b in enumerate(btns):
-                  try:
-                      tok = b["data-token"]
-                      el = 450 + idx * 520
-                      pr = wsess.post(f"{BASE}/watch/resolve", json={"key": wkey, "token": tok, "human_signal": {"version": 1, "elapsed_ms": el, "visible_ms": el - 20, "pointer": 5 + idx, "click": 2 + idx, "touch": 2, "scroll": 1, "key": 0}}, headers={"Accept": "application/json", "Content-Type": "application/json", "X-CSRF-TOKEN": csrf, "X-Requested-With": "XMLHttpRequest", "X-FP-Event-ID": "", "Origin": BASE, "Referer": wr_ref}, timeout=14)
-                      if pr.status_code == 200 and pr.json().get("ok"):
-                          mu = enc_url(urllib.parse.urljoin(BASE + "/", pr.json()["url"]))
-                          mr = wsess.get(mu, headers={"Referer": wr_ref}, allow_redirects=False, timeout=12)
-                          loc = mr.headers.get("location", "")
-                          if loc.startswith("http"):
-                              watch_resolved_count += 1
-                              ck = canonical_key(loc)
-                              jobs[ck] = {"url": loc, "ref": wr_ref, "q": None}
-                  except Exception as e:
-                      print("Watch resolve err:", e, flush=True)
-                  time.sleep(0.28)
+              next_p = start_p
+              for _w_try in range(3):
+                  wsess, wr, next_p = fetch_sticky_page(watch_url, item_url, next_p)
+                  wr_ref = enc_url(wr.url)
+                  wsoup, wtraps = sanitize_soup(wr.text)
+                  m_csrf = re.search(r'csrfToken\s*=\s*["\']([^"\']+)["\']', wr.text)
+                  csrf_el = wsoup.select_one("meta[name=csrf-token]")
+                  csrf = m_csrf.group(1) if m_csrf else (csrf_el["content"] if csrf_el and csrf_el.has_attr("content") else "")
+                  m_key = re.search(r'watchResolveKey\s*=\s*["\']([^"\']+)["\']', wr.text)
+                  wkey = m_key.group(1) if m_key else ""
+                  btns = [b for b in wsoup.select("#servers button.btn-server[data-token]") if b["data-token"] not in wtraps]
+                  consecutive_err = 0
+                  for idx, b in enumerate(btns):
+                      try:
+                          tok = b["data-token"]
+                          el = 450 + idx * 520
+                          pr = wsess.post(f"{BASE}/watch/resolve", json={"key": wkey, "token": tok, "human_signal": {"version": 1, "elapsed_ms": el, "visible_ms": el - 20, "pointer": 5 + idx, "click": 2 + idx, "touch": 2, "scroll": 1, "key": 0}}, headers={"Accept": "application/json", "Content-Type": "application/json", "X-CSRF-TOKEN": csrf, "X-Requested-With": "XMLHttpRequest", "X-FP-Event-ID": "", "Origin": BASE, "Referer": wr_ref}, timeout=12)
+                          if pr.status_code == 200 and pr.json().get("ok"):
+                              consecutive_err = 0
+                              mu = enc_url(urllib.parse.urljoin(BASE + "/", pr.json()["url"]))
+                              mr = wsess.get(mu, headers={"Referer": wr_ref}, allow_redirects=False, timeout=10)
+                              loc = mr.headers.get("location", "")
+                              if loc.startswith("http"):
+                                  watch_resolved_count += 1
+                                  ck = canonical_key(loc)
+                                  jobs[ck] = {"url": loc, "ref": wr_ref, "q": None}
+                          elif pr.status_code == 403:
+                              break
+                      except Exception as e:
+                          consecutive_err += 1
+                          print("Watch resolve err:", e, flush=True)
+                          if consecutive_err >= 2:
+                              break
+                      time.sleep(0.25)
+                  if watch_resolved_count > 0 or not btns:
+                      break
 
               # Download page across ALL qualities (1080, 720, 480)
               dsess, dr, _ = fetch_sticky_page(dl_url, item_url, next_p)

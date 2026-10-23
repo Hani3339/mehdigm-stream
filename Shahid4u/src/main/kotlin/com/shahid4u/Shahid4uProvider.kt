@@ -36,6 +36,8 @@ class Shahid4uProvider : Plugin() {
         registerExtractorAPI(Shahid4uSaveFilesComApi())
         registerExtractorAPI(Shahid4uVidsStApi())
         registerExtractorAPI(Shahid4uUpzurApi())
+        registerExtractorAPI(Shahid4uOneCloudFileApi())
+        registerExtractorAPI(Shahid4uKoramaUpApi())
         registerExtractorAPI(Shahid4uOkRuApi())
     }
 }

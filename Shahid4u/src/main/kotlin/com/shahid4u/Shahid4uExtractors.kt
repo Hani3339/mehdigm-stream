@@ -19,6 +19,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.Cookie
 import okhttp3.CookieJar
@@ -73,7 +74,7 @@ object Shahid4uExtractors {
     const val DESKTOP_UA =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
-    private class EphemeralCookieJar : CookieJar {
+    internal class EphemeralCookieJar : CookieJar {
         private val map = ConcurrentHashMap<String, MutableList<Cookie>>()
         override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
             val list = map.getOrPut(url.host.lowercase()) { mutableListOf() }
@@ -89,15 +90,27 @@ object Shahid4uExtractors {
             val list = map[url.host.lowercase()] ?: return emptyList()
             synchronized(list) { return list.toList() }
         }
+
+        fun exportCookieHeader(urlStr: String): String {
+            val httpUrl = urlStr.toHttpUrlOrNull() ?: return ""
+            return loadForRequest(httpUrl).joinToString("; ") { "${it.name}=${it.value}" }
+        }
     }
 
-    fun newSessionClient(): OkHttpClient =
+    internal fun newSessionClient(
+        withCfKiller: Boolean = false,
+        cookieJar: EphemeralCookieJar = EphemeralCookieJar()
+    ): OkHttpClient =
         app.baseClient.newBuilder()
-            .cookieJar(EphemeralCookieJar())
+            .dns(Shahid4uNetwork.hybridDns)
+            .cookieJar(cookieJar)
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(20, TimeUnit.SECONDS)
             .followRedirects(true)
             .followSslRedirects(true)
+            .apply {
+                if (withCfKiller) addInterceptor(Shahid4uNetwork.cfKillerInterceptor)
+            }
             .build()
 
     fun originOf(url: String): String? = runCatching {
@@ -144,6 +157,8 @@ object Shahid4uExtractors {
             host.contains("savefiles") || host.contains("streamhls") -> "savefiles"
             host == "vids.st" || host.endsWith(".vids.st") -> "vidsst"
             host.contains("upzur") -> "upzur"
+            host.contains("1cloudfile") -> "1cloudfile"
+            host.contains("koramaup") -> "koramaup"
             host == "ok.ru" || host.endsWith(".ok.ru") || host.contains("odnoklassniki") -> "okru"
             else -> host
         }
@@ -152,7 +167,7 @@ object Shahid4uExtractors {
             .removePrefix("embed-")
             .removeSuffix(".html")
             .trim()
-        return if (seg.length >= 5) "$family:$seg" else clean
+        return if (seg.length >= 3) "$family:$seg" else clean
     }
 
     /**
@@ -176,6 +191,8 @@ object Shahid4uExtractors {
             s.contains("streamhls") ||
             s.contains("vids") ||
             s.contains("upzur") ||
+            s.contains("1cloudfile") ||
+            s.contains("koramaup") ||
             s == "ok" || s.contains("ok.ru") ||
             s.contains("streamwish") ||
             s.contains("filemoon") ||
@@ -243,6 +260,12 @@ object Shahid4uExtractors {
                 host.contains("upzur") ->
                     extractUpzur(url, safeReferer, qualityHint, wrappedCallback)
 
+                host.contains("1cloudfile") ->
+                    extractOneCloudFile(url, safeReferer, qualityHint, wrappedCallback)
+
+                host.contains("koramaup") ->
+                    extractKoramaUp(url, safeReferer, qualityHint, wrappedCallback)
+
                 host == "ok.ru" || host.endsWith(".ok.ru") || host.contains("odnoklassniki") ->
                     extractOkRu(url, safeReferer, wrappedCallback)
 
@@ -279,8 +302,8 @@ object Shahid4uExtractors {
 
         for (origin in candidateOrigins) {
             val embedUrl = "$origin/e/$urlFileCode"
-            val client = newSessionClient()
-            val html = runCatching {
+            var client = newSessionClient()
+            var html = runCatching {
                 val req = Request.Builder()
                     .url(embedUrl)
                     .header("User-Agent", DESKTOP_UA)
@@ -288,6 +311,17 @@ object Shahid4uExtractors {
                     .build()
                 client.newCall(req).execute().use { if (it.isSuccessful) it.body?.string().orEmpty() else "" }
             }.getOrDefault("")
+            if (html.isBlank() || !html.contains("meta") || html.contains("Just a moment", ignoreCase = true)) {
+                client = newSessionClient(withCfKiller = true)
+                html = runCatching {
+                    val req = Request.Builder()
+                        .url(embedUrl)
+                        .header("User-Agent", DESKTOP_UA)
+                        .header("Referer", referer ?: "$origin/")
+                        .build()
+                    client.newCall(req).execute().use { if (it.isSuccessful) it.body?.string().orEmpty() else "" }
+                }.getOrDefault("")
+            }
             if (html.isBlank()) continue
 
             val doc = Jsoup.parse(html, embedUrl)
@@ -1210,8 +1244,8 @@ object Shahid4uExtractors {
         )
 
         for (embedUrl in candidates) {
-            val client = newSessionClient()
-            val (finalEmbedUrl, html) = runCatching {
+            var client = newSessionClient()
+            var fetched = runCatching {
                 val req = Request.Builder()
                     .url(embedUrl)
                     .header("User-Agent", DESKTOP_UA)
@@ -1221,7 +1255,22 @@ object Shahid4uExtractors {
                     if (!res.isSuccessful) null
                     else res.request.url.toString() to res.body?.string().orEmpty()
                 }
-            }.getOrNull() ?: continue
+            }.getOrNull()
+            if (fetched == null && embedUrl == "$orig/e/$fileCode") {
+                client = newSessionClient(withCfKiller = true)
+                fetched = runCatching {
+                    val req = Request.Builder()
+                        .url(embedUrl)
+                        .header("User-Agent", DESKTOP_UA)
+                        .header("Referer", referer ?: "$orig/")
+                        .build()
+                    client.newCall(req).execute().use { res ->
+                        if (!res.isSuccessful) null
+                        else res.request.url.toString() to res.body?.string().orEmpty()
+                    }
+                }.getOrNull()
+            }
+            val (finalEmbedUrl, html) = fetched ?: continue
 
             val passMd5Path = Regex("""/pass_md5/[^'"\s<>]+""").find(html)?.value ?: continue
             val finalOrigin = originOf(finalEmbedUrl) ?: originOf(embedUrl) ?: orig
@@ -1846,6 +1895,153 @@ object Shahid4uExtractors {
             }
         }
     }
+
+    // ── 14. 1CloudFile (`1cloudfile.com`) — WASM Single-Byte XOR Decoder ─────
+
+    suspend fun extractOneCloudFile(
+        url: String,
+        referer: String?,
+        qualityHint: Int?,
+        callback: (ExtractorLink) -> Unit
+    ) = withContext(Dispatchers.IO) {
+        val origin = originOf(url) ?: "https://1cloudfile.com"
+        val jar = EphemeralCookieJar()
+        val client = newSessionClient(cookieJar = jar)
+
+        val html = runCatching {
+            val req = Request.Builder()
+                .url(url)
+                .header("User-Agent", DESKTOP_UA)
+                .header("Referer", referer ?: "$origin/")
+                .build()
+            client.newCall(req).execute().use { if (it.isSuccessful) it.body?.string().orEmpty() else "" }
+        }.getOrDefault("")
+        if (html.isBlank()) return@withContext
+
+        var directUrl: String? = null
+        val hexRegex = Regex("""["']([0-9a-fA-F]{80,})["']""")
+        for (m in hexRegex.findAll(html)) {
+            val hex = m.groupValues[1]
+            if (hex.length % 2 != 0) continue
+            val decoded = runCatching {
+                val raw = ByteArray(hex.length / 2) { idx ->
+                    hex.substring(idx * 2, idx * 2 + 2).toInt(16).toByte()
+                }
+                val xorKey = (raw[0].toInt() and 0xFF) xor 'h'.code
+                val out = ByteArray(raw.size) { idx ->
+                    ((raw[idx].toInt() and 0xFF) xor xorKey).toByte()
+                }
+                String(out, Charsets.UTF_8)
+            }.getOrNull() ?: continue
+
+            if (decoded.startsWith("https://") || decoded.startsWith("http://")) {
+                directUrl = decoded.trim()
+                break
+            }
+        }
+
+        val finalUrl = directUrl ?: return@withContext
+        val effQual = qualityHint ?: detectQualityFromText(finalUrl.ifBlank { html }, Qualities.P1080.value)
+        val headers = LinkedHashMap<String, String>().apply {
+            put("User-Agent", DESKTOP_UA)
+            put("Referer", url)
+            jar.exportCookieHeader(finalUrl).ifBlank { jar.exportCookieHeader(url) }
+                .takeIf { it.isNotBlank() }?.let { put("Cookie", it) }
+        }
+
+        callback(
+            newExtractorLink(
+                source = "1CloudFile",
+                name = "1CloudFile",
+                url = finalUrl,
+                type = ExtractorLinkType.VIDEO
+            ) {
+                this.referer = url
+                this.quality = effQual
+                this.headers = headers
+            }
+        )
+    }
+
+    // ── 15. KoramaUp (`koramaup.com`) — Yetishare `?pt=` Direct MP4 ──────────
+
+    suspend fun extractKoramaUp(
+        url: String,
+        referer: String?,
+        qualityHint: Int?,
+        callback: (ExtractorLink) -> Unit
+    ) = withContext(Dispatchers.IO) {
+        val origin = originOf(url) ?: "https://koramaup.com"
+        val jar = EphemeralCookieJar()
+        val client = newSessionClient(cookieJar = jar)
+
+        val html = runCatching {
+            val req = Request.Builder()
+                .url(url)
+                .header("User-Agent", DESKTOP_UA)
+                .header("Referer", referer ?: "$origin/")
+                .build()
+            client.newCall(req).execute().use { if (it.isSuccessful) it.body?.string().orEmpty() else "" }
+        }.getOrDefault("")
+        if (html.isBlank()) return@withContext
+
+        val ptUrl = Regex("""https?://[^'"\s<>]*koramaup\.com/[^'"\s<>]+\?pt=[^'"\s<>]+""", RegexOption.IGNORE_CASE)
+            .find(html)?.value?.replace("\\/", "/") ?: return@withContext
+        val waitSecs = Regex("""var\s+seconds\s*=\s*(\d+)""").find(html)?.groupValues?.get(1)?.toIntOrNull() ?: 3
+        delay(waitSecs.coerceIn(1, 5) * 1000L + 400L)
+
+        val noRedirClient = client.newBuilder()
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .build()
+
+        val resolvedUrl = runCatching {
+            val req = Request.Builder()
+                .url(ptUrl)
+                .header("User-Agent", DESKTOP_UA)
+                .header("Referer", url)
+                .header("Range", "bytes=0-1")
+                .build()
+            noRedirClient.newCall(req).execute().use { res ->
+                when {
+                    res.code in listOf(301, 302, 303, 307, 308) -> {
+                        val loc = res.header("Location")?.trim().orEmpty()
+                        when {
+                            loc.startsWith("http") -> loc
+                            loc.startsWith("/") -> "$origin$loc"
+                            else -> null
+                        }
+                    }
+                    res.isSuccessful -> {
+                        val ct = res.header("Content-Type").orEmpty().lowercase()
+                        if (ct.contains("video") || ct.contains("octet-stream") || ct.contains("mp4")) ptUrl else null
+                    }
+                    else -> null
+                }
+            }
+        }.getOrNull() ?: return@withContext
+
+        val effQual = qualityHint ?: detectQualityFromText(html, Qualities.P1080.value)
+        val headers = LinkedHashMap<String, String>().apply {
+            put("User-Agent", DESKTOP_UA)
+            put("Referer", url)
+            jar.exportCookieHeader(resolvedUrl).ifBlank { jar.exportCookieHeader(url) }
+                .takeIf { it.isNotBlank() }?.let { put("Cookie", it) }
+        }
+
+        callback(
+            newExtractorLink(
+                source = "KoramaUp",
+                name = "KoramaUp",
+                url = resolvedUrl,
+                type = ExtractorLinkType.VIDEO
+            ) {
+                this.referer = url
+                this.quality = effQual
+                this.headers = headers
+            }
+        )
+    }
 }
 
 // ── Registered CloudStream `ExtractorApi` Wrappers ───────────────────────────
@@ -2027,5 +2223,33 @@ open class Shahid4uOkRuApi(override val mainUrl: String = "https://ok.ru") : Ext
         callback: (ExtractorLink) -> Unit
     ) {
         Shahid4uExtractors.extractOkRu(url, referer, callback)
+    }
+}
+
+class Shahid4uOneCloudFileApi : ExtractorApi() {
+    override val name = "1CloudFile"
+    override val mainUrl = "https://1cloudfile.com"
+    override val requiresReferer = true
+    override suspend fun getUrl(
+        url: String,
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        Shahid4uExtractors.extractOneCloudFile(url, referer, null, callback)
+    }
+}
+
+class Shahid4uKoramaUpApi : ExtractorApi() {
+    override val name = "KoramaUp"
+    override val mainUrl = "https://koramaup.com"
+    override val requiresReferer = true
+    override suspend fun getUrl(
+        url: String,
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        Shahid4uExtractors.extractKoramaUp(url, referer, null, callback)
     }
 }

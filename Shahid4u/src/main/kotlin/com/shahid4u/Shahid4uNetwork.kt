@@ -323,7 +323,7 @@ object Shahid4uNetwork {
             .build()
     }
 
-    private val cfKillerInterceptor by lazy { CloudflareKiller() }
+    internal val cfKillerInterceptor by lazy { CloudflareKiller() }
 
     private val cfKillerClient: OkHttpClient by lazy {
         directClient.newBuilder()
