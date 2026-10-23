@@ -1,0 +1,42 @@
+{
+  "cs3_size": 162000,
+  "cs3_entries": [
+    "manifest.json",
+    "classes.dex"
+  ],
+  "manifest": {
+    "requiresResources": false,
+    "version": 4,
+    "pluginClassName": "com.anime4up.Anime4UpPlugin",
+    "name": "Anime4Up"
+  },
+  "dex_extractor_classes": [
+    "Anime4UpMegaMaxExtractor",
+    "Anime4UpShare4MaxExtractor",
+    "Anime4UpVidstackExtractor",
+    "Anime4UpUpnShareExtractor",
+    "Anime4UpStreamP2PExtractor",
+    "Anime4UpRpmShareExtractor",
+    "Anime4UpFireStreamExtractor",
+    "Anime4UpVidaraExtractor",
+    "Anime4UpEarnVidsExtractor",
+    "Anime4UpMixdropExtractor",
+    "Anime4UpByseExtractor",
+    "Anime4UpLuluStreamExtractor",
+    "Anime4UpSaveFilesExtractor",
+    "Anime4UpMp4UploadExtractor",
+    "Anime4UpVoeExtractor",
+    "Anime4UpVnxPlayerExtractor"
+  ],
+  "byse_e2e": {
+    "1080p": {
+      "error": "KeyError('key_parts')"
+    },
+    "720p": {
+      "error": "KeyError('key_parts')"
+    },
+    "480p": {
+      "error": "KeyError('key_parts')"
+    }
+  }
+}
