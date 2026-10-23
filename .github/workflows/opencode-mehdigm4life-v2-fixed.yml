@@ -1110,8 +1110,8 @@ jobs:
 
           # Same-origin shim: retry the first empty list reads that a
           # cold or evicted v2 location can return while its config is
-          # still loading. The app bundle is unchanged; nginx only adds
-          # this script to the HTML <head>.
+          # still loading, and subscribe to /api/event with POST because
+          # Cloudflare Quick Tunnels buffer SSE sent over GET.
           RETRY_JS="$RUNNER_TEMP/opencode-client-retry.js"
 
           cat > "$RETRY_JS" <<'JAVASCRIPT'
@@ -1122,6 +1122,14 @@ jobs:
             const retryPaths = new Set(["/api/agent", "/api/model", "/api/provider"]);
             const originalFetch = window.fetch.bind(window);
             const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const isEvent = (input) => {
+              try {
+                const url = new URL(typeof input === "string" ? input : input.url, location.href);
+                return url.pathname === "/api/event";
+              } catch {
+                return false;
+              }
+            };
             const retryable = (input) => {
               try {
                 const url = new URL(typeof input === "string" ? input : input.url, location.href);
@@ -1132,6 +1140,7 @@ jobs:
             };
 
             window.fetch = async (input, init) => {
+              if (isEvent(input)) init = Object.assign({}, init, { method: "POST" });
               const method = String(
                 (init && init.method) || (input instanceof Request ? input.method : "GET"),
               ).toUpperCase();
@@ -1402,6 +1411,17 @@ jobs:
                 proxy_next_upstream error timeout http_502 http_503 http_504;
                 include $PROXY_HEADERS;
                 proxy_buffering off;
+              }
+
+              # Cloudflare Quick Tunnels buffer SSE over GET. The client
+              # shim subscribes with POST, which the tunnel streams; nginx
+              # rewrites the request back to GET for the v2 server.
+              location = /api/event {
+                proxy_pass http://127.0.0.1:4096;
+                proxy_method GET;
+                include $PROXY_HEADERS;
+                proxy_buffering off;
+                proxy_cache off;
               }
 
               location / {
