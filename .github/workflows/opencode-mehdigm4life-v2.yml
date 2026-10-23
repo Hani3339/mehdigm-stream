@@ -617,10 +617,13 @@ jobs:
           # v2 service registration is machine/run specific (pid, url,
           # generated password). Never carry a stale one into the new
           # runner; the foreground `opencode serve` below is the only
-          # server this workflow uses.
+          # server this workflow uses. Also remove global config state
+          # that can cache last selected agent/model in the UI.
           rm -f \
             "${OPENCODE_STATE_DIR:-$HOME/.local/state/opencode}/service.json" \
             "${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}/service.json" \
+            "$HOME/.local/state/opencode/kv.db" \
+            "$HOME/.local/share/opencode/kv.db" \
             2>/dev/null || true
 
           rm -f \
