@@ -1,7 +1,11 @@
 name: Temp Inspect VnxPlayer
 
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - arena/aca5ffed-mehdigm-stream
+    paths:
+      - .github/workflows/tmp-inspect-vnx.yml
 
 permissions:
   contents: write
