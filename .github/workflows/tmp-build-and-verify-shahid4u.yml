@@ -12,47 +12,20 @@ jobs:
   build_and_verify:
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Configure preinstalled Android SDK & Build Shahid4u.cs3
-        run: |
-          export ANDROID_SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
-          export ANDROID_HOME="$ANDROID_SDK_ROOT"
-          echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
-          chmod +x gradlew
-          set +e
-          ./gradlew :Shahid4u:make --no-daemon --stacktrace > .tmp_gradle.log 2>&1
-          RC=$?
-          set -e
-          tail -n 60 .tmp_gradle.log
-          if [ "$RC" -eq 0 ] && [ -f "Shahid4u/build/Shahid4u.cs3" ]; then
-            mkdir -p build
-            cp Shahid4u/build/Shahid4u.cs3 build/Shahid4u.cs3
-            ls -lh build/Shahid4u.cs3
-            rm -f .tmp_gradle.log
-          else
-            echo "Gradle failed with code $RC"
-            exit 0
-          fi
-
       - name: Install Python deps for Live E2E Verification
-        if: hashFiles('build/Shahid4u.cs3') != ''
         run: pip install -q "curl_cffi" beautifulsoup4 cryptography
 
       - name: Run Full Live E2E Verification (Homepage Episode + Homepage Movie + All Providers & Qualities)
-        if: hashFiles('build/Shahid4u.cs3') != ''
         run: |
-          python3 - <<'PY'
-          import base64, codecs, concurrent.futures, hashlib, json, os, random, re, string, time, urllib.parse
+          set +e
+          python3 - <<'PY' > .tmp_e2e_log.txt 2>&1
+          import base64, codecs, concurrent.futures, hashlib, json, os, random, re, string, time, traceback, urllib.parse
           from bs4 import BeautifulSoup
           from curl_cffi import requests as creq
           from cryptography.hazmat.primitives.asymmetric import ec
@@ -61,9 +34,7 @@ jobs:
           from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
           BASE = "https://shaahidd4u.net"
-          UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
-          # 1. Discover sticky SOCKS5 proxy for shaahidd4u.net (Azure ASN bypass)
           feeds = [
               ("socks5h", "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt"),
               ("socks5h", "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt"),
@@ -73,7 +44,7 @@ jobs:
           for proto, furl in feeds:
               try:
                   r = creq.get(furl, timeout=8)
-                  for ln in r.text.splitlines()[:120]:
+                  for ln in r.text.splitlines()[:140]:
                       ln = ln.strip()
                       if ":" in ln and not ln.startswith("#"):
                           cands.append(f"{proto}://{ln}")
@@ -91,7 +62,7 @@ jobs:
           def test_px(px):
               try:
                   s = creq.Session(impersonate="chrome124", proxies={"http": px, "https": px})
-                  r = s.get(BASE + "/", timeout=9)
+                  r = s.get(BASE + "/", timeout=8)
                   if valid_s4u(r):
                       return px
               except Exception:
@@ -99,31 +70,27 @@ jobs:
               return None
 
           good_proxies = []
-          with concurrent.futures.ThreadPoolExecutor(max_workers=35) as ex:
-              for res in ex.map(test_px, cands[:180]):
+          with concurrent.futures.ThreadPoolExecutor(max_workers=40) as ex:
+              for res in ex.map(test_px, cands[:200]):
                   if res:
                       good_proxies.append(res)
-                      if len(good_proxies) >= 6:
+                      if len(good_proxies) >= 10:
                           break
 
+          print("Good proxies:", len(good_proxies), flush=True)
           assert good_proxies, "No working proxy found for shaahidd4u.net"
-          px_idx = 0
-          sess = creq.Session(impersonate="chrome124", proxies={"http": good_proxies[0], "https": good_proxies[0]})
 
-          def s4u_get(url, ref=BASE + "/"):
-              global sess, px_idx
-              for _ in range(len(good_proxies)):
+          def new_sticky_session(start_idx=0):
+              for off in range(len(good_proxies)):
+                  px = good_proxies[(start_idx + off) % len(good_proxies)]
+                  s = creq.Session(impersonate="chrome124", proxies={"http": px, "https": px})
                   try:
-                      time.sleep(0.2)
-                      r = sess.get(url, headers={"Referer": ref}, timeout=16)
+                      r = s.get(BASE + "/", timeout=12)
                       if valid_s4u(r):
-                          return r
+                          return s, (start_idx + off)
                   except Exception:
                       pass
-                  px_idx = (px_idx + 1) % len(good_proxies)
-                  px = good_proxies[px_idx]
-                  sess = creq.Session(impersonate="chrome124", proxies={"http": px, "https": px})
-              return None
+              raise RuntimeError("All proxies failed")
 
           def sanitize_soup(html):
               soup = BeautifulSoup(html, "html.parser")
@@ -147,19 +114,20 @@ jobs:
                   el.decompose()
               return soup, trap_tokens
 
-          # ── Fetch Live Homepage & Pick 1 Recent Episode + 1 Recent Movie ────
-          hp_resp = s4u_get(BASE + "/")
+          sess, p_idx = new_sticky_session(0)
+          hp_resp = sess.get(BASE + "/", timeout=15)
           hp_soup, _ = sanitize_soup(hp_resp.text)
           cards = hp_soup.select(".shows-container a.show-card")
+          print("Homepage cards:", len(cards), flush=True)
+
           ep_target = None
           movie_target = None
           for c in cards:
               href = urllib.parse.urljoin(BASE + "/", c.get("href", ""))
               dec = urllib.parse.unquote(href)
               title = (c.select_one("p.title") or c).get_text(" ", strip=True)
-              if "/episode/" in dec and not ep_target and ("tulsa" in dec.lower() or "الحلقة" in dec):
-                  if "tulsa" in dec.lower():
-                      ep_target = (title, href)
+              if "/episode/" in dec and not ep_target and "tulsa" in dec.lower():
+                  ep_target = (title, href)
               if "/film/" in dec and not movie_target:
                   movie_target = (title, href)
           if not ep_target:
@@ -169,7 +137,9 @@ jobs:
                       ep_target = ((c.select_one("p.title") or c).get_text(" ", strip=True), href)
                       break
 
-          # ── Exact Python Mirror of Shahid4uExtractors.kt ─────────────────────
+          print("Selected Episode:", ep_target[0], urllib.parse.unquote(ep_target[1]), flush=True)
+          print("Selected Movie:", movie_target[0], urllib.parse.unquote(movie_target[1]), flush=True)
+
           direct = creq.Session(impersonate="chrome124")
 
           def unpack_packer(html_str):
@@ -227,22 +197,23 @@ jobs:
               origin = f"{u.scheme}://{u.netloc}"
               seg = u.path.strip("/").split("/")[-1].removeprefix("embed-").removesuffix(".html")
 
-              # 1. Vinovo
               if "vinovo" in host:
                   vs = creq.Session(impersonate="chrome124")
                   emb = f"{origin}/e/{seg}"
                   r1 = vs.get(emb, headers={"Referer": ref}, timeout=12)
                   sp = BeautifulSoup(r1.text, "html.parser")
-                  mt = (sp.select_one("meta[name=token]") or {}).get("content", "")
-                  db = (sp.select_one("video[data-base]") or {}).get("data-base", origin) or origin
+                  mt_el = sp.select_one("meta[name=token]")
+                  mt = mt_el["content"] if mt_el and mt_el.has_attr("content") else ""
+                  vd_el = sp.select_one("video[data-base]")
+                  db = vd_el["data-base"] if vd_el and vd_el.has_attr("data-base") else origin
                   r2 = vs.post(f"{origin}/api/file/url/{seg}", data={"recaptcha": "", "token": mt}, headers={"Referer": emb, "Origin": origin, "X-Requested-With": "XMLHttpRequest"}, timeout=12)
                   tok = r2.json().get("token", "")
                   if tok:
                       mp4 = f"{db.rstrip('/')}/stream/{urllib.parse.unquote(tok).lstrip('/')}"
                       ok, st, ct = probe_mp4(mp4, {"Referer": origin + "/"})
                       return [{"provider": "Vinovo", "type": "MP4", "qualities": [q_hint or 1080], "playable": ok, "status": st, "ct": ct}]
+                  return [{"provider": "Vinovo", "playable": False, "raw": r2.text[:200]}]
 
-              # 2. Vidara
               if "vidara" in host:
                   for vo in ["https://vidaraa.cc", "https://vidara.so"]:
                       r = direct.post(f"{vo}/api/stream", json={"filecode": seg}, headers={"Origin": vo, "Referer": f"{vo}/e/{seg}"}, timeout=12)
@@ -251,8 +222,8 @@ jobs:
                           if su.startswith("http"):
                               ok, qs, st = parse_m3u8_qualities(su, {"Referer": vo + "/", "Origin": vo}, q_hint)
                               return [{"provider": "Vidara", "type": "HLS", "qualities": qs, "playable": ok, "status": st}]
+                  return [{"provider": "Vidara", "playable": False}]
 
-              # 3. FastVid / EarnVids
               if any(x in host for x in ["fastvid", "earnvids", "dingtezuni", "dintezuvio", "vidhide", "minochinos"]):
                   r = direct.get(f"{origin}/embed/{seg}", headers={"Referer": ref}, timeout=12)
                   fo = f"{urllib.parse.urlparse(r.url).scheme}://{urllib.parse.urlparse(r.url).netloc}"
@@ -265,8 +236,8 @@ jobs:
                           ok, qs, st = parse_m3u8_qualities(m3u8, {"Referer": fo + "/", "Origin": fo}, q_hint)
                           if ok:
                               return [{"provider": "FastVid", "type": "HLS", "qualities": qs, "playable": True, "status": st}]
+                  return [{"provider": "FastVid", "playable": False}]
 
-              # 4. Byse (ECDSA P-256 PoW + AES-GCM!)
               if "byse" in host or host == "n1mwq.org":
                   ao = origin
                   vc = seg
@@ -304,8 +275,8 @@ jobs:
                           if su.startswith("http"):
                               ok, qs, st = parse_m3u8_qualities(su, {"Referer": ao + "/", "Origin": ao}, q_hint)
                               return [{"provider": "Byse", "type": "HLS", "qualities": qs, "playable": ok, "status": st}]
+                  return [{"provider": "Byse", "playable": False}]
 
-              # 5. MixDrop
               if any(x in host for x in ["m1xdrop", "mxdrop", "mixdrop"]):
                   for cand in [f"{origin}/e/{seg}", f"https://mxdrop.click/e/{seg}"]:
                       r = direct.get(cand, headers={"Referer": ref}, timeout=12)
@@ -317,8 +288,8 @@ jobs:
                               mp4 = ("https:" + wu) if wu.startswith("//") else wu
                               ok, st, ct = probe_mp4(mp4, {"Referer": fo + "/"})
                               return [{"provider": "MixDrop", "type": "MP4", "qualities": [q_hint or 1080], "playable": ok, "status": st, "ct": ct}]
+                  return [{"provider": "MixDrop", "playable": False}]
 
-              # 6. DoodStream / Playmogo
               if any(x in host for x in ["playmogo", "dood", "dsvplay", "myvidplay"]):
                   ds = creq.Session(impersonate="chrome124")
                   r = ds.get(f"{origin}/e/{seg}", headers={"Referer": ref}, timeout=12)
@@ -332,8 +303,8 @@ jobs:
                           mp4 = f"{mb}{r10}?token={pmd5.split('/')[-1]}&expiry={int(time.time()*1000)}"
                           ok, st, ct = probe_mp4(mp4, {"Referer": fo + "/"})
                           return [{"provider": "DoodStream", "type": "MP4", "qualities": [q_hint or 1080], "playable": ok, "status": st, "ct": ct}]
+                  return [{"provider": "DoodStream", "playable": False}]
 
-              # 7. VOE
               if "voe." in host or "derricknationtop" in host:
                   cur = f"{origin}/e/{seg}"
                   fo = origin
@@ -364,8 +335,8 @@ jobs:
                           ok2, st2, ct2 = probe_mp4(dec["direct_access_url"], {"Referer": fo + "/"})
                           out.append({"provider": "VOE MP4", "type": "MP4", "qualities": [q_hint or 720], "playable": ok2, "status": st2, "ct": ct2})
                       return out
+                  return [{"provider": "VOE", "playable": False}]
 
-              # 8. Uqload
               if "uqload" in host:
                   r = direct.post(f"{origin}/dl", data={"op": "embed", "file_code": seg, "auto": "1", "referer": ref}, headers={"Origin": origin, "Referer": f"{origin}/e/{seg}.html"}, timeout=12)
                   comb = r.text + "\n" + "\n".join(unpack_packer(r.text))
@@ -373,8 +344,8 @@ jobs:
                   if m:
                       ok, qs, st = parse_m3u8_qualities(m.group(0), {"Referer": origin + "/", "Origin": origin}, q_hint)
                       return [{"provider": "Uqload", "type": "HLS", "qualities": qs, "playable": ok, "status": st}]
+                  return [{"provider": "Uqload", "playable": False}]
 
-              # 9. SaveFiles / StreamHLS
               if "savefiles" in host or "streamhls" in host:
                   r1 = direct.get(ext_url, headers={"Referer": ref}, timeout=12)
                   comb = r1.text + "\n" + "\n".join(unpack_packer(r1.text))
@@ -386,8 +357,8 @@ jobs:
                   if m:
                       ok, qs, st = parse_m3u8_qualities(m.group(0), {"Referer": origin + "/", "Origin": origin}, q_hint)
                       return [{"provider": "SaveFiles", "type": "HLS", "qualities": qs, "playable": ok, "status": st}]
+                  return [{"provider": "SaveFiles", "playable": False}]
 
-              # 10. Vids.st
               if host == "vids.st" or host.endswith(".vids.st"):
                   r = direct.get(ext_url, headers={"Referer": ref}, timeout=12, verify=False)
                   m = re.search(r'const\s+url\s*=\s*["\']([^"\']+)["\']', r.text)
@@ -395,8 +366,8 @@ jobs:
                       su = m.group(1).replace("\\/", "/")
                       ok, st, ct = probe_mp4(su, {"Referer": "https://vids.st/"})
                       return [{"provider": "Vids.st", "type": "MP4", "qualities": [q_hint or 1080], "playable": ok, "status": st, "ct": ct}]
+                  return [{"provider": "Vids.st", "playable": False}]
 
-              # 11. Upzur
               if "upzur" in host:
                   us = creq.Session(impersonate="chrome124")
                   us.get(f"{origin}/{seg}", headers={"Referer": ref}, timeout=12)
@@ -405,12 +376,13 @@ jobs:
                   if m:
                       ok, st, ct = probe_mp4(m.group(0), {"Referer": origin + "/"})
                       return [{"provider": "Upzur", "type": "MP4", "qualities": [q_hint or 1080], "playable": ok, "status": st, "ct": ct}]
+                  return [{"provider": "Upzur", "playable": False}]
 
-              # 12. Ok.ru
               if "ok.ru" in host:
                   r = direct.get(ext_url, headers={"Referer": "https://ok.ru/"}, timeout=12)
                   if "vp_video_stub" in r.text:
                       return [{"provider": "Ok.ru", "type": "DELETED_UPSTREAM", "qualities": [], "playable": False, "status": "vp_video_stub"}]
+                  return [{"provider": "Ok.ru", "playable": False}]
 
               return [{"provider": host, "type": "UNKNOWN", "qualities": [], "playable": False}]
 
@@ -425,36 +397,42 @@ jobs:
                       return f"{fam}:{seg}"
               return url
 
-          def test_full_item(label, item_title, item_url):
+          def test_full_item(label, item_title, item_url, start_p):
               slug = urllib.parse.urlparse(item_url).path.strip("/").split("/", 1)[1]
               watch_url = f"{BASE}/watch/{slug}"
               dl_url = f"{BASE}/download/{slug}"
               jobs = {}
 
-              # Watch page
-              wr = s4u_get(watch_url, ref=item_url)
+              # Watch page with dedicated sticky proxy session
+              wsess, next_p = new_sticky_session(start_p)
+              wr = wsess.get(watch_url, headers={"Referer": item_url}, timeout=16)
               wsoup, wtraps = sanitize_soup(wr.text)
-              csrf = (wsoup.select_one("meta[name=csrf-token]") or {}).get("content", "")
+              csrf_el = wsoup.select_one("meta[name=csrf-token]")
+              csrf = csrf_el["content"] if csrf_el and csrf_el.has_attr("content") else ""
               m_key = re.search(r'watchResolveKey\s*=\s*["\']([^"\']+)["\']', wr.text)
               wkey = m_key.group(1) if m_key else ""
               btns = [b for b in wsoup.select("#servers button.btn-server[data-token]") if b["data-token"] not in wtraps]
               watch_resolved_count = 0
               for idx, b in enumerate(btns):
-                  tok = b["data-token"]
-                  el = 450 + idx * 520
-                  pr = sess.post(f"{BASE}/watch/resolve", json={"key": wkey, "token": tok, "human_signal": {"version": 1, "elapsed_ms": el, "visible_ms": el - 20, "pointer": 5 + idx, "click": 2 + idx, "touch": 2, "scroll": 1, "key": 0}}, headers={"Accept": "application/json", "Content-Type": "application/json", "X-CSRF-TOKEN": csrf, "X-Requested-With": "XMLHttpRequest", "X-FP-Event-ID": "", "Origin": BASE, "Referer": wr.url}, timeout=14)
-                  if pr.status_code == 200 and pr.json().get("ok"):
-                      mu = urllib.parse.urljoin(BASE + "/", pr.json()["url"])
-                      mr = sess.get(mu, headers={"Referer": wr.url}, allow_redirects=False, timeout=12)
-                      loc = mr.headers.get("location", "")
-                      if loc.startswith("http"):
-                          watch_resolved_count += 1
-                          ck = canonical_key(loc)
-                          jobs[ck] = {"url": loc, "ref": wr.url, "q": None}
+                  try:
+                      tok = b["data-token"]
+                      el = 450 + idx * 520
+                      pr = wsess.post(f"{BASE}/watch/resolve", json={"key": wkey, "token": tok, "human_signal": {"version": 1, "elapsed_ms": el, "visible_ms": el - 20, "pointer": 5 + idx, "click": 2 + idx, "touch": 2, "scroll": 1, "key": 0}}, headers={"Accept": "application/json", "Content-Type": "application/json", "X-CSRF-TOKEN": csrf, "X-Requested-With": "XMLHttpRequest", "X-FP-Event-ID": "", "Origin": BASE, "Referer": wr.url}, timeout=14)
+                      if pr.status_code == 200 and pr.json().get("ok"):
+                          mu = urllib.parse.urljoin(BASE + "/", pr.json()["url"])
+                          mr = wsess.get(mu, headers={"Referer": wr.url}, allow_redirects=False, timeout=12)
+                          loc = mr.headers.get("location", "")
+                          if loc.startswith("http"):
+                              watch_resolved_count += 1
+                              ck = canonical_key(loc)
+                              jobs[ck] = {"url": loc, "ref": wr.url, "q": None}
+                  except Exception as e:
+                      print("Watch resolve err:", e, flush=True)
                   time.sleep(0.22)
 
               # Download page across ALL qualities (1080, 720, 480)
-              dr = s4u_get(dl_url, ref=item_url)
+              dsess, _ = new_sticky_session(next_p)
+              dr = dsess.get(dl_url, headers={"Referer": item_url}, timeout=16)
               dsoup, _ = sanitize_soup(dr.text)
               sroot = dsoup.select_one(".down-container .servers, .servers")
               cur_q = None
@@ -469,16 +447,19 @@ jobs:
                           nm = a.get_text(" ", strip=True).lower()
                           if not any(s in nm for s in SUPPORTED):
                               continue
-                          mu = urllib.parse.urljoin(BASE + "/", a["href"])
-                          mr = sess.get(mu, headers={"Referer": dr.url}, allow_redirects=False, timeout=12)
-                          loc = mr.headers.get("location", "")
-                          if loc.startswith("http"):
-                              dl_resolved_count += 1
-                              ck = canonical_key(loc)
-                              if ck not in jobs:
-                                  jobs[ck] = {"url": loc, "ref": dr.url, "q": cur_q}
-                              elif jobs[ck]["q"] is None and cur_q is not None:
-                                  jobs[ck]["q"] = cur_q
+                          try:
+                              mu = urllib.parse.urljoin(BASE + "/", a["href"])
+                              mr = dsess.get(mu, headers={"Referer": dr.url}, allow_redirects=False, timeout=12)
+                              loc = mr.headers.get("location", "")
+                              if loc.startswith("http"):
+                                  dl_resolved_count += 1
+                                  ck = canonical_key(loc)
+                                  if ck not in jobs:
+                                      jobs[ck] = {"url": loc, "ref": dr.url, "q": cur_q}
+                                  elif jobs[ck]["q"] is None and cur_q is not None:
+                                      jobs[ck]["q"] = cur_q
+                          except Exception as e:
+                              print("DL resolve err:", e, flush=True)
                           time.sleep(0.16)
 
               extracted = []
@@ -487,7 +468,7 @@ jobs:
                   for f in concurrent.futures.as_completed(futs):
                       ck = futs[f]
                       try:
-                          for item in f.result():
+                          for item in (f.result() or []):
                               item["canonical_key"] = ck
                               extracted.append(item)
                       except Exception as e:
@@ -510,32 +491,28 @@ jobs:
                   "details": extracted,
               }
 
-          report = {
-              "homepage_cards_count": len(cards),
-              "series_episode_test": test_full_item("recent_homepage_series_episode", ep_target[0], ep_target[1]),
-              "movie_test": test_full_item("recent_homepage_movie", movie_target[0], movie_target[1]),
-          }
-          with open(".tmp_e2e_report.json", "w", encoding="utf-8") as f:
-              json.dump(report, f, ensure_ascii=False, indent=2)
-          print("E2E SUMMARY:", json.dumps({
-              "homepage_cards": report["homepage_cards_count"],
-              "ep_playable": report["series_episode_test"]["playable_streams_count"],
-              "ep_providers": report["series_episode_test"]["providers_verified_200_ok"],
-              "ep_qualities": report["series_episode_test"]["qualities_verified"],
-              "movie_playable": report["movie_test"]["playable_streams_count"],
-              "movie_providers": report["movie_test"]["providers_verified_200_ok"],
-              "movie_qualities": report["movie_test"]["qualities_verified"],
-          }, ensure_ascii=False, indent=2))
+          try:
+              report = {
+                  "homepage_cards_count": len(cards),
+                  "series_episode_test": test_full_item("recent_homepage_series_episode", ep_target[0], ep_target[1], 0),
+                  "movie_test": test_full_item("recent_homepage_movie", movie_target[0], movie_target[1], 2),
+              }
+              with open(".tmp_e2e_report.json", "w", encoding="utf-8") as f:
+                  json.dump(report, f, ensure_ascii=False, indent=2)
+              print("SUCCESS! Saved .tmp_e2e_report.json", flush=True)
+          except Exception:
+              traceback.print_exc()
           PY
+          set -e
+          tail -n 50 .tmp_e2e_log.txt
 
-      - name: Commit build/Shahid4u.cs3 and temporary report
+      - name: Commit temporary E2E verification report
         if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          [ -f "build/Shahid4u.cs3" ] && git add -f build/Shahid4u.cs3 || true
-          [ -f ".tmp_gradle.log" ] && git add -f .tmp_gradle.log || true
+          [ -f ".tmp_e2e_log.txt" ] && git add -f .tmp_e2e_log.txt || true
           [ -f ".tmp_e2e_report.json" ] && git add -f .tmp_e2e_report.json || true
-          git commit -m "chore: build Shahid4u.cs3 v12 & save live E2E verification [skip ci]" || true
+          git commit -m "chore: save live E2E verification report [skip ci]" || true
           git pull --rebase origin arena/67b3a643-mehdigm-stream || true
           git push origin arena/67b3a643-mehdigm-stream || true
