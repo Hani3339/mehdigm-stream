@@ -19,18 +19,34 @@ jobs:
         with:
           ref: arena/67b3a643-mehdigm-stream
 
-      - name: Bypass Cloudflare & inspect shaahidd4u.net pages, watch/resolve, download redirects & sub-hosts
+      - name: Install Cloudflare WARP SOCKS5 proxy
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq xvfb libgtk-3-0 libasound2t64 libx11-xcb1
-          pip install -q "camoufox[geoip]" beautifulsoup4 requests curl_cffi
-          python3 -m camoufox fetch
+          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+          sudo apt-get update -qq && sudo apt-get install -y -qq cloudflare-warp
+          warp-cli --accept-tos registration new || true
+          warp-cli --accept-tos mode proxy
+          warp-cli --accept-tos proxy port 40000
+          warp-cli --accept-tos connect
+          for i in $(seq 1 15); do
+            if curl -fsS -x socks5h://127.0.0.1:40000 https://cloudflare.com/cdn-cgi/trace | grep -q "warp=on"; then
+              echo "WARP proxy active!"
+              curl -fsS -x socks5h://127.0.0.1:40000 https://cloudflare.com/cdn-cgi/trace
+              break
+            fi
+            sleep 1
+          done
+
+      - name: Inspect shaahidd4u.net pages, JS, watch/resolve, download redirects & sub-hosts
+        run: |
+          pip install -q requests "curl_cffi>=0.7" beautifulsoup4 PySocks
           rm -rf .tmp_s4u
           mkdir -p .tmp_s4u/hosts .tmp_s4u/js
-          xvfb-run -a python3 - <<'PY'
-          import json, os, re, time, urllib.parse, uuid
+          python3 - <<'PY'
+          import concurrent.futures, json, os, re, time, urllib.parse, uuid
           import requests
           from bs4 import BeautifulSoup
-          from camoufox.sync_api import Camoufox
+          from curl_cffi import requests as creq
 
           BASE = "https://shaahidd4u.net"
           UA = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
@@ -45,6 +61,139 @@ jobs:
               path = urllib.parse.quote(urllib.parse.unquote(p.path), safe="/%")
               query = urllib.parse.quote_plus(urllib.parse.unquote_plus(p.query), safe="=&%")
               return urllib.parse.urlunsplit((p.scheme, p.netloc, path, query, p.fragment))
+
+          def is_valid_s4u(status: int, html: str) -> bool:
+              if status != 200 or not html or len(html) < 2000:
+                  return False
+              low = html.lower()
+              if "just a moment" in low or "attention required" in low or "_cf_chl_opt" in low or "sorry, you have been blocked" in low:
+                  return False
+              return "shaahidd4u" in low or "shahid4u" in low or "شاهد فور يو" in html
+
+          # Find working exit (WARP first, else harvested SOCKS5/HTTP proxy)
+          chosen_proxy = None
+          sess = None
+
+          def make_session(proxy_url: str):
+              s = creq.Session(impersonate="chrome124")
+              if proxy_url:
+                  s.proxies = {"http": proxy_url, "https": proxy_url}
+              return s
+
+          w_sess = make_session("socks5h://127.0.0.1:40000")
+          try:
+              tr = w_sess.get(BASE + "/", timeout=15)
+              print("WARP test:", tr.status_code, len(tr.text))
+              if is_valid_s4u(tr.status_code, tr.text):
+                  chosen_proxy = "socks5h://127.0.0.1:40000"
+                  sess = w_sess
+          except Exception as e:
+              print("WARP test error:", e)
+
+          if sess is None:
+              print("WARP blocked/challenged, harvesting clean proxy...")
+              feeds = [
+                  ("socks5h", "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt"),
+                  ("socks4", "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks4.txt"),
+                  ("http", "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt"),
+                  ("socks5h", "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt"),
+                  ("http", "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt"),
+              ]
+              cands = []
+              for proto, fu in feeds:
+                  try:
+                      fr = requests.get(fu, timeout=8)
+                      for ln in fr.text.splitlines()[:120]:
+                          ln = ln.strip()
+                          if ":" in ln and not ln.startswith("#"):
+                              cands.append(f"{proto}://{ln}")
+                  except Exception:
+                      pass
+              print(f"Testing {len(cands)} candidate proxies...")
+              def probe_proxy(pu):
+                  try:
+                      ps = make_session(pu)
+                      r = ps.get(BASE + "/", timeout=9)
+                      if is_valid_s4u(r.status_code, r.text):
+                          return pu
+                  except Exception:
+                      pass
+                  return None
+
+              with concurrent.futures.ThreadPoolExecutor(max_workers=40) as ex:
+                  futs = [ex.submit(probe_proxy, pu) for pu in cands[:350]]
+                  for ft in concurrent.futures.as_completed(futs):
+                      res_p = ft.result()
+                      if res_p:
+                          chosen_proxy = res_p
+                          sess = make_session(res_p)
+                          print("FOUND WORKING PROXY:", chosen_proxy)
+                          break
+
+          assert sess is not None, "Could not establish clean session to shaahidd4u.net"
+
+          report = {
+              "chosen_proxy": "warp" if chosen_proxy and "127.0.0.1:40000" in chosen_proxy else chosen_proxy,
+              "pages": {},
+              "site_scripts": [],
+              "watch_ep_servers": [],
+              "watch_film_servers": [],
+              "watch_umur_raw": [],
+              "watch_bc_raw": [],
+              "download_ep_targets": [],
+              "download_film_targets": [],
+              "probed_hosts": {},
+          }
+
+          def get_page(url: str, save_as: str = None, referer: str = BASE + "/"):
+              time.sleep(0.45)
+              su = safe_url(url)
+              r = sess.get(
+                  su,
+                  headers={
+                      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                      "Accept-Language": "ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7",
+                      "Referer": safe_url(referer),
+                  },
+                  timeout=20,
+              )
+              if save_as:
+                  with open(f".tmp_s4u/{save_as}", "w", encoding="utf-8") as fh:
+                      fh.write(r.text)
+              title_m = re.findall(r"<title>(.*?)</title>", r.text, re.S)
+              report["pages"][save_as or url] = {
+                  "status": r.status_code,
+                  "len": len(r.text),
+                  "title": title_m[0].strip() if title_m else "",
+                  "final_url": str(r.url),
+              }
+              print(f"Fetched {save_as}: status={r.status_code} len={len(r.text)}")
+              return r
+
+          home_r = get_page(BASE + "/", "homepage.html")
+          get_page(f"{BASE}/category/افلام-اجنبي?page=2", "category_p2.html")
+          get_page(f"{BASE}/search?s=tulsa", "search_tulsa.html")
+
+          ep_r = get_page(f"{BASE}/episode/{ep_slug}", "ep_tulsa.html")
+          s3_r = get_page(f"{BASE}/season/مسلسل-tulsa-king-الموسم-الثالث-مترجم", "season_tulsa_s3.html", f"{BASE}/episode/{ep_slug}")
+          get_page(f"{BASE}/season/مسلسل-tulsa-king-الموسم-الثالث-مترجم/episodes", "season_tulsa_s3_episodes.html", f"{BASE}/season/مسلسل-tulsa-king-الموسم-الثالث-مترجم")
+
+          m_ser = re.search(r'href=["\'](https?://[^"\']+/series/[^"\']+|/series/[^"\']+)["\']', ep_r.text + s3_r.text)
+          if m_ser:
+              get_page(urllib.parse.urljoin(BASE, m_ser.group(1)), "series_tulsa.html", f"{BASE}/episode/{ep_slug}")
+
+          get_page(f"{BASE}/episode/{umur_slug}", "ep_umur.html")
+          get_page(f"{BASE}/film/{film_slug}", "film_footsoldier.html")
+
+          w_umur_r = get_page(f"{BASE}/watch/{umur_slug}", "watch_umur.html", f"{BASE}/episode/{umur_slug}")
+          m_u = re.search(r'(?:const|let|var)\s+servers\s*=\s*(\[[\s\S]*?\])\s*;', w_umur_r.text)
+          if m_u:
+              report["watch_umur_raw"] = json.loads(m_u.group(1).replace("\\/", "/"))
+
+          w_bc_r = get_page(f"{BASE}/watch/{bc_slug}", "watch_bc.html", f"{BASE}/episode/{bc_slug}")
+          m_bc = re.search(r'(?:const|let|var)\s+servers\s*=\s*(\[[\s\S]*?\])\s*;', w_bc_r.text)
+          if m_bc:
+              report["watch_bc_raw"] = json.loads(m_bc.group(1).replace("\\/", "/"))
 
           def is_hidden_el(el):
               if el.get("tabindex") == "-1":
@@ -72,203 +221,124 @@ jobs:
               lu = (url or "").lower()
               return any(x in lu for x in ["/media/watch/", "/media/api/", "/media/page/"])
 
-          report = {
-              "pages": {},
-              "cookies_names": [],
-              "site_scripts": [],
-              "watch_ep_servers": [],
-              "watch_film_servers": [],
-              "watch_umur_raw": [],
-              "watch_bc_raw": [],
-              "download_ep_targets": [],
-              "download_film_targets": [],
-              "probed_hosts": {},
-          }
+          def follow_m_once(m_url: str, ref: str):
+              if "/m/" not in m_url:
+                  return {"direct": m_url}
+              time.sleep(0.35)
+              rr = sess.get(
+                  safe_url(m_url),
+                  headers={"Referer": safe_url(ref)},
+                  allow_redirects=False,
+                  timeout=15,
+              )
+              loc = rr.headers.get("Location") or rr.headers.get("location")
+              return {"status": rr.status_code, "location": loc, "body_snip": "" if loc else rr.text[:200]}
 
-          with Camoufox(headless="virtual", humanize=True) as browser:
-              context = browser.new_context(locale="ar-EG")
-              page = context.new_page()
+          def resolve_watch_all(watch_url: str, save_fname: str, ref_url: str):
+              wr = get_page(watch_url, save_fname, ref_url)
+              html = wr.text
+              if not report["site_scripts"]:
+                  soup_w = BeautifulSoup(html, "html.parser")
+                  for idx, sc in enumerate(soup_w.find_all("script", src=True)):
+                      src = sc["src"]
+                      full_src = urllib.parse.urljoin(BASE, src)
+                      if "shaahidd4u" in full_src or src.startswith("/"):
+                          time.sleep(0.3)
+                          jr = sess.get(safe_url(full_src), headers={"Referer": safe_url(watch_url)}, timeout=15)
+                          fn = f"js/script_{idx}_{os.path.basename(urllib.parse.urlsplit(full_src).path) or 'bundle.js'}"
+                          with open(f".tmp_s4u/{fn}", "w", encoding="utf-8") as fh:
+                              fh.write(jr.text)
+                          report["site_scripts"].append({"url": full_src, "status": jr.status_code, "len": len(jr.text), "file": fn})
 
-              def nav_and_save(url: str, fname: str, wait_cf: bool = True):
-                  su = safe_url(url)
-                  page.goto(su, wait_until="domcontentloaded", timeout=45000)
-                  if wait_cf:
-                      for _ in range(25):
-                          title = page.title()
-                          html_now = page.content()
-                          if "Just a moment" not in title and "Attention Required" not in title and "_cf_chl_opt" not in html_now:
-                              break
-                          # Check if turnstile checkbox iframe exists
-                          for fr in page.frames:
-                              if "challenges.cloudflare.com" in fr.url:
-                                  try:
-                                      box = fr.locator("input[type='checkbox'], body").first
-                                      box.click(timeout=1500)
-                                  except Exception:
-                                      pass
-                          page.wait_for_timeout(1200)
-                  page.wait_for_timeout(500)
-                  html = page.content()
-                  with open(f".tmp_s4u/{fname}", "w", encoding="utf-8") as fh:
-                      fh.write(html)
-                  report["pages"][fname] = {"title": page.title(), "len": len(html), "url": page.url}
-                  print(f"Saved {fname}: len={len(html)} title={page.title()[:60]}")
-                  return html
-
-              home_html = nav_and_save(BASE + "/", "homepage.html", wait_cf=True)
-              report["cookies_names"] = [c["name"] for c in context.cookies()]
-
-              nav_and_save(f"{BASE}/category/افلام-اجنبي?page=2", "category_p2.html", wait_cf=False)
-              nav_and_save(f"{BASE}/search?s=tulsa", "search_tulsa.html", wait_cf=False)
-
-              ep_html = nav_and_save(f"{BASE}/episode/{ep_slug}", "ep_tulsa.html", wait_cf=False)
-              s3_html = nav_and_save(f"{BASE}/season/مسلسل-tulsa-king-الموسم-الثالث-مترجم", "season_tulsa_s3.html", wait_cf=False)
-              nav_and_save(f"{BASE}/season/مسلسل-tulsa-king-الموسم-الثالث-مترجم/episodes", "season_tulsa_s3_episodes.html", wait_cf=False)
-
-              m_ser = re.search(r'href=["\'](https?://[^"\']+/series/[^"\']+|/series/[^"\']+)["\']', ep_html + s3_html)
-              if m_ser:
-                  nav_and_save(urllib.parse.urljoin(BASE, m_ser.group(1)), "series_tulsa.html", wait_cf=False)
-
-              nav_and_save(f"{BASE}/episode/{umur_slug}", "ep_umur.html", wait_cf=False)
-              nav_and_save(f"{BASE}/film/{film_slug}", "film_footsoldier.html", wait_cf=False)
-
-              # Fetch /watch/ for umur & black clover just to inspect server names
-              w_umur_html = nav_and_save(f"{BASE}/watch/{umur_slug}", "watch_umur.html", wait_cf=False)
-              m_u = re.search(r'(?:const|let|var)\s+servers\s*=\s*(\[[\s\S]*?\])\s*;', w_umur_html)
-              if m_u:
-                  report["watch_umur_raw"] = json.loads(m_u.group(1).replace("\\/", "/"))
-
-              w_bc_html = nav_and_save(f"{BASE}/watch/{bc_slug}", "watch_bc.html", wait_cf=False)
-              m_bc = re.search(r'(?:const|let|var)\s+servers\s*=\s*(\[[\s\S]*?\])\s*;', w_bc_html)
-              if m_bc:
-                  report["watch_bc_raw"] = json.loads(m_bc.group(1).replace("\\/", "/"))
-
-              # Helper to follow /m/<hash> via context.request (shares cookies & browser network stack, max_redirects=0!)
-              def follow_m_url(m_url: str, ref_url: str):
-                  if "/m/" not in m_url:
-                      return {"direct": m_url}
-                  time.sleep(0.35)
-                  resp = context.request.get(
-                      safe_url(m_url),
-                      headers={"Referer": safe_url(ref_url)},
-                      max_redirects=0,
+              m_srv = re.search(r'(?:const|let|var)\s+servers\s*=\s*(\[[\s\S]*?\])\s*;', html)
+              m_key = re.search(r'watchResolveKey\s*=\s*["\']([^"\']+)["\']', html)
+              m_csrf = re.search(r'csrfToken\s*=\s*["\']([^"\']+)["\']', html) or re.search(r'<meta\s+name=["\']csrf-token["\']\s+content=["\']([^"\']+)["\']', html)
+              m_res = re.search(r'resolveUrl\s*=\s*["\']([^"\']+)["\']', html)
+              if not (m_srv and m_key and m_csrf):
+                  return [{"error": "missing_vars", "srv": bool(m_srv), "key": bool(m_key), "csrf": bool(m_csrf)}]
+              srvs = json.loads(m_srv.group(1).replace("\\/", "/"))
+              key = m_key.group(1)
+              csrf = m_csrf.group(1)
+              res_url = urllib.parse.urljoin(BASE, m_res.group(1).replace("\\/", "/")) if m_res else f"{BASE}/watch/resolve"
+              fp_id = str(uuid.uuid4())
+              out = []
+              for idx, s in enumerate(srvs):
+                  name = s.get("name", f"s{idx}")
+                  rank = int(s.get("rank", idx))
+                  tok = s.get("resolve_token", "")
+                  u0 = s.get("url") or s.get("src") or ""
+                  if is_canary_srv(name, rank, u0):
+                      out.append({"name": name, "rank": rank, "skipped_canary": True, "raw": s})
+                      continue
+                  if not tok:
+                      out.append({"name": name, "rank": rank, "direct_in_obj": s})
+                      continue
+                  time.sleep(0.4)
+                  pr = sess.post(
+                      safe_url(res_url),
+                      headers={
+                          "Accept": "application/json, text/plain, */*",
+                          "Content-Type": "application/json",
+                          "X-CSRF-TOKEN": csrf,
+                          "X-Requested-With": "XMLHttpRequest",
+                          "X-FP-Event-ID": fp_id,
+                          "Origin": BASE,
+                          "Referer": safe_url(watch_url),
+                      },
+                      data=json.dumps({"key": key, "token": tok, "human_signal": None}),
+                      timeout=15,
                   )
-                  loc = resp.headers.get("location") or resp.headers.get("Location")
-                  body_snip = ""
-                  if not loc:
-                      try:
-                          body_snip = resp.text()[:200]
-                      except Exception:
-                          pass
-                  return {"status": resp.status, "location": loc, "body_snip": body_snip}
+                  try:
+                      pj = pr.json()
+                  except Exception:
+                      pj = {"raw_text": pr.text[:300]}
+                  target = pj.get("url") if isinstance(pj, dict) else None
+                  final_t = None
+                  if target:
+                      abs_t = urllib.parse.urljoin(BASE, target)
+                      final_t = follow_m_once(abs_t, watch_url)
+                  out.append({
+                      "name": name,
+                      "rank": rank,
+                      "post_status": pr.status_code,
+                      "resp": pj,
+                      "final_target": final_t,
+                  })
+              return out
 
-              def resolve_watch_on_page(watch_url: str, save_fname: str):
-                  html = nav_and_save(watch_url, save_fname, wait_cf=False)
-                  # Save same-site JS scripts once
-                  if not report["site_scripts"]:
-                      sp_js = BeautifulSoup(html, "html.parser")
-                      for idx, sc in enumerate(sp_js.find_all("script", src=True)):
-                          src = sc["src"]
-                          full_src = urllib.parse.urljoin(BASE, src)
-                          if "shaahidd4u" in full_src or src.startswith("/"):
-                              jr = context.request.get(safe_url(full_src), headers={"Referer": safe_url(watch_url)})
-                              fn = f"js/script_{idx}_{os.path.basename(urllib.parse.urlsplit(full_src).path) or 'bundle.js'}"
-                              with open(f".tmp_s4u/{fn}", "w", encoding="utf-8") as fh:
-                                  fh.write(jr.text())
-                              report["site_scripts"].append({"url": full_src, "status": jr.status, "len": len(jr.text()), "file": fn})
+          report["watch_ep_servers"] = resolve_watch_all(f"{BASE}/watch/{ep_slug}", "watch_ep.html", f"{BASE}/episode/{ep_slug}")
+          report["watch_film_servers"] = resolve_watch_all(f"{BASE}/watch/{film_slug}", "watch_film.html", f"{BASE}/film/{film_slug}")
 
-                  m_srv = re.search(r'(?:const|let|var)\s+servers\s*=\s*(\[[\s\S]*?\])\s*;', html)
-                  m_key = re.search(r'watchResolveKey\s*=\s*["\']([^"\']+)["\']', html)
-                  m_csrf = re.search(r'csrfToken\s*=\s*["\']([^"\']+)["\']', html) or re.search(r'<meta\s+name=["\']csrf-token["\']\s+content=["\']([^"\']+)["\']', html)
-                  m_res = re.search(r'resolveUrl\s*=\s*["\']([^"\']+)["\']', html)
-                  if not (m_srv and m_key and m_csrf):
-                      return [{"error": "missing_vars", "srv": bool(m_srv), "key": bool(m_key), "csrf": bool(m_csrf)}]
-                  srvs = json.loads(m_srv.group(1).replace("\\/", "/"))
-                  key = m_key.group(1)
-                  csrf = m_csrf.group(1)
-                  res_url = urllib.parse.urljoin(BASE, m_res.group(1).replace("\\/", "/")) if m_res else f"{BASE}/watch/resolve"
-                  fp_id = str(uuid.uuid4())
-                  out = []
-                  for idx, s in enumerate(srvs):
-                      name = s.get("name", f"s{idx}")
-                      rank = int(s.get("rank", idx))
-                      tok = s.get("resolve_token", "")
-                      u0 = s.get("url") or s.get("src") or ""
-                      if is_canary_srv(name, rank, u0):
-                          out.append({"name": name, "rank": rank, "skipped_canary": True, "raw": s})
-                          continue
-                      if not tok:
-                          out.append({"name": name, "rank": rank, "direct_in_obj": s})
-                          continue
-                      time.sleep(0.4)
-                      # Execute fetch inside the actual watch page context so cookies + TLS + Origin match 100%
-                      pj = page.evaluate(
-                          """async ({resUrl, csrf, fpId, key, tok}) => {
-                              const r = await fetch(resUrl, {
-                                  method: 'POST',
-                                  credentials: 'include',
-                                  headers: {
-                                      'Accept': 'application/json, text/plain, */*',
-                                      'Content-Type': 'application/json',
-                                      'X-CSRF-TOKEN': csrf,
-                                      'X-Requested-With': 'XMLHttpRequest',
-                                      'X-FP-Event-ID': fpId
-                                  },
-                                  body: JSON.stringify({key: key, token: tok, human_signal: null})
-                              });
-                              const txt = await r.text();
-                              try { return {status: r.status, json: JSON.parse(txt)}; }
-                              catch (e) { return {status: r.status, text: txt.slice(0, 300)}; }
-                          }""",
-                          {"resUrl": res_url, "csrf": csrf, "fpId": fp_id, "key": key, "tok": tok},
-                      )
-                      jbody = pj.get("json") or {}
-                      target = jbody.get("url") if isinstance(jbody, dict) else None
-                      final_t = None
-                      if target:
-                          abs_t = urllib.parse.urljoin(BASE, target)
-                          final_t = follow_m_url(abs_t, watch_url)
-                      out.append({
-                          "name": name,
-                          "rank": rank,
-                          "post_status": pj.get("status"),
-                          "resp": jbody or pj.get("text"),
-                          "final_target": final_t,
-                      })
-                  return out
+          def resolve_download_all(dl_url: str, save_fname: str, ref_url: str):
+              dr = get_page(dl_url, save_fname, ref_url)
+              sp = BeautifulSoup(dr.text, "html.parser")
+              items = []
+              seen_base = set()
+              for a in sp.select("div.down-container a.btn-down[href], a.btn-down[href]"):
+                  hid = is_hidden_el(a)
+                  el_id = a.get("id", "")
+                  href = urllib.parse.urljoin(BASE, a.get("href", ""))
+                  txt = " ".join(a.stripped_strings)
+                  span_name = a.select_one(".info span")
+                  sname = span_name.get_text(strip=True) if span_name else txt
+                  if hid or el_id == "download-primary-server" or "/media/" in href.lower():
+                      items.append({"name": sname, "text": txt, "id": el_id, "skipped_trap": True})
+                      continue
+                  # Strip quality digits (1080/720/480/360) so we follow 1 sample per distinct provider on each page
+                  base_host = re.sub(r'(1080|720|480|360|p|\.)+', '', sname.lower()).strip()
+                  loc_info = None
+                  if base_host not in seen_base:
+                      seen_base.add(base_host)
+                      loc_info = follow_m_once(href, dl_url)
+                  items.append({"name": sname, "text": txt, "href": href, "resolved": loc_info})
+              return items
 
-              report["watch_ep_servers"] = resolve_watch_on_page(f"{BASE}/watch/{ep_slug}", "watch_ep.html")
-              report["watch_film_servers"] = resolve_watch_on_page(f"{BASE}/watch/{film_slug}", "watch_film.html")
+          report["download_ep_targets"] = resolve_download_all(f"{BASE}/download/{ep_slug}", "download_ep.html", f"{BASE}/episode/{ep_slug}")
+          report["download_film_targets"] = resolve_download_all(f"{BASE}/download/{film_slug}", "download_film.html", f"{BASE}/film/{film_slug}")
 
-              def resolve_download_on_page(dl_url: str, save_fname: str):
-                  html = nav_and_save(dl_url, save_fname, wait_cf=False)
-                  sp = BeautifulSoup(html, "html.parser")
-                  items = []
-                  seen_provs = set()
-                  for a in sp.select("div.down-container a.btn-down[href], a.btn-down[href]"):
-                      hid = is_hidden_el(a)
-                      el_id = a.get("id", "")
-                      href = urllib.parse.urljoin(BASE, a.get("href", ""))
-                      txt = " ".join(a.stripped_strings)
-                      span_name = a.select_one(".info span")
-                      sname = span_name.get_text(strip=True) if span_name else txt
-                      if hid or el_id == "download-primary-server" or "/media/" in href.lower():
-                          items.append({"name": sname, "text": txt, "id": el_id, "skipped_trap": True})
-                          continue
-                      prov_key = re.sub(r'[^a-zA-Z0-9]+', '', sname.lower())
-                      resolved = None
-                      if prov_key not in seen_provs:
-                          seen_provs.add(prov_key)
-                          resolved = follow_m_url(href, dl_url)
-                      items.append({"name": sname, "text": txt, "href": href, "resolved": resolved})
-                  return items
-
-              report["download_ep_targets"] = resolve_download_on_page(f"{BASE}/download/{ep_slug}", "download_ep.html")
-              report["download_film_targets"] = resolve_download_on_page(f"{BASE}/download/{film_slug}", "download_film.html")
-
-          # Probe external video hosts with plain requests / curl_cffi
-          from curl_cffi import requests as creq
-          csess = creq.Session(impersonate="chrome124")
+          # Probe external video hosts (both direct and via WARP if direct fails)
+          direct_csess = make_session(None)
+          warp_csess = make_session("socks5h://127.0.0.1:40000")
           ext_urls = []
           for entry in report["watch_ep_servers"] + report["watch_film_servers"]:
               ft = entry.get("final_target") or {}
@@ -289,7 +359,11 @@ jobs:
               seen_domains.add(dom)
               safe_tag = re.sub(r'[^a-zA-Z0-9_.-]+', '_', f"{tag}_{dom}")[:65]
               try:
-                  pr = csess.get(eu, headers={"Referer": BASE + "/"}, timeout=15)
+                  pr = direct_csess.get(eu, headers={"Referer": BASE + "/"}, timeout=15)
+                  if pr.status_code in (403, 503) or len(pr.text) < 500:
+                      pr2 = warp_csess.get(eu, headers={"Referer": BASE + "/"}, timeout=15)
+                      if pr2.status_code == 200 and len(pr2.text) > len(pr.text):
+                          pr = pr2
                   with open(f".tmp_s4u/hosts/{safe_tag}.html", "w", encoding="utf-8") as fh:
                       fh.write(pr.text[:250000])
                   report["probed_hosts"][safe_tag] = {
@@ -312,6 +386,6 @@ jobs:
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add -f .tmp_s4u/ || true
-          git commit --allow-empty -m "chore: camoufox inspect shaahidd4u live pages & providers [skip ci]"
+          git commit --allow-empty -m "chore: warp+proxy inspect shaahidd4u live pages & providers [skip ci]"
           git pull --rebase origin arena/67b3a643-mehdigm-stream || true
           git push origin arena/67b3a643-mehdigm-stream
