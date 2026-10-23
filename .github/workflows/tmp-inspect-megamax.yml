@@ -28,8 +28,8 @@ jobs:
         run: |
           rm -rf .tmp_mm2
           mkdir -p .tmp_mm3
-          python3 - << 'PYEOF'
-          import base64, hashlib, html, json, re, urllib.parse
+          python3 - << 'PYEOF' > .tmp_mm3/py_out.log 2>&1 || true
+          import base64, hashlib, html, json, re, traceback, urllib.parse
           import requests
           from Crypto.Cipher import AES
           from Crypto.Util.Padding import unpad
@@ -38,58 +38,61 @@ jobs:
           HASH = "WJH4dVV5cgxk0"
           out = {}
 
-          # 1. Test MegaMax CDN777 HLS (/e/) & Direct MP4 (/d/)
-          sess = requests.Session()
-          sess.headers.update({"User-Agent": UA})
-          re1 = sess.get(f"https://megamax.me/e/{HASH}", headers={"Referer": "https://share4max.com/"}, timeout=15)
-          ver = re.search(r'"version"\s*:\s*"([^"]+)"', re1.text).group(1)
-          xsrf = urllib.parse.unquote(sess.cookies.get("XSRF-TOKEN", ""))
-          re2 = sess.get(
-              f"https://megamax.me/e/{HASH}",
-              headers={
-                  "Referer": f"https://megamax.me/e/{HASH}",
-                  "X-Requested-With": "XMLHttpRequest",
-                  "X-Inertia": "true",
-                  "X-Inertia-Version": ver,
-                  "X-Inertia-Partial-Component": "files/leech/video",
-                  "X-Inertia-Partial-Data": "streams,subtitles",
-                  "X-XSRF-TOKEN": xsrf,
-              },
-              timeout=15,
-          ).json()
-          enc = json.loads(re2["props"]["streams"]["data"])
-          ct, iv, salt = base64.b64decode(enc["ct"]), bytes.fromhex(enc["iv"]), bytes.fromhex(enc["s"])
-          drv = b""
-          prv = b""
-          while len(drv) < 48:
-              prv = hashlib.md5(prv + b"k7v2m4x9bqwpnj6t" + salt).digest()
-              drv += prv
-          dec_leech = json.loads(unpad(AES.new(drv[:32], AES.MODE_CBC, iv).decrypt(ct), 16).decode("utf-8"))
-          hls_u = dec_leech["file"]
-          rh1 = requests.get(hls_u, headers={"User-Agent": UA, "Referer": "https://megamax.me/", "Origin": "https://megamax.me"}, timeout=15)
-          out["megamax_cdn777_hls"] = {"decrypted": dec_leech, "subtitles": re2["props"].get("subtitles"), "status": rh1.status_code, "body": rh1.text[:800]}
+          try:
+              # 1. Test MegaMax CDN777 HLS (/e/) & Direct MP4 (/d/)
+              sess = requests.Session()
+              sess.headers.update({"User-Agent": UA})
+              re1 = sess.get(f"https://megamax.me/e/{HASH}", headers={"Referer": "https://share4max.com/"}, timeout=15)
+              ver = re.search(r'"version"\s*:\s*"([^"]+)"', re1.text).group(1)
+              xsrf = urllib.parse.unquote(sess.cookies.get("XSRF-TOKEN", ""))
+              re2 = sess.get(
+                  f"https://megamax.me/e/{HASH}",
+                  headers={
+                      "Referer": f"https://megamax.me/e/{HASH}",
+                      "X-Requested-With": "XMLHttpRequest",
+                      "X-Inertia": "true",
+                      "X-Inertia-Version": ver,
+                      "X-Inertia-Partial-Component": "files/leech/video",
+                      "X-Inertia-Partial-Data": "streams,subtitles",
+                      "X-XSRF-TOKEN": xsrf,
+                  },
+                  timeout=15,
+              ).json()
+              enc = json.loads(re2["props"]["streams"]["data"])
+              ct, iv, salt = base64.b64decode(enc["ct"]), bytes.fromhex(enc["iv"]), bytes.fromhex(enc["s"])
+              drv = b""
+              prv = b""
+              while len(drv) < 48:
+                  prv = hashlib.md5(prv + b"k7v2m4x9bqwpnj6t" + salt).digest()
+                  drv += prv
+              dec_leech = json.loads(unpad(AES.new(drv[:32], AES.MODE_CBC, iv).decrypt(ct), 16).decode("utf-8"))
+              hls_u = dec_leech["file"]
+              rh1 = requests.get(hls_u, headers={"User-Agent": UA, "Referer": "https://megamax.me/", "Origin": "https://megamax.me"}, timeout=15)
+              out["megamax_cdn777_hls"] = {"decrypted": dec_leech, "subtitles": re2["props"].get("subtitles"), "status": rh1.status_code, "body": rh1.text[:800]}
 
-          rd1 = sess.get(f"https://megamax.me/d/{HASH}", timeout=15)
-          xsrf_d = urllib.parse.unquote(sess.cookies.get("XSRF-TOKEN", ""))
-          rd2 = sess.post(
-              f"https://megamax.me/d/{HASH}",
-              json={"attach": "5ikRrAndPedGV"},
-              headers={
-                  "Referer": f"https://megamax.me/d/{HASH}",
-                  "Origin": "https://megamax.me",
-                  "Content-Type": "application/json",
-                  "X-Requested-With": "XMLHttpRequest",
-                  "X-Inertia": "true",
-                  "X-Inertia-Version": ver,
-                  "X-Inertia-Partial-Component": "files/leech/download",
-                  "X-Inertia-Partial-Data": "download",
-                  "X-XSRF-TOKEN": xsrf_d,
-              },
-              timeout=15,
-          ).json()
-          mp4_u = rd2["props"]["download"]["data"]["url"]
-          rmp = requests.get(mp4_u, headers={"User-Agent": UA, "Referer": "https://megamax.me/", "Range": "bytes=0-1023"}, timeout=15)
-          out["megamax_cdn777_mp4"] = {"url": mp4_u, "status": rmp.status_code, "ct": rmp.headers.get("Content-Type"), "cr": rmp.headers.get("Content-Range")}
+              rd1 = sess.get(f"https://megamax.me/d/{HASH}", timeout=15)
+              xsrf_d = urllib.parse.unquote(sess.cookies.get("XSRF-TOKEN", ""))
+              rd2 = sess.post(
+                  f"https://megamax.me/d/{HASH}",
+                  json={"attach": "5ikRrAndPedGV"},
+                  headers={
+                      "Referer": f"https://megamax.me/d/{HASH}",
+                      "Origin": "https://megamax.me",
+                      "Content-Type": "application/json",
+                      "X-Requested-With": "XMLHttpRequest",
+                      "X-Inertia": "true",
+                      "X-Inertia-Version": ver,
+                      "X-Inertia-Partial-Component": "files/leech/download",
+                      "X-Inertia-Partial-Data": "download",
+                      "X-XSRF-TOKEN": xsrf_d,
+                  },
+                  timeout=15,
+              ).json()
+              mp4_u = rd2["props"]["download"]["data"]["url"]
+              rmp = requests.get(mp4_u, headers={"User-Agent": UA, "Referer": "https://megamax.me/", "Range": "bytes=0-1023"}, timeout=15)
+              out["megamax_cdn777_mp4"] = {"url": mp4_u, "status": rmp.status_code, "ct": rmp.headers.get("Content-Type"), "cr": rmp.headers.get("Content-Range")}
+          except Exception:
+              out["megamax_cdn777_err"] = traceback.format_exc()
 
           # 2. Inspect Firestream & Vidara
           for name, url in [
@@ -139,60 +142,63 @@ jobs:
               rapi = requests.get(f"{origin}/api/v1/video?id={vid_id}", headers={"User-Agent": UA, "Referer": origin + "/", "Origin": origin}, timeout=15)
               out["vidstack_js"][name] = {"api_status": rapi.status_code, "api_raw": rapi.text[:300], "snippets": snippets[:20]}
 
-          # Also print full decrypted JSON for upnshare & streamp2p and test all URLs inside them!
-          KEY = b"kiemtienmua911ca"
-          IV = b"1234567890oiuytr"
-          for name, origin, vid_id in [
-              ("upnshare", "https://megamax.uns.bio", "jwt19j"),
-              ("streamp2p", "https://megamax.strp2p.site", "asqhjr"),
-          ]:
-              rapi = requests.get(f"{origin}/api/v1/video?id={vid_id}", headers={"User-Agent": UA, "Referer": origin + "/", "Origin": origin}, timeout=15)
-              dec = json.loads(unpad(AES.new(KEY, AES.MODE_CBC, IV).decrypt(bytes.fromhex(rapi.text.strip())), 16).decode("utf-8"))
-              out[f"{name}_full_json"] = dec
-              url_checks = {}
-              for k in ("source", "cf", "cfNative", "hls", "backup"):
-                  val = dec.get(k)
-                  if isinstance(val, str) and val:
-                      u = val if val.startswith("http") else (origin + val)
-                      try:
-                          rc = requests.get(u, headers={"User-Agent": UA, "Referer": origin + "/", "Origin": origin}, timeout=10, verify=False)
-                          url_checks[k] = {"url": u, "status": rc.status_code, "head": rc.text[:250]}
-                      except Exception as e:
-                          url_checks[k] = {"url": u, "err": str(e)}
-              # Also test appending ?k=<pk.k>&kx=<pk.kx> or headers!
-              pk = dec.get("pk") or {}
-              if pk and dec.get("cf"):
-                  cf_u = dec["cf"]
-                  for q in (f"{cf_u}?k={pk.get('k')}&kx={pk.get('kx')}", f"{cf_u}?pk={pk.get('k')}&kx={pk.get('kx')}"):
-                      rc = requests.get(q, headers={"User-Agent": UA, "Referer": origin + "/", "Origin": origin}, timeout=10)
-                      url_checks[q] = {"status": rc.status_code, "head": rc.text[:200]}
-              out[f"{name}_url_checks"] = url_checks
+          try:
+              # Also print full decrypted JSON for upnshare & streamp2p and test all URLs inside them!
+              KEY = b"kiemtienmua911ca"
+              IV = b"1234567890oiuytr"
+              for name, origin, vid_id in [
+                  ("upnshare", "https://megamax.uns.bio", "jwt19j"),
+                  ("streamp2p", "https://megamax.strp2p.site", "asqhjr"),
+              ]:
+                  rapi = requests.get(f"{origin}/api/v1/video?id={vid_id}", headers={"User-Agent": UA, "Referer": origin + "/", "Origin": origin}, timeout=15)
+                  dec = json.loads(unpad(AES.new(KEY, AES.MODE_CBC, IV).decrypt(bytes.fromhex(rapi.text.strip())), 16).decode("utf-8"))
+                  out[f"{name}_full_json"] = dec
+                  url_checks = {}
+                  for k in ("source", "cf", "cfNative", "hls", "backup"):
+                      val = dec.get(k)
+                      if isinstance(val, str) and val:
+                          u = val if val.startswith("http") else (origin + val)
+                          try:
+                              rc = requests.get(u, headers={"User-Agent": UA, "Referer": origin + "/", "Origin": origin}, timeout=10, verify=False)
+                              url_checks[k] = {"url": u, "status": rc.status_code, "head": rc.text[:250]}
+                          except Exception as e:
+                              url_checks[k] = {"url": u, "err": str(e)}
+                  pk = dec.get("pk") or {}
+                  if pk and dec.get("cf"):
+                      cf_u = dec["cf"]
+                      for q in (f"{cf_u}?k={pk.get('k')}&kx={pk.get('kx')}", f"{cf_u}?pk={pk.get('k')}&kx={pk.get('kx')}"):
+                          rc = requests.get(q, headers={"User-Agent": UA, "Referer": origin + "/", "Origin": origin}, timeout=10)
+                          url_checks[q] = {"status": rc.status_code, "head": rc.text[:200]}
+                  out[f"{name}_url_checks"] = url_checks
+          except Exception:
+              out["vidstack_full_err"] = traceback.format_exc()
 
-          # 4. Test EarnVids hls3 & Byse n1mwq
-          rv = requests.get("https://morencius.com/v/ka4qkcbjefdb", headers={"User-Agent": UA, "Referer": "https://share4max.com/"}, timeout=15)
-          # unpack packer
-          pat = re.compile(r"eval\(function\(p,a,c,k,e,[dr]\)\{.*?\}\('((?:\\.|[^'])*)',\s*(\d+),\s*(\d+),\s*'((?:\\.|[^'])*)'\.split\('\|'\)", re.S)
-          alphabet = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-          m = pat.search(rv.text)
-          if m:
-              p, rad, cnt, sym = m.group(1).replace("\\'", "'"), int(m.group(2)), int(m.group(3)), m.group(4).split("|")
-              unp = re.sub(r"\b[0-9a-zA-Z]+\b", lambda wm: sym[idx] if 0 <= (idx := (int(wm.group(0), rad) if rad <= 36 else sum(alphabet.index(ch)*(rad**i) for i, ch in enumerate(reversed(wm.group(0)))))) < len(sym) and sym[idx] else wm.group(0), p)
-              lm = re.search(r'var\s+links\s*=\s*(\{.*?\})\s*;', unp, re.S)
-              if lm:
-                  jo = json.loads(lm.group(1).replace("'", '"'))
-                  ev_checks = {}
-                  for k, v in jo.items():
-                      u = v if v.startswith("http") else ("https://morencius.com" + v)
-                      rc = requests.get(u, headers={"User-Agent": UA, "Referer": "https://morencius.com/v/ka4qkcbjefdb", "Origin": "https://morencius.com"}, timeout=12)
-                      ev_checks[k] = {"url": u, "status": rc.status_code, "head": rc.text[:300]}
-                  out["earnvids_all_keys"] = ev_checks
+          try:
+              # 4. Test EarnVids hls3 & Byse n1mwq
+              rv = requests.get("https://morencius.com/v/ka4qkcbjefdb", headers={"User-Agent": UA, "Referer": "https://share4max.com/"}, timeout=15)
+              pat = re.compile(r"eval\(function\(p,a,c,k,e,[dr]\)\{.*?\}\('((?:\\.|[^'])*)',\s*(\d+),\s*(\d+),\s*'((?:\\.|[^'])*)'\.split\('\|'\)", re.S)
+              alphabet = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+              m = pat.search(rv.text)
+              if m:
+                  p, rad, cnt, sym = m.group(1).replace("\\'", "'"), int(m.group(2)), int(m.group(3)), m.group(4).split("|")
+                  unp = re.sub(r"\b[0-9a-zA-Z]+\b", lambda wm: sym[idx] if 0 <= (idx := (int(wm.group(0), rad) if rad <= 36 else sum(alphabet.index(ch)*(rad**i) for i, ch in enumerate(reversed(wm.group(0)))))) < len(sym) and sym[idx] else wm.group(0), p)
+                  lm = re.search(r'var\s+links\s*=\s*(\{.*?\})\s*;', unp, re.S)
+                  if lm:
+                      jo = json.loads(lm.group(1).replace("'", '"'))
+                      ev_checks = {}
+                      for k, v in jo.items():
+                          u = v if v.startswith("http") else ("https://morencius.com" + v)
+                          rc = requests.get(u, headers={"User-Agent": UA, "Referer": "https://morencius.com/v/ka4qkcbjefdb", "Origin": "https://morencius.com"}, timeout=12)
+                          ev_checks[k] = {"url": u, "status": rc.status_code, "head": rc.text[:300]}
+                      out["earnvids_all_keys"] = ev_checks
 
-          # Byse n1mwq details check
-          rb1 = requests.get("https://byseraguci.com/api/videos/emvm2es54ipg/embed/details", headers={"User-Agent": UA, "Referer": "https://byseraguci.com/e/emvm2es54ipg"}, timeout=15).json()
-          ef = rb1.get("embed_frame_url", "")
-          ef_origin = "https://" + urllib.parse.urlparse(ef).netloc
-          rb2 = requests.get(f"{ef_origin}/api/videos/emvm2es54ipg/embed/details", headers={"User-Agent": UA, "Referer": ef}, timeout=15).json()
-          out["byse_n1mwq"] = {"embed_frame_url": ef, "has_playback": "playback" in rb2, "playback_keys": list(rb2.get("playback", {}).keys())}
+              rb1 = requests.get("https://byseraguci.com/api/videos/emvm2es54ipg/embed/details", headers={"User-Agent": UA, "Referer": "https://byseraguci.com/e/emvm2es54ipg"}, timeout=15).json()
+              ef = rb1.get("embed_frame_url", "")
+              ef_origin = "https://" + urllib.parse.urlparse(ef).netloc
+              rb2 = requests.get(f"{ef_origin}/api/videos/emvm2es54ipg/embed/details", headers={"User-Agent": UA, "Referer": ef}, timeout=15).json()
+              out["byse_n1mwq"] = {"embed_frame_url": ef, "has_playback": "playback" in rb2, "playback_keys": list(rb2.get("playback", {}).keys())}
+          except Exception:
+              out["earnvids_byse_err"] = traceback.format_exc()
 
           with open(".tmp_mm3/crack_report.json", "w", encoding="utf-8") as f:
               json.dump(out, f, ensure_ascii=False, indent=2)
@@ -200,9 +206,10 @@ jobs:
           PYEOF
 
       - name: Commit results
+        if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A .tmp_mm2 .tmp_mm3
+          git add -f .tmp_mm3
           git commit -m "chore: crack remaining megamax drivers [skip ci]" || true
           git push origin HEAD:arena/b5447323-mehdigm-stream
