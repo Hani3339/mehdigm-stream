@@ -526,7 +526,12 @@ jobs:
             f.write('Open **Terminal → New Terminal** to launch Kilo. Use `/models` to choose a free model.\n\n')
             f.write('Free hosted providers can impose quotas or change availability. No paid fallback.\n\n')
             f.write('Agent can execute code on this runner. Do not expose an untrusted repository or confidential prompts.\n')
-        print('Authenticated temporary browser link is available in the job Summary.')
+        # Publish the URL directly in this step's live log as soon as it is verified.
+        print('PUBLIC BROWSER IDE URL: ' + url, flush=True)
+        print('::notice title=Browser IDE URL::' + url, flush=True)
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+            f.write('public_url=' + url + '\\n')
+        print('The link is also saved in the job Summary for later reference.', flush=True)
         PY
     - name: Serve repository development session with periodic saves
       env:
@@ -540,9 +545,21 @@ jobs:
         set -euo pipefail
         next_backup=$(date +%s)
         next_commit=$(date +%s)
+        next_countdown=$(( $(date +%s) + 300 ))
         backup_pid=''
+        show_remaining() {
+          local remaining=$(( SESSION_DEADLINE - $(date +%s) ))
+          (( remaining < 0 )) && remaining=0
+          printf 'LIVE COUNTDOWN: %02d h %02d min remaining until workflow session ends.\\n' \\
+            "$((remaining / 3600))" "$(((remaining % 3600) / 60))"
+        }
+        show_remaining
         while (( $(date +%s) < SESSION_DEADLINE )); do
           now=$(date +%s)
+          if (( now >= next_countdown )); then
+            show_remaining
+            next_countdown=$((now + 300))
+          fi
           for service in ide tunnel; do
             kill -0 "$(cat "$RUNNER_TEMP/$service.pid")" || { echo "$service stopped" >&2; exit 1; }
           done
