@@ -1,4 +1,4 @@
-name: Build & Verify Anime4Up MegaMax v4
+name: Probe Byse n1mwq Playback Schema
 
 on:
   push:
@@ -9,9 +9,9 @@ permissions:
   contents: write
 
 jobs:
-  build-verify:
+  probe-byse:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
 
     steps:
       - name: Checkout repository
@@ -19,71 +19,15 @@ jobs:
         with:
           ref: arena/b5447323-mehdigm-stream
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-          cache: 'gradle'
-
-      - name: Accept Android SDK licenses
+      - name: Inspect Byse n1mwq embed + playback response
         run: |
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
-          chmod +x gradlew
-
-      - name: Build Anime4Up.cs3
-        run: |
-          set -euo pipefail
-          mkdir -p .tmp_build_verify build
-          ./gradlew :Anime4Up:clean :Anime4Up:make --stacktrace 2>&1 | tee .tmp_build_verify/gradle_build.log
-          cp Anime4Up/build/Anime4Up.cs3 build/Anime4Up.cs3
-          ls -lh build/Anime4Up.cs3
-
-      - name: Inspect built Anime4Up.cs3 & live Byse + MegaMax E2E
-        run: |
-          pip install -q requests pycryptodome
+          pip install -q requests
+          mkdir -p .tmp_build_verify
           python3 - <<'PY'
-          import base64, hashlib, json, math, os, secrets, time, urllib.parse, zipfile, requests
-          from Crypto.Cipher import AES
+          import json, math, re, secrets, time, urllib.parse, requests
 
           UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-          cs3_path = "build/Anime4Up.cs3"
-          report = {
-              "cs3_size": os.path.getsize(cs3_path),
-              "cs3_entries": [],
-              "manifest": None,
-              "dex_extractor_classes": [],
-              "byse_e2e": {},
-          }
 
-          with zipfile.ZipFile(cs3_path, "r") as zf:
-              report["cs3_entries"] = zf.namelist()
-              if "manifest.json" in zf.namelist():
-                  report["manifest"] = json.loads(zf.read("manifest.json").decode("utf-8"))
-              if "classes.dex" in zf.namelist():
-                  dex_bytes = zf.read("classes.dex")
-                  for cls_name in [
-                      "Anime4UpMegaMaxExtractor",
-                      "Anime4UpShare4MaxExtractor",
-                      "Anime4UpVidstackExtractor",
-                      "Anime4UpUpnShareExtractor",
-                      "Anime4UpStreamP2PExtractor",
-                      "Anime4UpRpmShareExtractor",
-                      "Anime4UpFireStreamExtractor",
-                      "Anime4UpVidaraExtractor",
-                      "Anime4UpEarnVidsExtractor",
-                      "Anime4UpMixdropExtractor",
-                      "Anime4UpByseExtractor",
-                      "Anime4UpLuluStreamExtractor",
-                      "Anime4UpSaveFilesExtractor",
-                      "Anime4UpMp4UploadExtractor",
-                      "Anime4UpVoeExtractor",
-                      "Anime4UpVnxPlayerExtractor",
-                  ]:
-                      if cls_name.encode() in dex_bytes:
-                          report["dex_extractor_classes"].append(cls_name)
-
-          # Verify Byse (`byseraguci.com` -> `n1mwq.org`) POST /embed/playback + PoW + AES-GCM
           def i32(x):
               x &= 0xFFFFFFFF
               return x - 0x100000000 if x & 0x80000000 else x
@@ -118,102 +62,103 @@ jobs:
                   out[idx & 7] = i32(out[idx & 7] ^ state[idx])
               return "".join(f"{u32(w):08x}" for w in out)
 
-          def b64u(s: str) -> bytes:
-              s = s.strip().replace("-", "+").replace("_", "/")
-              rem = len(s) % 4
-              if rem:
-                  s += "=" * (4 - rem)
-              return base64.b64decode(s)
+          code = "emvm2es54ipg"
+          s = requests.Session()
+          det = s.get(
+              f"https://byseraguci.com/api/videos/{code}/embed/details",
+              headers={"User-Agent": UA, "Accept": "application/json", "Referer": f"https://byseraguci.com/e/{code}"},
+              timeout=12,
+          ).json()
+          embed_url = det.get("embed_frame_url")
+          pu = urllib.parse.urlparse(embed_url)
+          embed_origin = f"{pu.scheme}://{pu.netloc}"
+          pcode = pu.path.rstrip("/").split("/")[-1]
 
-          for tier, code in [("1080p", "emvm2es54ipg"), ("720p", "1340s9004e5e"), ("480p", "a4r52h18f8z8")]:
-              try:
-                  det = requests.get(
-                      f"https://byseraguci.com/api/videos/{code}/embed/details",
-                      headers={"User-Agent": UA, "Accept": "application/json", "Referer": f"https://byseraguci.com/e/{code}"},
-                      timeout=12,
-                  ).json()
-                  embed_url = det.get("embed_frame_url") or f"https://n1mwq.org/e/{code}"
-                  pu = urllib.parse.urlparse(embed_url)
-                  embed_origin = f"{pu.scheme}://{pu.netloc}"
-                  pcode = pu.path.rstrip("/").split("/")[-1]
-                  base_h = {
-                      "User-Agent": UA,
-                      "Accept": "*/*",
-                      "Origin": embed_origin,
-                      "Referer": embed_url,
-                      "X-Embed-Origin": "byseraguci.com",
-                      "X-Embed-Parent": embed_url,
-                  }
-                  settings = requests.get(f"{embed_origin}/api/videos/{pcode}/embed/settings", headers=base_h, timeout=12).json()
-                  now = int(time.time() * 1000)
-                  fp = {
-                      "bot": {
-                          "automation": {"webdriver": False, "phantom": False, "nightmare": False, "selenium": False, "cypress": False, "playwright": False, "puppeteer": False, "domAutomation": False, "cdcProps": False},
-                          "environment": {"chrome": True, "permissions": True, "languages": 2, "plugins": 5, "pluginNames": ["PDF Viewer", "Chrome PDF Viewer", "Chromium PDF Viewer"], "outerDimensions": True, "iframe": True},
-                          "graphics": {"webgl": True, "vendor": "Google Inc. (Intel)", "renderer": "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)", "swiftshader": False, "llvmpipe": False, "mesa": False, "canvasHash": 1482910421},
-                          "probe": {"raf": True, "rafDelta": 16.6, "setTimeoutDelta": 4.1, "mathConsistent": True, "stackDepth": 11240, "perfTiming": True, "touchSupport": 0},
-                          "media": {"audioContext": True, "speechVoices": 4, "mediaDevices": True, "RTC": True},
-                          "screen": {"width": 1920, "height": 1080, "availWidth": 1920, "availHeight": 1040, "colorDepth": 24, "devicePixelRatio": 1},
-                          "browser": {"ua": UA, "language": "en-US", "platform": "Win32", "hardwareConcurrency": 8, "deviceMemory": 8},
-                          "ts": now,
-                      },
-                      "beh": {"dur": 1245, "mv": 4, "dist": 142, "velAvg": 0.35, "velMax": 1.12, "cl": 0, "tch": 0, "scr": 0, "key": 0, "vis": 0, "foc": 1, "raf": 60, "jank": 0, "tFirst": 210},
-                      "ctx": {"sid": secrets.token_urlsafe(9)[:12], "seq": 1, "t0": now - 1300, "url": embed_url[:200], "ref": "https://byseraguci.com/", "vw": 1280, "vh": 720, "iframe": True, "tz": "UTC"},
-                  }
-                  body = {"fingerprint": fp}
-                  if settings.get("captcha_required"):
-                      d_q = urllib.parse.quote(json.dumps({"video_code": pcode}))
-                      cap = requests.get(f"{embed_origin}/api/videos/embed/captcha?d={d_q}", headers=base_h, timeout=12).json()
-                      chal = cap.get("challenge", "")
-                      diff = int(cap.get("difficulty", 2))
-                      tok = cap.get("token", "")
-                      tgt = "0" * diff
-                      for nonce in range(2000000):
-                          hh = byse_word_hash(f"{chal}:{nonce}")
-                          if hh.startswith(tgt):
-                              body["captcha_token"] = tok
-                              body["captcha_hash"] = f"{hh}:{nonce}"
-                              break
-                  pb_resp = requests.post(
-                      f"{embed_origin}/api/videos/{pcode}/embed/playback",
-                      headers={**base_h, "Content-Type": "application/json"},
-                      json=body,
-                      timeout=12,
-                  ).json()
-                  pb = pb_resp.get("playback") or pb_resp
-                  kp = pb["key_parts"]
-                  ver = int(pb.get("version", 1))
-                  key = b64u(kp[ver - 1]) + b64u(kp[len(kp) - ver])
-                  iv = b64u(pb["iv"])
-                  ct_tag = b64u(pb["payload"])
-                  cipher = AES.new(key, AES.MODE_GCM, nonce=iv)
-                  dec = json.loads(cipher.decrypt_and_verify(ct_tag[:-16], ct_tag[-16:]).decode("utf-8"))
-                  srcs = dec.get("sources", [])
-                  probe_code = None
-                  if srcs:
-                      su = srcs[0].get("url") or srcs[0].get("file")
-                      pr = requests.get(su, headers={"User-Agent": UA, "Referer": f"{embed_origin}/", "Origin": embed_origin}, timeout=12)
-                      probe_code = pr.status_code
-                  report["byse_e2e"][tier] = {
-                      "captcha_required": settings.get("captcha_required"),
-                      "sources_count": len(srcs),
-                      "labels": [x.get("label") or x.get("quality") for x in srcs],
-                      "m3u8_status": probe_code,
-                  }
-              except Exception as exc:
-                  report["byse_e2e"][tier] = {"error": repr(exc)}
+          html_r = s.get(embed_url, headers={"User-Agent": UA, "Referer": f"https://byseraguci.com/e/{code}"}, timeout=12)
+          with open(".tmp_build_verify/byse_embed.html", "w") as fh:
+              fh.write(html_r.text)
 
-          with open(".tmp_build_verify/report.json", "w") as fh:
-              json.dump(report, fh, indent=2)
-          print(json.dumps(report, indent=2))
+          # Fetch any JS bundle referenced by n1mwq.org
+          js_urls = re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', html_r.text)
+          saved_js = []
+          for idx, ju in enumerate(js_urls[:5]):
+              full_ju = urllib.parse.urljoin(embed_url, ju)
+              jr = s.get(full_ju, headers={"User-Agent": UA, "Referer": embed_url}, timeout=12)
+              fn = f".tmp_build_verify/byse_js_{idx}.js"
+              with open(fn, "w") as fh:
+                  fh.write(jr.text)
+              saved_js.append({"url": full_ju, "len": len(jr.text), "file": fn})
+
+          base_h = {
+              "User-Agent": UA,
+              "Accept": "*/*",
+              "Origin": embed_origin,
+              "Referer": embed_url,
+              "X-Embed-Origin": "byseraguci.com",
+              "X-Embed-Parent": f"https://byseraguci.com/e/{code}",
+          }
+          settings_r = s.get(f"{embed_origin}/api/videos/{pcode}/embed/settings", headers=base_h, timeout=12)
+          settings = settings_r.json() if settings_r.status_code < 500 else {"raw": settings_r.text}
+
+          now = int(time.time() * 1000)
+          fp = {
+              "bot": {
+                  "automation": {"webdriver": False, "phantom": False, "nightmare": False, "selenium": False, "cypress": False, "playwright": False, "puppeteer": False, "domAutomation": False, "cdcProps": False},
+                  "environment": {"chrome": True, "permissions": True, "languages": 2, "plugins": 5, "pluginNames": ["PDF Viewer", "Chrome PDF Viewer", "Chromium PDF Viewer"], "outerDimensions": True, "iframe": True},
+                  "graphics": {"webgl": True, "vendor": "Google Inc. (Intel)", "renderer": "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)", "swiftshader": False, "llvmpipe": False, "mesa": False, "canvasHash": 1482910421},
+                  "probe": {"raf": True, "rafDelta": 16.6, "setTimeoutDelta": 4.1, "mathConsistent": True, "stackDepth": 11240, "perfTiming": True, "touchSupport": 0},
+                  "media": {"audioContext": True, "speechVoices": 4, "mediaDevices": True, "RTC": True},
+                  "screen": {"width": 1920, "height": 1080, "availWidth": 1920, "availHeight": 1040, "colorDepth": 24, "devicePixelRatio": 1},
+                  "browser": {"ua": UA, "language": "en-US", "platform": "Win32", "hardwareConcurrency": 8, "deviceMemory": 8},
+                  "ts": now,
+              },
+              "beh": {"dur": 1245, "mv": 4, "dist": 142, "velAvg": 0.35, "velMax": 1.12, "cl": 0, "tch": 0, "scr": 0, "key": 0, "vis": 0, "foc": 1, "raf": 60, "jank": 0, "tFirst": 210},
+              "ctx": {"sid": secrets.token_urlsafe(9)[:12], "seq": 1, "t0": now - 1300, "url": embed_url[:200], "ref": "https://byseraguci.com/", "vw": 1280, "vh": 720, "iframe": True, "tz": "UTC"},
+          }
+          body = {"fingerprint": fp}
+          cap_data = None
+          if isinstance(settings, dict) and settings.get("captcha_required"):
+              d_q = urllib.parse.quote(json.dumps({"video_code": pcode}))
+              cap_r = s.get(f"{embed_origin}/api/videos/embed/captcha?d={d_q}", headers=base_h, timeout=12)
+              cap_data = cap_r.json() if cap_r.status_code < 500 else {"raw": cap_r.text, "status": cap_r.status_code}
+              if isinstance(cap_data, dict) and cap_data.get("challenge"):
+                  chal = cap_data["challenge"]
+                  diff = int(cap_data.get("difficulty", 2))
+                  tok = cap_data.get("token", "")
+                  tgt = "0" * diff
+                  for nonce in range(2000000):
+                      hh = byse_word_hash(f"{chal}:{nonce}")
+                      if hh.startswith(tgt):
+                          body["captcha_token"] = tok
+                          body["captcha_hash"] = f"{hh}:{nonce}"
+                          break
+
+          pb_r = s.post(
+              f"{embed_origin}/api/videos/{pcode}/embed/playback",
+              headers={**base_h, "Content-Type": "application/json"},
+              json=body,
+              timeout=12,
+          )
+          out = {
+              "details": det,
+              "embed_status": html_r.status_code,
+              "saved_js": saved_js,
+              "settings_status": settings_r.status_code,
+              "settings": settings,
+              "captcha": cap_data,
+              "pb_status": pb_r.status_code,
+              "pb_text": pb_r.text[:3000],
+          }
+          with open(".tmp_build_verify/byse_probe.json", "w") as fh:
+              json.dump(out, fh, indent=2)
           PY
 
-      - name: Commit built cs3 & verification report
+      - name: Commit probe output
         if: always()
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add -f build/Anime4Up.cs3 .tmp_build_verify/ || true
-          git commit --allow-empty -m "chore: build Anime4Up v4 cs3 and verify [skip ci]"
+          git add -f .tmp_build_verify/ || true
+          git commit --allow-empty -m "chore: probe byse n1mwq schema [skip ci]"
           git pull --rebase origin arena/b5447323-mehdigm-stream || true
           git push origin arena/b5447323-mehdigm-stream
