@@ -224,6 +224,7 @@ jobs:
             ca-certificates \
             procps \
             openssl \
+            nginx \
             sqlite3 \
             zstd \
             rsync \
@@ -845,6 +846,233 @@ jobs:
           fi
 
       # ============================================================
+      # 12b. Live UI reverse proxy (SSE fix)
+      #
+      # Cloudflare Quick Tunnels buffer SSE sent over GET, which makes
+      # the live UI freeze/delay. This nginx proxy injects a tiny
+      # same-origin shim into the app shell that subscribes to
+      # /api/event with POST, then rewrites that request back to GET
+      # for the OpenCode server. The proxy also disables buffering and
+      # passes the existing OpenCode basic auth through untouched.
+      # ============================================================
+
+      - name: 🛡️ Start live UI proxy
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+
+          PROXY_PORT=8080
+          PROXY_LOG="$RUNNER_TEMP/opencode-logs/proxy.log"
+          NGINX_CONF="$RUNNER_TEMP/opencode-proxy.conf"
+
+          : > "$PROXY_LOG"
+
+          export RUNNER_TRACKING_ID=""
+
+          # Same-origin shim: retry the first empty list reads that a
+          # cold or evicted location can return while its config is
+          # still loading, and subscribe to /api/event with POST because
+          # Cloudflare Quick Tunnels buffer SSE sent over GET.
+          RETRY_JS="$RUNNER_TEMP/opencode-client-retry.js"
+
+          cat > "$RETRY_JS" <<'JAVASCRIPT'
+          (() => {
+            if (window.__ocRetryInstalled) return;
+            window.__ocRetryInstalled = true;
+
+            const retryPaths = new Set(["/api/agent", "/api/model", "/api/provider"]);
+            const originalFetch = window.fetch.bind(window);
+            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const isEvent = (input) => {
+              try {
+                const url = new URL(typeof input === "string" ? input : input.url, location.href);
+                return url.pathname === "/api/event";
+              } catch {
+                return false;
+              }
+            };
+            const retryable = (input) => {
+              try {
+                const url = new URL(typeof input === "string" ? input : input.url, location.href);
+                return retryPaths.has(url.pathname);
+              } catch {
+                return false;
+              }
+            };
+
+            window.fetch = async (input, init) => {
+              if (isEvent(input)) init = Object.assign({}, init, { method: "POST" });
+              const method = String(
+                (init && init.method) || (input instanceof Request ? input.method : "GET"),
+              ).toUpperCase();
+              if (method !== "GET" || !retryable(input)) return originalFetch(input, init);
+
+              const cloneInput = () => (input instanceof Request ? input.clone() : input);
+              let response = await originalFetch(cloneInput(), init);
+
+              for (let attempt = 0; attempt < 24; attempt++) {
+                if (!response || !response.ok) return response;
+
+                let body;
+                try {
+                  body = await response.clone().json();
+                } catch {
+                  return response;
+                }
+
+                if (Array.isArray(body && body.data) && body.data.length > 0) return response;
+                if (init && init.signal && init.signal.aborted) return response;
+
+                await sleep(250);
+                response = await originalFetch(cloneInput(), init);
+              }
+
+              return response;
+            };
+          })();
+          JAVASCRIPT
+          chmod 644 "$RETRY_JS"
+
+          # Shared proxy headers. Authorization is deliberately not
+          # overridden, so the existing OpenCode login keeps working.
+          PROXY_HEADERS="$RUNNER_TEMP/opencode-proxy-headers.conf"
+
+          cat > "$PROXY_HEADERS" <<'PROXYHEADERS'
+          proxy_http_version 1.1;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection $connection_upgrade;
+          proxy_set_header Accept-Encoding "";
+          proxy_read_timeout 86400s;
+          proxy_send_timeout 86400s;
+          PROXYHEADERS
+          chmod 600 "$PROXY_HEADERS"
+
+          # nginx only gets sub_filter when the module is compiled in.
+          # Ubuntu's nginx package includes it; keep a graceful fallback.
+          SUB_FILTER=""
+          if nginx -V 2>&1 | grep -q -- '--with-http_sub_module'; then
+            SUB_FILTER="                sub_filter_once on;
+                sub_filter_types text/html;
+                sub_filter '</head>' '<script src=\"/__opencode_retry.js\"></script></head>';"
+          else
+            echo "⚠️ nginx lacks http_sub_module; client live UI shim is disabled."
+          fi
+
+          cat > "$NGINX_CONF" <<EOF
+          user $(id -un);
+          worker_processes 1;
+          pid $RUNNER_TEMP/opencode-proxy.pid;
+          error_log stderr warn;
+
+          events {
+            worker_connections 1024;
+          }
+
+          http {
+            access_log off;
+
+            map \$http_upgrade \$connection_upgrade {
+              default upgrade;
+              ''      close;
+            }
+
+            server {
+              listen 127.0.0.1:$PROXY_PORT;
+              server_name _;
+
+              # Served as a separate same-origin file so strict CSPs
+              # (script-src 'self') keep working without weakening.
+              location = /__opencode_retry.js {
+                alias $RETRY_JS;
+                default_type application/javascript;
+                add_header Cache-Control "no-store" always;
+              }
+
+              # Cloudflare Quick Tunnels buffer SSE over GET. The client
+              # shim subscribes with POST, which the tunnel streams; nginx
+              # rewrites the request back to GET for the OpenCode server.
+              location = /api/event {
+                proxy_pass http://127.0.0.1:4096;
+                proxy_method GET;
+                include $PROXY_HEADERS;
+                proxy_buffering off;
+                proxy_cache off;
+              }
+
+              location / {
+                proxy_pass http://127.0.0.1:4096;
+                include $PROXY_HEADERS;
+
+                $SUB_FILTER
+
+                proxy_buffering off;
+                proxy_cache off;
+                proxy_hide_header Cache-Control;
+                add_header Cache-Control "no-store" always;
+                proxy_connect_timeout 10s;
+              }
+            }
+          }
+          EOF
+
+          sudo nginx -t -c "$NGINX_CONF"
+
+          setsid sudo nginx \
+            -c "$NGINX_CONF" \
+            -g 'daemon off;' \
+            </dev/null \
+            >> "$PROXY_LOG" 2>&1 &
+
+          PID=$!
+
+          echo "$PID" > "$RUNNER_TEMP/nginx.pid"
+
+          disown || true
+
+          echo "Proxy PID=$PID"
+
+          UP=0
+
+          for _ in $(seq 1 30); do
+
+            CODE="$(
+              curl \
+                -s \
+                -o /dev/null \
+                --max-time 2 \
+                -w '%{http_code}' \
+                "http://127.0.0.1:${PROXY_PORT}/global/health" \
+                2>/dev/null || echo '000'
+            )"
+
+            if [ "$CODE" != "000" ] && [ "$CODE" != "502" ]; then
+              UP=1
+              break
+            fi
+
+            if ! kill -0 "$PID" 2>/dev/null; then
+              echo "❌ live UI proxy exited."
+              cat "$PROXY_LOG" || true
+              exit 1
+            fi
+
+            sleep 1
+
+          done
+
+          if [ "$UP" -ne 1 ]; then
+            echo "❌ Live UI proxy did not become ready."
+            cat "$PROXY_LOG" || true
+            exit 1
+          fi
+
+          echo "✅ Live UI proxy is ready (127.0.0.1:${PROXY_PORT} -> 127.0.0.1:4096)."
+
+      # ============================================================
       # 13. Cloudflare Tunnel
       # ============================================================
 
@@ -865,7 +1093,7 @@ jobs:
           setsid bash -c \
             "cloudflared tunnel \
               --no-autoupdate \
-              --url http://127.0.0.1:4096 \
+              --url http://127.0.0.1:8080 \
               </dev/null \
               >>'$LOG_FILE' 2>&1" &
 
@@ -1608,6 +1836,20 @@ jobs:
 
             fi
 
+            if [ -f "$RUNNER_TEMP/nginx.pid" ]; then
+
+              PID="$(cat "$RUNNER_TEMP/nginx.pid")"
+
+              if ! kill -0 "$PID" 2>/dev/null; then
+
+                echo "❌ Live UI proxy died."
+
+                exit 1
+
+              fi
+
+            fi
+
           done
 
           echo ""
@@ -1719,6 +1961,15 @@ jobs:
 
           echo ""
           echo "=============================================="
+          echo "===== Live UI proxy log ====="
+          echo "=============================================="
+
+          tail -n 100 \
+            "$RUNNER_TEMP/opencode-logs/proxy.log" \
+            2>/dev/null || true
+
+          echo ""
+          echo "=============================================="
           echo "===== Cloudflare log ====="
           echo "=============================================="
 
@@ -1727,8 +1978,18 @@ jobs:
             2>/dev/null || true
 
       # ============================================================
-      # 21. Cloudflare cleanup
+      # 21. Proxy / Cloudflare cleanup
       # ============================================================
+
+      - name: 🧹 Shutdown live UI proxy
+        if: always()
+        continue-on-error: true
+        run: |
+          sudo nginx -s quit -c "$RUNNER_TEMP/opencode-proxy.conf" 2>/dev/null || true
+          if [ -f "$RUNNER_TEMP/nginx.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/nginx.pid")" 2>/dev/null || true
+            rm -f "$RUNNER_TEMP/nginx.pid"
+          fi
 
       - name: 🧹 Shutdown cloudflared
         if: always()
