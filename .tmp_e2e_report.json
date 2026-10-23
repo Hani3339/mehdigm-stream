@@ -1,0 +1,629 @@
+{
+  "homepage_cards_count": 50,
+  "series_episode_test": {
+    "label": "recent_homepage_series_episode",
+    "title": "مسلسل Chicago PD الموسم 14 الحلقة 3 مترجمة",
+    "url": "https://shaahidd4u.net/episode/مسلسل-chicago-pd-الموسم-14-الحلقة-3-مترجمة",
+    "watch_buttons": 9,
+    "watch_resolved": 9,
+    "download_resolved": 27,
+    "unique_jobs": 28,
+    "playable_streams_count": 24,
+    "providers_verified_200_ok": [
+      "Byse",
+      "FastVid",
+      "MixDrop",
+      "SaveFiles",
+      "Upzur",
+      "Uqload",
+      "VOE",
+      "VOE MP4"
+    ],
+    "qualities_verified": [
+      1080,
+      720,
+      480
+    ],
+    "details": [
+      {
+        "provider": "Vinovo",
+        "playable": false,
+        "diag": "https://vinovo.si:no_meta_token:403",
+        "canonical_key": "vinovo:ddd06176hgx1689"
+      },
+      {
+        "provider": "Uqload",
+        "type": "HLS",
+        "qualities": [
+          720
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "uqload:vs2ogngcn72w"
+      },
+      {
+        "provider": "MixDrop",
+        "type": "MP4",
+        "qualities": [
+          1080
+        ],
+        "playable": true,
+        "status": 206,
+        "ct": "video/mp4",
+        "canonical_key": "mixdrop:q11pedmwcvm43m"
+      },
+      {
+        "provider": "SaveFiles",
+        "type": "HLS",
+        "qualities": [
+          720
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "savefiles:sskv2wu0t9u9"
+      },
+      {
+        "provider": "VOE",
+        "type": "HLS",
+        "qualities": [
+          720
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "voe:dy5ff7prrset"
+      },
+      {
+        "provider": "VOE MP4",
+        "type": "MP4",
+        "qualities": [
+          1080
+        ],
+        "playable": true,
+        "status": 206,
+        "ct": "video/mp4",
+        "canonical_key": "voe:dy5ff7prrset"
+      },
+      {
+        "provider": "Ok.ru",
+        "type": "DELETED_UPSTREAM",
+        "qualities": [],
+        "playable": false,
+        "status": "vp_video_stub",
+        "canonical_key": "okru:16176177023638"
+      },
+      {
+        "provider": "Vinovo",
+        "playable": false,
+        "diag": "https://vinovo.si:no_meta_token:403",
+        "canonical_key": "vinovo:w226n354tyynj31"
+      },
+      {
+        "provider": "MixDrop",
+        "type": "MP4",
+        "qualities": [
+          720
+        ],
+        "playable": true,
+        "status": 206,
+        "ct": "video/mp4",
+        "canonical_key": "mixdrop:8ll30jo1tr6j9k"
+      },
+      {
+        "provider": "Byse",
+        "type": "HLS",
+        "qualities": [
+          720
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "byse:ef2fcgo3er2j"
+      },
+      {
+        "provider": "FastVid",
+        "type": "HLS",
+        "qualities": [
+          720
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "earnvids:b52sfy9zm5za"
+      },
+      {
+        "provider": "Uqload",
+        "type": "HLS",
+        "qualities": [
+          720
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "uqload:0hhwc3jf7isy"
+      },
+      {
+        "provider": "Upzur",
+        "type": "MP4",
+        "qualities": [
+          1080
+        ],
+        "playable": true,
+        "status": 206,
+        "ct": "application/octet-stream",
+        "canonical_key": "upzur:qjbo028v5cts"
+      },
+      {
+        "provider": "Byse",
+        "type": "HLS",
+        "qualities": [
+          720
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "byse:hk25llbovy0e"
+      },
+      {
+        "provider": "FastVid",
+        "type": "HLS",
+        "qualities": [
+          720
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "earnvids:tluniy5gfiim"
+      },
+      {
+        "provider": "SaveFiles",
+        "type": "HLS",
+        "qualities": [
+          720
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "savefiles:vho24e2ad8xg"
+      },
+      {
+        "provider": "VOE",
+        "type": "HLS",
+        "qualities": [
+          720
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "voe:nkkuwvjlwu9f"
+      },
+      {
+        "provider": "VOE MP4",
+        "type": "MP4",
+        "qualities": [
+          720
+        ],
+        "playable": true,
+        "status": 206,
+        "ct": "video/mp4",
+        "canonical_key": "voe:nkkuwvjlwu9f"
+      },
+      {
+        "provider": "Vinovo",
+        "playable": false,
+        "diag": "https://vinovo.si:no_meta_token:403",
+        "canonical_key": "vinovo:q77590g2bpxd5w"
+      },
+      {
+        "provider": "MixDrop",
+        "type": "MP4",
+        "qualities": [
+          480
+        ],
+        "playable": true,
+        "status": 206,
+        "ct": "video/mp4",
+        "canonical_key": "mixdrop:ell17z8gtkxrr3"
+      },
+      {
+        "provider": "Uqload",
+        "type": "HLS",
+        "qualities": [
+          480
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "uqload:nregu7pesax8"
+      },
+      {
+        "provider": "Upzur",
+        "type": "MP4",
+        "qualities": [
+          720
+        ],
+        "playable": true,
+        "status": 206,
+        "ct": "application/octet-stream",
+        "canonical_key": "upzur:qam81tzlgw8h"
+      },
+      {
+        "provider": "Byse",
+        "type": "HLS",
+        "qualities": [
+          480
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "byse:x1lqelkza96x"
+      },
+      {
+        "provider": "VOE",
+        "type": "HLS",
+        "qualities": [
+          480
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "voe:shluc00azjfk"
+      },
+      {
+        "provider": "VOE MP4",
+        "type": "MP4",
+        "qualities": [
+          480
+        ],
+        "playable": true,
+        "status": 206,
+        "ct": "video/mp4",
+        "canonical_key": "voe:shluc00azjfk"
+      },
+      {
+        "provider": "FastVid",
+        "type": "HLS",
+        "qualities": [
+          480
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "earnvids:x5ytaqzbq3kp"
+      },
+      {
+        "provider": "SaveFiles",
+        "type": "HLS",
+        "qualities": [
+          480
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "savefiles:e6pm8asig04o"
+      },
+      {
+        "provider": "Upzur",
+        "type": "MP4",
+        "qualities": [
+          480
+        ],
+        "playable": true,
+        "status": 206,
+        "ct": "application/octet-stream",
+        "canonical_key": "upzur:s67z7tn26fuq"
+      },
+      {
+        "provider": "DoodStream",
+        "playable": false,
+        "canonical_key": "dood:goiqufcd5n4h"
+      },
+      {
+        "provider": "DoodStream",
+        "playable": false,
+        "canonical_key": "dood:gafpw9nnkej1"
+      },
+      {
+        "provider": "DoodStream",
+        "playable": false,
+        "canonical_key": "dood:6sujnv9ep8y9"
+      }
+    ]
+  },
+  "movie_test": {
+    "label": "recent_homepage_movie",
+    "title": "فيلم The Intern 2026 مترجم اون لاين",
+    "url": "https://shaahidd4u.net/film/فيلم-the-intern-2026-مترجم-اون-لاين",
+    "watch_buttons": 9,
+    "watch_resolved": 0,
+    "download_resolved": 27,
+    "unique_jobs": 27,
+    "playable_streams_count": 24,
+    "providers_verified_200_ok": [
+      "Byse",
+      "FastVid",
+      "MixDrop",
+      "SaveFiles",
+      "Upzur",
+      "Uqload",
+      "VOE",
+      "VOE MP4"
+    ],
+    "qualities_verified": [
+      1080,
+      720,
+      480
+    ],
+    "details": [
+      {
+        "provider": "Vinovo",
+        "playable": false,
+        "diag": "https://vinovo.si:no_meta_token:403",
+        "canonical_key": "vinovo:488new3jfw04y5"
+      },
+      {
+        "provider": "Uqload",
+        "type": "HLS",
+        "qualities": [
+          1080
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "uqload:1reyu9zi7y8c"
+      },
+      {
+        "provider": "MixDrop",
+        "type": "MP4",
+        "qualities": [
+          1080
+        ],
+        "playable": true,
+        "status": 206,
+        "ct": "video/mp4",
+        "canonical_key": "mixdrop:033plj89f6w399"
+      },
+      {
+        "provider": "FastVid",
+        "type": "HLS",
+        "qualities": [
+          1080
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "earnvids:tnnfc7tqqzb0"
+      },
+      {
+        "provider": "VOE",
+        "type": "HLS",
+        "qualities": [
+          720
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "voe:loksjtsu722f"
+      },
+      {
+        "provider": "VOE MP4",
+        "type": "MP4",
+        "qualities": [
+          1080
+        ],
+        "playable": true,
+        "status": 206,
+        "ct": "video/mp4",
+        "canonical_key": "voe:loksjtsu722f"
+      },
+      {
+        "provider": "Vinovo",
+        "playable": false,
+        "diag": "https://vinovo.si:no_meta_token:403",
+        "canonical_key": "vinovo:eeeq67g5tg0wy9"
+      },
+      {
+        "provider": "Byse",
+        "type": "HLS",
+        "qualities": [
+          1080
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "byse:zvrtidm5ur5b"
+      },
+      {
+        "provider": "MixDrop",
+        "type": "MP4",
+        "qualities": [
+          720
+        ],
+        "playable": true,
+        "status": 206,
+        "ct": "video/mp4",
+        "canonical_key": "mixdrop:mkk8en9xulwv3m"
+      },
+      {
+        "provider": "Upzur",
+        "type": "MP4",
+        "qualities": [
+          1080
+        ],
+        "playable": true,
+        "status": 206,
+        "ct": "application/octet-stream",
+        "canonical_key": "upzur:4rktwr32qabr"
+      },
+      {
+        "provider": "Uqload",
+        "type": "HLS",
+        "qualities": [
+          720
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "uqload:ow7nkntrcy5n"
+      },
+      {
+        "provider": "SaveFiles",
+        "type": "HLS",
+        "qualities": [
+          720
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "savefiles:20f8fq1ocyzp"
+      },
+      {
+        "provider": "Byse",
+        "type": "HLS",
+        "qualities": [
+          720
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "byse:ix7rb400ut0r"
+      },
+      {
+        "provider": "VOE",
+        "type": "HLS",
+        "qualities": [
+          720
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "voe:wzbbtuhhqaul"
+      },
+      {
+        "provider": "VOE MP4",
+        "type": "MP4",
+        "qualities": [
+          720
+        ],
+        "playable": true,
+        "status": 206,
+        "ct": "video/mp4",
+        "canonical_key": "voe:wzbbtuhhqaul"
+      },
+      {
+        "provider": "Vinovo",
+        "playable": false,
+        "diag": "https://vinovo.si:no_meta_token:403",
+        "canonical_key": "vinovo:v226ngvdaknqk0"
+      },
+      {
+        "provider": "MixDrop",
+        "type": "MP4",
+        "qualities": [
+          480
+        ],
+        "playable": true,
+        "status": 206,
+        "ct": "video/mp4",
+        "canonical_key": "mixdrop:jddp1k6lu7r77d"
+      },
+      {
+        "provider": "SaveFiles",
+        "type": "HLS",
+        "qualities": [
+          720
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "savefiles:s5srkhnnn12z"
+      },
+      {
+        "provider": "Upzur",
+        "type": "MP4",
+        "qualities": [
+          720
+        ],
+        "playable": true,
+        "status": 206,
+        "ct": "application/octet-stream",
+        "canonical_key": "upzur:z4ijnsi105fy"
+      },
+      {
+        "provider": "Uqload",
+        "type": "HLS",
+        "qualities": [
+          480
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "uqload:sp8n5y0m0rd3"
+      },
+      {
+        "provider": "FastVid",
+        "type": "HLS",
+        "qualities": [
+          720
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "earnvids:6sk4dq6mxrk9"
+      },
+      {
+        "provider": "Byse",
+        "type": "HLS",
+        "qualities": [
+          480
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "byse:tabt4sulrq58"
+      },
+      {
+        "provider": "VOE",
+        "type": "HLS",
+        "qualities": [
+          480
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "voe:epwujsrtp1vi"
+      },
+      {
+        "provider": "VOE MP4",
+        "type": "MP4",
+        "qualities": [
+          480
+        ],
+        "playable": true,
+        "status": 206,
+        "ct": "video/mp4",
+        "canonical_key": "voe:epwujsrtp1vi"
+      },
+      {
+        "provider": "FastVid",
+        "type": "HLS",
+        "qualities": [
+          480
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "earnvids:7drcjzhn1lgs"
+      },
+      {
+        "provider": "Upzur",
+        "type": "MP4",
+        "qualities": [
+          480
+        ],
+        "playable": true,
+        "status": 206,
+        "ct": "application/octet-stream",
+        "canonical_key": "upzur:l7hsijt3m7yl"
+      },
+      {
+        "provider": "SaveFiles",
+        "type": "HLS",
+        "qualities": [
+          480
+        ],
+        "playable": true,
+        "status": 200,
+        "canonical_key": "savefiles:c64k14r6v30x"
+      },
+      {
+        "provider": "DoodStream",
+        "playable": false,
+        "canonical_key": "dood:9k7o1hk6gnat"
+      },
+      {
+        "provider": "DoodStream",
+        "playable": false,
+        "canonical_key": "dood:48otas8uu9rf"
+      },
+      {
+        "provider": "DoodStream",
+        "playable": false,
+        "canonical_key": "dood:0bm96i9ydyhq"
+      }
+    ]
+  }
+}
