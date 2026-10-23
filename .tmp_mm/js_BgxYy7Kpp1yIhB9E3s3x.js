@@ -1,1 +1,0 @@
-import{Sn as e,gt as t,nn as n}from"./DmhPvdRv3NMapvwoP7Gi.js";import{a as r}from"../../assets/main-DD1FFvbQ.js";function i(){if(!t)return e(!1);let{ssr:i}=r();if(i){let t=e(!1);return n(()=>{t.value=!0}),t}else return e(!0)}export{i as t};
