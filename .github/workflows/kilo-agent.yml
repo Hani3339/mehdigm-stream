@@ -551,9 +551,11 @@ jobs:
         next_countdown=$(( $(date +%s) + 300 ))
         backup_pid=''
         show_remaining() {
-          local remaining=$(( SESSION_DEADLINE - $(date +%s) ))
+          local now remaining
+          now=$(date +%s)
+          remaining=$((SESSION_DEADLINE - now))
           (( remaining < 0 )) && remaining=0
-          printf 'LIVE COUNTDOWN: %02d h %02d min remaining until workflow session ends.\\n' \\
+          printf 'LIVE COUNTDOWN: %02d h %02d min remaining until workflow session ends.\n' \
             "$((remaining / 3600))" "$(((remaining % 3600) / 60))"
         }
         show_remaining
