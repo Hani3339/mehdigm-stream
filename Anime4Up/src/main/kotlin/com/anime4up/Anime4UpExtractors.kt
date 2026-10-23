@@ -3,6 +3,7 @@ package com.anime4up
 import android.util.Base64
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.newSubtitleFile
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -1154,12 +1155,14 @@ class Anime4UpVnxPlayerExtractor : ExtractorApi() {
             }
 
         // Subtitle tracks if embedded
-        Regex("""["']file["']\s*:\s*["'](https?://[^"']+\.(?:vtt|srt|ass)[^"']*)["']""").findAll(combined)
+        val subUrls = Regex("""["']file["']\s*:\s*["'](https?://[^"']+\.(?:vtt|srt|ass)[^"']*)["']""")
+            .findAll(combined)
             .map { it.groupValues[1].replace("\\/", "/") }
             .distinct()
-            .forEach { subUrl ->
-                subtitleCallback(SubtitleFile("Arabic", subUrl))
-            }
+            .toList()
+        for (subUrl in subUrls) {
+            subtitleCallback(newSubtitleFile("Arabic", subUrl))
+        }
 
         // Nested iframe fallback
         Regex("""<iframe[^>]+src=["'](https?://[^"']+)["']""", RegexOption.IGNORE_CASE).findAll(combined)

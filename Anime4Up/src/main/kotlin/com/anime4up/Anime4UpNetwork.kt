@@ -31,6 +31,7 @@ import org.jsoup.nodes.Document
 import java.net.InetSocketAddress
 import java.net.Proxy
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
@@ -39,14 +40,15 @@ import kotlin.coroutines.suspendCoroutine
  * Resilient networking layer for Anime4Up:
  *  1. Direct HTTP with realistic Chrome Mobile headers & persisted `cf_clearance` cookies.
  *  2. Silent Android WebView Turnstile/JS solver when running inside CloudStream on Android.
- *  3. Multi-source HTTP/SOCKS5 proxy harvester & concurrent tester when Cloudflare blocks IP/VPN.
+ *  3. Multi-source HTTP/SOCKS5 proxy harvester, pool & concurrent tester across 9 feeds
+ *     when Cloudflare challenges the client's IP/VPN.
  */
 object Anime4UpNetwork {
     private const val TAG = "Anime4UpNet"
     private const val PREFS_NAME = "anime4up_net_prefs_v2"
     private const val KEY_CF_COOKIES = "cf_cookies"
     private const val KEY_CF_UA = "cf_ua"
-    private const val KEY_WORKING_PROXY = "working_proxy"
+    private const val KEY_WORKING_PROXIES = "working_proxies_pool"
 
     const val DEFAULT_UA =
         "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
@@ -55,12 +57,15 @@ object Anime4UpNetwork {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
     private val PROXY_SOURCES = listOf(
+        "http" to "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/https.txt",
+        "http" to "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/http.txt",
+        "http" to "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
+        "socks5" to "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt",
+        "http" to "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt",
+        "socks5" to "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/socks5/data.txt",
         "http" to "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=6500&country=all&ssl=yes&anonymity=all",
         "http" to "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
         "socks5" to "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
-        "http" to "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
-        "socks5" to "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt",
-        "http" to "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/https.txt",
         "socks5" to "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt"
     )
 
@@ -73,9 +78,7 @@ object Anime4UpNetwork {
     @Volatile
     private var cachedUa: String = DEFAULT_UA
 
-    @Volatile
-    private var cachedProxySpec: String? = null
-
+    private val workingProxies = CopyOnWriteArrayList<String>()
     private val proxyMutex = Mutex()
     private val cfMutex = Mutex()
     private val deadProxies = ConcurrentHashMap.newKeySet<String>()
@@ -86,7 +89,12 @@ object Anime4UpNetwork {
             val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             cachedCookies = prefs.getString(KEY_CF_COOKIES, null)
             cachedUa = prefs.getString(KEY_CF_UA, DEFAULT_UA) ?: DEFAULT_UA
-            cachedProxySpec = prefs.getString(KEY_WORKING_PROXY, null)
+            val savedPool = prefs.getString(KEY_WORKING_PROXIES, null).orEmpty()
+                .split("|")
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+            workingProxies.clear()
+            workingProxies.addAll(savedPool)
         }
     }
 
@@ -96,7 +104,7 @@ object Anime4UpNetwork {
             ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
                 .putString(KEY_CF_COOKIES, cachedCookies)
                 .putString(KEY_CF_UA, cachedUa)
-                .putString(KEY_WORKING_PROXY, cachedProxySpec)
+                .putString(KEY_WORKING_PROXIES, workingProxies.take(6).joinToString("|"))
                 .apply()
         }
     }
@@ -166,20 +174,23 @@ object Anime4UpNetwork {
             }
         }
 
-        // 2. Try cached working proxy immediately if one was already discovered
-        val currentProxy = cachedProxySpec
-        if (!currentProxy.isNullOrBlank() && !deadProxies.contains(currentProxy)) {
-            proxyGet(url, currentProxy, referer, extraHeaders, timeoutSec = 14)?.let { (code, body) ->
+        // 2. Try verified working proxies from pool
+        for (proxySpec in workingProxies.toList()) {
+            if (deadProxies.contains(proxySpec)) {
+                workingProxies.remove(proxySpec)
+                continue
+            }
+            proxyGet(url, proxySpec, referer, extraHeaders, timeoutSec = 14)?.let { (code, body) ->
                 if (code in 200..399 && !isCloudflareChallenge(code, body) && (!requireSiteSignature || isValidAnime4UpHtml(body))) {
                     return@withContext body
                 }
             }
-            deadProxies.add(currentProxy)
+            deadProxies.add(proxySpec)
+            workingProxies.remove(proxySpec)
         }
 
         // 3. Try silent Android WebView Cloudflare solver if an Activity is available
         cfMutex.withLock {
-            // Re-check direct in case another coroutine just solved cf_clearance
             directGet(url, referer, extraHeaders)?.let { (code, body) ->
                 if (!isCloudflareChallenge(code, body) && (!requireSiteSignature || isValidAnime4UpHtml(body))) {
                     return@withContext body
@@ -205,14 +216,15 @@ object Anime4UpNetwork {
 
         // 4. Multi-source Proxy Harvester & Concurrent Failover
         proxyMutex.withLock {
-            val refreshedProxy = cachedProxySpec
-            if (!refreshedProxy.isNullOrBlank() && !deadProxies.contains(refreshedProxy)) {
-                proxyGet(url, refreshedProxy, referer, extraHeaders, timeoutSec = 14)?.let { (code, body) ->
+            for (proxySpec in workingProxies.toList()) {
+                if (deadProxies.contains(proxySpec)) continue
+                proxyGet(url, proxySpec, referer, extraHeaders, timeoutSec = 14)?.let { (code, body) ->
                     if (code in 200..399 && !isCloudflareChallenge(code, body) && (!requireSiteSignature || isValidAnime4UpHtml(body))) {
                         return@withContext body
                     }
                 }
-                deadProxies.add(refreshedProxy)
+                deadProxies.add(proxySpec)
+                workingProxies.remove(proxySpec)
             }
 
             discoverWorkingProxyAndFetch(url, referer, extraHeaders, requireSiteSignature)
@@ -289,7 +301,7 @@ object Anime4UpNetwork {
     }
 
     private suspend fun harvestCandidateProxies(): List<String> = coroutineScope {
-        val jobs = PROXY_SOURCES.map { (proto, feedUrl) ->
+        val perSourceLists = PROXY_SOURCES.map { (proto, feedUrl) ->
             async(Dispatchers.IO) {
                 try {
                     val req = Request.Builder()
@@ -306,7 +318,7 @@ object Anime4UpNetwork {
                             .lineSequence()
                             .map { it.trim() }
                             .filter { it.isNotEmpty() && !it.startsWith("#") && it.contains(":") }
-                            .take(120)
+                            .take(150)
                             .map { line -> if (line.contains("://")) line else "$proto://$line" }
                             .toList()
                     }
@@ -314,13 +326,23 @@ object Anime4UpNetwork {
                     emptyList()
                 }
             }
-        }
+        }.map { it.await() }
 
-        val combined = LinkedHashSet<String>()
-        for (job in jobs) {
-            combined.addAll(job.await())
+        // Round-robin interleave across all feeds so every source gets tested immediately
+        val interleaved = LinkedHashSet<String>()
+        val maxLen = perSourceLists.maxOfOrNull { it.size } ?: 0
+        for (i in 0 until maxLen) {
+            for (list in perSourceLists) {
+                if (i < list.size) {
+                    val spec = list[i]
+                    if (!deadProxies.contains(spec)) {
+                        interleaved.add(spec)
+                    }
+                }
+            }
+            if (interleaved.size >= 400) break
         }
-        combined.filterNot { deadProxies.contains(it) }.shuffled().take(240)
+        interleaved.toList()
     }
 
     private suspend fun discoverWorkingProxyAndFetch(
@@ -333,16 +355,17 @@ object Anime4UpNetwork {
         if (candidates.isEmpty()) return null
 
         Log.i(TAG, "Testing ${candidates.size} multi-source proxies for $url")
-        val winner = CompletableDeferred<Pair<String, String>?>()
-        val sem = Semaphore(24)
+        val firstWinner = CompletableDeferred<Pair<String, String>?>()
+        val sem = Semaphore(36)
+        var resolvedHtml: String? = null
 
         try {
             coroutineScope {
                 val tasks = candidates.map { spec ->
                     async(Dispatchers.IO) {
-                        if (winner.isCompleted) return@async
+                        if (firstWinner.isCompleted && workingProxies.size >= 4) return@async
                         sem.withPermit {
-                            if (winner.isCompleted) return@withPermit
+                            if (firstWinner.isCompleted && workingProxies.size >= 4) return@withPermit
                             val res = proxyGet(url, spec, referer, extraHeaders, timeoutSec = 9)
                             if (res != null) {
                                 val (code, body) = res
@@ -350,7 +373,10 @@ object Anime4UpNetwork {
                                     !isCloudflareChallenge(code, body) &&
                                     (!requireSiteSignature || isValidAnime4UpHtml(body))
                                 if (valid) {
-                                    winner.complete(spec to body)
+                                    if (!workingProxies.contains(spec)) {
+                                        workingProxies.add(0, spec)
+                                    }
+                                    firstWinner.complete(spec to body)
                                 } else {
                                     deadProxies.add(spec)
                                 }
@@ -361,26 +387,25 @@ object Anime4UpNetwork {
                     }
                 }
 
-                // Complete with null once all tasks finish if none succeeded
-                async {
+                val watchdog = async {
                     tasks.forEach { runCatching { it.await() } }
-                    if (!winner.isCompleted) winner.complete(null)
+                    if (!firstWinner.isCompleted) firstWinner.complete(null)
                 }
 
-                val result = winner.await()
+                val winnerPair = firstWinner.await()
                 tasks.forEach { it.cancel() }
-                if (result != null) {
-                    cachedProxySpec = result.first
+                watchdog.cancel()
+
+                if (winnerPair != null) {
                     savePrefs()
-                    Log.i(TAG, "Selected working proxy: ${result.first}")
-                    return@coroutineScope result.second
+                    Log.i(TAG, "Selected working proxy: ${winnerPair.first} (pool=${workingProxies.size})")
+                    resolvedHtml = winnerPair.second
                 }
-                null
             }
         } catch (_: Throwable) {
-            null
+            // Return resolvedHtml if captured before cancellation
         }
-        return if (winner.isCompleted) winner.getCompleted()?.second else null
+        return resolvedHtml
     }
 
     // =========================================================================
@@ -439,7 +464,6 @@ object Anime4UpNetwork {
                 webView.settings.apply {
                     javaScriptEnabled = true
                     domStorageEnabled = true
-                    databaseEnabled = true
                     useWideViewPort = true
                     loadWithOverviewMode = true
                     mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE

@@ -51,16 +51,19 @@ jobs:
           from curl_cffi import requests as creq
 
           PROXY_FEEDS = [
+              ("http", "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/https.txt"),
+              ("http", "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/http.txt"),
+              ("http", "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt"),
+              ("socks5", "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt"),
+              ("http", "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt"),
+              ("socks5", "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/socks5/data.txt"),
               ("http", "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=6500&country=all&ssl=yes&anonymity=all"),
               ("http", "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt"),
               ("socks5", "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt"),
-              ("http", "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt"),
-              ("socks5", "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt"),
-              ("http", "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/https.txt"),
               ("socks5", "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt"),
           ]
 
-          working_proxy = None
+          good_proxies = []
           dead_proxies = set()
 
           def is_valid_site(html):
@@ -72,26 +75,36 @@ jobs:
               return any(k in html for k in ("anime4up", "anime-card-container", "anime-details", "episode-servers", "الحلقة"))
 
           def find_working_proxy(test_url):
-              global working_proxy
-              cands = []
+              per_feed = []
               for proto, feed in PROXY_FEEDS:
                   try:
                       r = creq.get(feed, timeout=8)
                       if r.status_code == 200:
-                          for line in r.text.splitlines()[:100]:
+                          lst = []
+                          for line in r.text.splitlines()[:160]:
                               line = line.strip()
                               if line and ":" in line and not line.startswith("#"):
                                   spec = line if "://" in line else f"{proto}://{line}"
                                   if spec not in dead_proxies:
-                                      cands.append(spec)
+                                      lst.append(spec)
+                          per_feed.append(lst)
                   except Exception:
                       pass
-              cands = list(dict.fromkeys(cands))[:220]
-              print(f"[Proxy] Probing {len(cands)} proxies across {len(PROXY_FEEDS)} sources...")
+              cands = []
+              seen = set()
+              max_len = max((len(x) for x in per_feed), default=0)
+              for i in range(max_len):
+                  for lst in per_feed:
+                      if i < len(lst) and lst[i] not in seen:
+                          seen.add(lst[i])
+                          cands.append(lst[i])
+                  if len(cands) >= 550:
+                      break
+              print(f"[Proxy] Probing {len(cands)} interleaved proxies across {len(PROXY_FEEDS)} sources...")
 
               def probe(p):
                   try:
-                      r = creq.get(test_url, impersonate="chrome124", proxies={"http": p, "https": p}, timeout=9)
+                      r = creq.get(test_url, headers={"Referer": "https://w1.anime4up.rest/", "Accept-Language": "ar,en-US;q=0.9"}, impersonate="chrome124", proxies={"http": p, "https": p}, timeout=9)
                       if r.status_code == 200 and is_valid_site(r.text):
                           return p, r.text
                   except Exception:
@@ -99,42 +112,43 @@ jobs:
                   dead_proxies.add(p)
                   return None
 
-              ex = ThreadPoolExecutor(max_workers=28)
+              first_html = None
+              ex = ThreadPoolExecutor(max_workers=50)
               try:
                   futs = [ex.submit(probe, p) for p in cands]
                   for f in as_completed(futs):
                       res = f.result()
                       if res:
-                          working_proxy = res[0]
-                          print(f"[Proxy] Selected working proxy: {working_proxy}")
-                          ex.shutdown(wait=False, cancel_futures=True)
-                          return res[1]
+                          p, txt = res
+                          if p not in good_proxies:
+                              good_proxies.append(p)
+                          if not first_html:
+                              first_html = txt
+                          print(f"[Proxy] Verified proxy #{len(good_proxies)}: {p}")
+                          if len(good_proxies) >= 3:
+                              ex.shutdown(wait=False, cancel_futures=True)
+                              return first_html
               finally:
                   ex.shutdown(wait=False, cancel_futures=True)
-              return None
+              return first_html
 
           def fetch_site(url):
-              global working_proxy
               try:
-                  r = creq.get(url, impersonate="chrome124", timeout=10)
+                  r = creq.get(url, headers={"Referer": "https://w1.anime4up.rest/", "Accept-Language": "ar,en-US;q=0.9"}, impersonate="chrome124", timeout=10)
                   if r.status_code == 200 and is_valid_site(r.text):
                       return r.text
               except Exception:
                   pass
-              for _ in range(3):
-                  if working_proxy:
-                      try:
-                          r = creq.get(url, impersonate="chrome124", proxies={"http": working_proxy, "https": working_proxy}, timeout=14)
-                          if r.status_code == 200 and is_valid_site(r.text):
-                              return r.text
-                      except Exception:
-                          pass
-                      dead_proxies.add(working_proxy)
-                      working_proxy = None
-                  res = find_working_proxy(url)
-                  if res:
-                      return res
-              return None
+              for p in list(good_proxies):
+                  try:
+                      r = creq.get(url, headers={"Referer": "https://w1.anime4up.rest/", "Accept-Language": "ar,en-US;q=0.9"}, impersonate="chrome124", proxies={"http": p, "https": p}, timeout=15)
+                      if r.status_code == 200 and is_valid_site(r.text):
+                          return r.text
+                  except Exception:
+                      dead_proxies.add(p)
+                      if p in good_proxies:
+                          good_proxies.remove(p)
+              return find_working_proxy(url)
 
           def extract_episodes_like_kotlin(anime_url):
               html = fetch_site(anime_url)
