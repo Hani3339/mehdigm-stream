@@ -7,6 +7,7 @@ import com.lagradost.cloudstream3.plugins.Plugin
 @CloudstreamPlugin
 class Shahid4uProvider : Plugin() {
     override fun load(context: Context) {
+        Shahid4uNetwork.init(context)
         registerMainAPI(Shahid4u())
 
         // Register all modern Shahid4u watch & download extractors

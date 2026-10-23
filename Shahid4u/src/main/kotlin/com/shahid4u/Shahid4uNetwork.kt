@@ -14,7 +14,6 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
-import com.lagradost.cloudstream3.AcraApplication
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.network.CloudflareKiller
 import kotlinx.coroutines.CancellationException
@@ -404,13 +403,21 @@ object Shahid4uNetwork {
 
     // ── Prefs Initialization ─────────────────────────────────────────────────
 
+    @Volatile
+    private var appContext: Context? = null
+
+    fun init(context: Context) {
+        appContext = context.applicationContext
+        ensurePrefsLoaded()
+    }
+
     private fun ensurePrefsLoaded() {
         if (prefsLoaded) return
+        val ctx = appContext ?: return
         synchronized(this) {
             if (prefsLoaded) return
             prefsLoaded = true
             runCatching {
-                val ctx = AcraApplication.context ?: return@runCatching
                 val sp = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 sp.getString(KEY_USER_AGENT, null)?.takeIf { it.isNotBlank() }?.let { userAgent = it }
                 sp.getString(KEY_ACTIVE_DOMAIN, null)?.takeIf { it.startsWith("http") }?.let { mainUrl = it.trimEnd('/') }
@@ -423,7 +430,7 @@ object Shahid4uNetwork {
 
     private fun savePrefs() {
         runCatching {
-            val ctx = AcraApplication.context ?: return@runCatching
+            val ctx = appContext ?: return@runCatching
             val sp = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             val cookieHeader = directCookies.exportCookieHeader(mainUrl)
             sp.edit()
