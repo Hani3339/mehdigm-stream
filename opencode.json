@@ -3,12 +3,11 @@
   "update": "disable",
   "share": "disabled",
   "model": "opencode/big-pickle",
+  "small_model": "opencode/big-pickle",
   "default_agent": "build",
   "permission": {
     "*": "allow",
-    "read": {
-      "*": "allow"
-    },
+    "read": { "*": "allow" },
     "edit": "allow",
     "glob": "allow",
     "grep": "allow",
@@ -22,5 +21,10 @@
     "websearch": "allow",
     "external_directory": "allow",
     "doom_loop": "allow"
+  },
+  "agent": {
+    "build": {
+      "model": "opencode/big-pickle"
+    }
   }
 }
