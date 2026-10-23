@@ -178,7 +178,10 @@ jobs:
                 if m['branch']!=BRANCH or m['repository']!=REPO: raise RuntimeError('State repository/branch mismatch')
                 head=run(['git','-C',str(WORK),'rev-parse','HEAD'],capture_output=True,text=True).stdout.strip()
                 if m['head']!=head:
-                    raise RuntimeError('Saved workspace base differs from checked-out HEAD. Disable restore_state for a clean run; the old release remains available for manual recovery.')
+                    print('WARNING: Saved state was created from a different commit than the checked-out HEAD.')
+                    print('Skipping restore and starting with a clean workspace; the old encrypted state release is preserved for manual recovery.')
+                    print('To resume that saved workspace, rerun on the matching branch/commit or recover the saved changes manually.')
+                    return
                 joined=d/'payload.gpg'
                 with joined.open('wb') as out:
                     for f in m['parts']:
