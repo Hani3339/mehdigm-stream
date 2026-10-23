@@ -1,299 +1,534 @@
 package com.anime4up
 
-import android.content.Context
 import android.util.Base64
-import com.fasterxml.jackson.annotation.JsonProperty
-import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.DubStatus
+import com.lagradost.cloudstream3.Episode
+import com.lagradost.cloudstream3.HomePageList
+import com.lagradost.cloudstream3.HomePageResponse
+import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.LoadResponse.Companion.addMalId
-import com.lagradost.cloudstream3.utils.AppUtils.parseJson
+import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
+import com.lagradost.cloudstream3.MainAPI
+import com.lagradost.cloudstream3.MainPageRequest
+import com.lagradost.cloudstream3.SearchResponse
+import com.lagradost.cloudstream3.ShowStatus
+import com.lagradost.cloudstream3.SubtitleFile
+import com.lagradost.cloudstream3.TvType
+import com.lagradost.cloudstream3.addDubStatus
+import com.lagradost.cloudstream3.addEpisodes
+import com.lagradost.cloudstream3.fixUrlNull
+import com.lagradost.cloudstream3.mainPageOf
+import com.lagradost.cloudstream3.newAnimeLoadResponse
+import com.lagradost.cloudstream3.newAnimeSearchResponse
+import com.lagradost.cloudstream3.newEpisode
+import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.ExtractorLinkType
-import com.lagradost.cloudstream3.utils.Qualities
-import com.lagradost.cloudstream3.utils.loadExtractor
-import com.lagradost.cloudstream3.utils.newExtractorLink
-import okio.ByteString.Companion.decodeBase64
-import org.jsoup.Jsoup
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import org.json.JSONObject
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import java.net.URLDecoder
+import java.net.URLEncoder
+import java.util.concurrent.ConcurrentHashMap
 
-class Anime4Up(private val context: Context) : MainAPI() {
+class Anime4Up : MainAPI() {
     override var mainUrl = "https://w1.anime4up.rest"
     override var name = "انمي فور اب (Anime4Up)"
     override val hasMainPage = true
     override var lang = "ar"
-    override val hasDownloadSupport = true
-    override val usesWebView = false
-
     override val supportedTypes = setOf(
         TvType.Anime,
         TvType.AnimeMovie,
-        TvType.OVA,
-        TvType.Cartoon
+        TvType.OVA
     )
 
     companion object {
-        private const val USER_AGENT =
-            "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
-
-        private val HEADERS = mapOf(
-            "User-Agent" to USER_AGENT,
-            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "Accept-Language" to "ar,en-US;q=0.7,en;q=0.3"
+        private val EPISODE_NUM_REGEX = Regex(
+            """(?i)(?:الحلقة|حلقة|الفلم|الفيلم|فيلم|فلم|الأوفا|اوفا|الخاصة|episode|ep)[^\d٠-٩]{0,18}([\d٠-٩]+)"""
+        )
+        private val TRAILING_NUM_REGEX = Regex("""(?:^|[-\s_/])([\d٠-٩]{1,4})(?:[-\s_/]|$)""")
+        private val YEAR_REGEX = Regex("""\b(19\d{2}|20\d{2})\b""")
+        private val CLEAN_TITLE_REGEX = Regex(
+            """(?i)\s*(?:جميع\s+حلقات|مشاهدة\s+و\s*تحميل|مشاهدة|تحميل|انمي|أنمي|مترجم\s+اون\s+لاين|مترجم|مدبلج|اون\s*لاين)\s*"""
         )
 
-        private val EPISODE_REGEX = Regex("""(?i)(?:الحلقة|episode|ep)[^\d]*(\d+)""")
-        private val NON_DIGITS = Regex("""\D+""")
+        private fun normalizeDigits(input: String): String {
+            val sb = StringBuilder(input.length)
+            for (ch in input) {
+                if (ch in '٠'..'٩') {
+                    sb.append(('0'.code + (ch.code - '٠'.code)).toChar())
+                } else {
+                    sb.append(ch)
+                }
+            }
+            return sb.toString()
+        }
+
+        private fun decodeUrlSafe(url: String): String =
+            runCatching { URLDecoder.decode(url, "UTF-8") }.getOrDefault(url)
     }
 
     override val mainPage = mainPageOf(
-        "$mainUrl/home8/" to "أحدث الحلقات المضافة",
-        "$mainUrl/قائمة-الانمي/page/" to "قائمة الأنمي",
-        "$mainUrl/anime-type/movie-3/page/" to "أفلام الأنمي",
-        "$mainUrl/anime-status/مستمر/page/" to "أنميات مستمرة",
-        "$mainUrl/anime-status/مكتمل/page/" to "أنميات مكتملة"
+        "$mainUrl/home8/" to "الرئيسية",
+        "$mainUrl/episode" to "أحدث الحلقات المضافة",
+        "$mainUrl/%d9%82%d8%a7%d8%a6%d9%85%d8%a9-%d8%a7%d9%84%d8%a7%d9%86%d9%85%d9%8a" to "قائمة الأنمي",
+        "$mainUrl/anime-category/%d8%a7%d9%84%d8%a3%d9%86%d9%85%d9%8a-%d8%a7%d9%84%d9%85%d8%aa%d8%b1%d8%ac%d9%85" to "الأنمي المترجم",
+        "$mainUrl/anime-category/%d8%a7%d9%84%d8%a7%d9%86%d9%85%d9%8a-%d8%a7%d9%84%d9%85%d8%af%d8%a8%d9%84%d8%ac" to "الأنمي المدبلج",
+        "$mainUrl/anime-type/movie-3" to "أفلام الأنمي",
+        "$mainUrl/anime-type/tv2" to "مسلسلات أنمي (TV)",
+        "$mainUrl/anime-type/ona1" to "أنميات ONA",
+        "$mainUrl/anime-type/ova1" to "حلقات خاصة وأوفا (OVA)"
     )
 
-    private fun fixUrl(url: String): String {
+    // =========================================================================
+    // Helpers
+    // =========================================================================
+
+    private fun Element.extractPosterUrl(): String? {
+        val img = selectFirst("img") ?: return null
+        val candidates = listOf(
+            img.attr("data-image"),
+            img.attr("data-src"),
+            img.attr("data-lazy-src"),
+            img.attr("src")
+        )
+        val raw = candidates.firstOrNull { it.isNotBlank() && !it.startsWith("data:image") }
+            ?: img.attr("srcset").substringBefore(" ").trim().takeIf { it.isNotBlank() && !it.startsWith("data:") }
+        return fixUrlNull(raw)
+    }
+
+    private fun extractEpisodeNumber(label: String, epUrl: String = ""): Int? {
+        val normLabel = normalizeDigits(label)
+        EPISODE_NUM_REGEX.find(normLabel)?.groupValues?.get(1)?.toIntOrNull()?.let { return it }
+
+        val decodedSlug = normalizeDigits(decodeUrlSafe(epUrl).substringAfter("/episode/"))
+        EPISODE_NUM_REGEX.find(decodedSlug)?.groupValues?.get(1)?.toIntOrNull()?.let { return it }
+
+        Regex("""^\s*([\d٠-٩]{1,4})\s*$""").find(normLabel)?.groupValues?.get(1)?.toIntOrNull()?.let { return it }
+        return TRAILING_NUM_REGEX.findAll(decodedSlug).lastOrNull()?.groupValues?.get(1)?.toIntOrNull()
+    }
+
+    private fun parseCardType(typeBadge: String, titleText: String): TvType {
+        val t = "$typeBadge $titleText".lowercase()
         return when {
-            url.startsWith("http") -> url
-            url.startsWith("//") -> "https:$url"
-            url.startsWith("/") -> "$mainUrl$url"
-            else -> "$mainUrl/$url"
-        }
-    }
-
-    private fun decodeBase64Safe(str: String?): String {
-        if (str.isNullOrBlank()) return ""
-        return try {
-            str.decodeBase64()?.utf8() ?: ""
-        } catch (_: Exception) {
-            try {
-                String(Base64.decode(str, Base64.DEFAULT), Charsets.UTF_8)
-            } catch (_: Exception) {
-                ""
-            }
-        }
-    }
-
-    private suspend fun fetchDocument(url: String, referer: String? = null): Document? {
-        val reqHeaders = HEADERS.toMutableMap()
-        if (referer != null) reqHeaders["Referer"] = referer
-
-        return try {
-            val response = app.get(url, headers = reqHeaders)
-            if (response.code in 200..399) {
-                response.document
-            } else {
-                null
-            }
-        } catch (_: Exception) {
-            try {
-                app.get(url, headers = mapOf("User-Agent" to USER_AGENT)).document
-            } catch (_: Exception) {
-                null
-            }
+            t.contains("movie") || t.contains("فيلم") || t.contains("فلم") -> TvType.AnimeMovie
+            t.contains("ova") || t.contains("ona") || t.contains("special") || t.contains("اوفا") || t.contains("أوفا") || t.contains("خاصة") -> TvType.OVA
+            else -> TvType.Anime
         }
     }
 
     private fun Element.toSearchResponse(): SearchResponse? {
-        val linkElem = selectFirst("div.hover > a, h3 a, a.overlay") ?: selectFirst("a") ?: return null
-        val rawHref = linkElem.attr("href").trim()
-        if (rawHref.isBlank()) return null
+        // Always prefer the explicit /anime/.../ link inside h3 so custom slugs (e.g. -sgtfr) never 404
+        val animeLinkEl = selectFirst(
+            "div.anime-card-title h3 a[href*='/anime/'], h3 a[href*='/anime/'], a[href*='/anime/']"
+        )
+        val epLinkEl = selectFirst(
+            "div.ep_num a[href*='/episode/'], div.episodes-card-title h3 a[href*='/episode/'], a.overlay[href*='/episode/'], a[href*='/episode/']"
+        )
 
-        val cleanUrl = rawHref
-            .replace("-%d8%a7%d9%84%d8%ad%d9%84%d9%82%d8%a9-.*".toRegex(), "")
-            .replace("/episode/", "/anime/")
-
-        val imgElem = selectFirst("div.hover > img, img.img-responsive, img")
-        val title = imgElem?.attr("alt")?.ifBlank { null }
-            ?: selectFirst("h3 a, .anime-card-title a, .entry-title")?.text()?.ifBlank { null }
-            ?: linkElem.attr("title").ifBlank { null }
+        val targetHref = animeLinkEl?.attr("href")?.takeIf { it.isNotBlank() }
+            ?: epLinkEl?.attr("href")?.takeIf { it.isNotBlank() }
+            ?: selectFirst("a[href]")?.attr("href")?.takeIf { it.isNotBlank() }
             ?: return null
 
-        val posterUrl = imgElem?.attr("data-src")?.ifBlank { null }
-            ?: imgElem?.attr("data-lazy-src")?.ifBlank { null }
-            ?: imgElem?.attr("src")?.ifBlank { null }
+        val cleanHref = fixUrlNull(targetHref)
+            ?.takeIf { it.startsWith("http") && !it.contains(" ") && !it.contains("'") }
+            ?: return null
 
-        val typeText = select("div.anime-card-type > a, span.anime-card-type, .type").text()
-        val type = when {
-            typeText.contains("Movie|فيلم".toRegex(RegexOption.IGNORE_CASE)) -> TvType.AnimeMovie
-            typeText.contains("OVA|ONA|خاصة".toRegex(RegexOption.IGNORE_CASE)) -> TvType.OVA
-            else -> TvType.Anime
+        val rawTitle = animeLinkEl?.attr("title")?.takeIf { it.isNotBlank() }
+            ?: animeLinkEl?.text()?.trim()?.takeIf { it.isNotBlank() }
+            ?: selectFirst("div.anime-card-title h3 a, h3 a")?.text()?.trim()?.takeIf { it.isNotBlank() }
+            ?: selectFirst("img")?.attr("alt")?.trim()?.takeIf { it.isNotBlank() }
+            ?: return null
+
+        val title = rawTitle.replace(Regex("""\s+"""), " ").trim()
+        if (title.isBlank()) return null
+
+        val posterUrl = extractPosterUrl()
+        val epBadgeText = selectFirst("div.ep_num a, div.episodes-card-title a, span.ep-num")?.text()?.trim().orEmpty()
+        val epHref = epLinkEl?.attr("href").orEmpty()
+        val epNum = if (epBadgeText.isNotEmpty() || epHref.isNotEmpty()) {
+            extractEpisodeNumber(epBadgeText, epHref)
+        } else {
+            null
         }
 
-        return newAnimeSearchResponse(title.trim(), fixUrl(cleanUrl), type) {
-            this.posterUrl = posterUrl?.let { fixUrl(it) }
-            val epNum = EPISODE_REGEX.find(rawHref)?.groupValues?.get(1)?.toIntOrNull()
-            if (epNum != null) {
-                this.addDubStatus(isDub = title.contains("مدبلج"), epNum)
-            } else {
-                this.addDubStatus(isDub = title.contains("مدبلج"))
-            }
+        val typeText = selectFirst("div.anime-card-type a, span.anime-type")?.text()?.trim().orEmpty()
+        val statusAndCat = select("div.anime-card-status a, span.badge").text()
+        val isDub = title.contains("مدبلج") ||
+            epBadgeText.contains("مدبلج") ||
+            statusAndCat.contains("مدبلج") ||
+            decodeUrlSafe(cleanHref).contains("مدبلج")
+
+        val tvType = parseCardType(typeText, title)
+
+        return newAnimeSearchResponse(title, cleanHref, tvType) {
+            this.posterUrl = posterUrl
+            addDubStatus(isDub, epNum)
         }
     }
+
+    private fun canonicalEpisodeKey(url: String): String =
+        decodeUrlSafe(url).trim().lowercase().removeSuffix("/")
+
+    // =========================================================================
+    // Main Page
+    // =========================================================================
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val targetUrl = if (request.data.contains("/page/")) {
-            "${request.data}$page/"
-        } else if (page > 1) {
-            "${request.data.trimEnd('/')}/page/$page/"
-        } else {
-            request.data
-        }
+        val base = request.data.trimEnd('/')
 
-        val doc = fetchDocument(targetUrl) ?: return newHomePageResponse(emptyList(), hasNext = false)
+        // Multi-widget dashboard (/home8/) — single non-paginated landing view
+        if (base.endsWith("/home8")) {
+            if (page > 1) return newHomePageResponse(emptyList(), hasNext = false)
+            val doc = Anime4UpNetwork.fetchDocument("$base/", referer = "$mainUrl/")
+                ?: Anime4UpNetwork.fetchDocument("$mainUrl/", referer = "$mainUrl/")
+                ?: return newHomePageResponse(emptyList(), hasNext = false)
 
-        val homeSections = mutableListOf<HomePageList>()
+            val homeLists = ArrayList<HomePageList>()
+            for (widget in doc.select("div.main-widget")) {
+                val heading = widget.selectFirst("div.main-didget-head h3, h3.widget-title, h2")?.text()?.trim()
+                    ?.replace(Regex("""\s+"""), " ")
+                    ?: continue
+                if (heading.contains("تابع المشاهدة")) continue
 
-        val contentContainers = doc.select(".page-content-container")
-        if (contentContainers.isNotEmpty()) {
-            for (container in contentContainers) {
-                val headerTitle = container.selectFirst("div.main-widget-head h3, div.main-didget-head h3, h3")?.text()?.trim()
-                    ?: request.name
-
-                val items = container.select("div.anime-card-container, div.episodes-card-container, div.anime-card-post")
-                    .mapNotNull { it.toSearchResponse() }
-                    .distinctBy { it.url }
-
+                val seen = LinkedHashSet<String>()
+                val items = widget.select("div.anime-card-container, div.episodes-card-container").mapNotNull { card ->
+                    val item = card.toSearchResponse() ?: return@mapNotNull null
+                    if (seen.add(item.url)) item else null
+                }
                 if (items.isNotEmpty()) {
-                    homeSections.add(
-                        HomePageList(
-                            name = headerTitle,
-                            list = items,
-                            isHorizontalImages = headerTitle.contains("حلقات") || headerTitle.contains("أحدث")
-                        )
-                    )
+                    homeLists.add(HomePageList(heading, items))
                 }
             }
+            return newHomePageResponse(homeLists, hasNext = false)
         }
 
-        if (homeSections.isEmpty()) {
-            val items = doc.select("div.anime-card-container, div.episodes-card-container, div.anime-card-post, div.col-md-3, div.row.display-flex > div")
-                .mapNotNull { it.toSearchResponse() }
-                .distinctBy { it.url }
+        // Standard paginated listing (/episode, /قائمة-الانمي, /anime-category/..., /anime-type/...)
+        val pageUrl = if (page <= 1) "$base/" else "$base/page/$page/"
+        val doc = Anime4UpNetwork.fetchDocument(pageUrl, referer = "$mainUrl/")
+            ?: return newHomePageResponse(request.name, emptyList(), hasNext = false)
 
-            if (items.isNotEmpty()) {
-                homeSections.add(
-                    HomePageList(
-                        name = request.name,
-                        list = items,
-                        isHorizontalImages = request.name.contains("حلقات")
-                    )
-                )
-            }
+        val cards = doc.select(
+            "div.anime-grid div.anime-card-container, " +
+                "div.page-content-container div.anime-card-container, " +
+                "div.episodes-card-container, " +
+                "div.anime-card-container"
+        )
+
+        val seen = LinkedHashSet<String>()
+        val items = cards.mapNotNull { card ->
+            val res = card.toSearchResponse() ?: return@mapNotNull null
+            // On /episode/ archive, keep distinct anime entries per page while preserving order
+            if (seen.add(res.url)) res else null
         }
 
-        val hasNext = doc.selectFirst("ul.pagination li.active + li, a.next, .pagination-next") != null || page < 100
-        return newHomePageResponse(homeSections, hasNext = hasNext)
+        val hasNextPage = items.isNotEmpty() && (
+            doc.selectFirst("a.next.page-numbers, ul.page-numbers a.next, link[rel=next]") != null ||
+                cards.size >= 18
+            )
+
+        return newHomePageResponse(request.name, items, hasNext = hasNextPage)
     }
+
+    // =========================================================================
+    // Search
+    // =========================================================================
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val searchUrl = "$mainUrl/?search_param=animes&s=$query"
-        val doc = fetchDocument(searchUrl)
-            ?: fetchDocument("$mainUrl/?s=$query")
-            ?: return emptyList()
+        val trimmed = query.trim()
+        if (trimmed.isEmpty()) return emptyList()
+        val encoded = URLEncoder.encode(trimmed, "UTF-8")
 
-        return doc.select("div.anime-card-container, div.episodes-card-container, div.anime-card-post, div.col-md-3, div.row.display-flex > div")
-            .mapNotNull { it.toSearchResponse() }
-            .distinctBy { it.url }
+        val searchUrls = listOf(
+            "$mainUrl/?search_param=animes&s=$encoded",
+            "$mainUrl/?s=$encoded"
+        )
+
+        val seen = LinkedHashSet<String>()
+        val results = ArrayList<SearchResponse>()
+
+        for (sUrl in searchUrls) {
+            val doc = Anime4UpNetwork.fetchDocument(sUrl, referer = "$mainUrl/") ?: continue
+            val cards = doc.select(
+                "div.anime-grid div.anime-card-container, " +
+                    "div.page-content-container div.anime-card-container, " +
+                    "div.anime-card-container"
+            )
+            for (card in cards) {
+                val parsed = card.toSearchResponse() ?: continue
+                if (seen.add(parsed.url)) {
+                    results.add(parsed)
+                }
+            }
+            if (results.isNotEmpty()) break
+        }
+
+        return results
     }
 
+    // =========================================================================
+    // Load Anime / Movie Info & Complete Episode List
+    // =========================================================================
+
     override suspend fun load(url: String): LoadResponse? {
-        val cleanUrl = fixUrl(url)
-        var doc = fetchDocument(cleanUrl) ?: return null
+        var targetUrl = url.trim()
+        var initialEpisodeDoc: Document? = null
+        var doc = Anime4UpNetwork.fetchDocument(targetUrl, referer = "$mainUrl/") ?: return null
 
-        if (cleanUrl.contains("/episode/") || cleanUrl.contains("-%d8%a7%d9%84%d8%ad%d9%84%d9%82%d8%a9-")) {
-            val parentAnimeLink = doc.selectFirst("div.breadcrumb a[href*='/anime/'], a.anime-link, h1.entry-title a")?.attr("href")
-                ?: cleanUrl.replace("-%d8%a7%d9%84%d8%ad%d9%84%d9%82%d8%a9-.*".toRegex(), "").replace("/episode/", "/anime/")
+        // If user opened an /episode/.../ URL directly, follow parent link to the full /anime/.../ page
+        if (targetUrl.contains("/episode/")) {
+            initialEpisodeDoc = doc
+            val parentAnimeUrl = doc.selectFirst(
+                "div.anime-page-link a[href*='/anime/'], div.episode-Watch-navigation a[href*='/anime/'], a[href*='/anime/']"
+            )?.attr("href")?.let { fixUrlNull(it) }
 
-            val parentDoc = fetchDocument(parentAnimeLink)
-            if (parentDoc != null) {
-                doc = parentDoc
-            }
-        }
-
-        val title = doc.selectFirst("h1.anime-details-title, h1.entry-title, h1.title, div.anime-details h1")?.text()?.trim()
-            ?: doc.selectFirst("meta[property='og:title']")?.attr("content")?.trim()
-            ?: "Anime4Up"
-
-        val poster = doc.selectFirst("div.anime-thumbnail img, div.poster-image img, div.poster img, div.anime-details img")?.let {
-            it.attr("data-src").ifBlank { null } ?: it.attr("data-lazy-src").ifBlank { null } ?: it.attr("src")
-        }?.let { fixUrl(it) }
-
-        val description = doc.selectFirst("p.anime-story, div.anime-story, div.story")?.text()?.trim()
-            ?: doc.selectFirst("meta[name='description']")?.attr("content")?.trim()
-
-        val year = doc.selectFirst("div.anime-info:contains(بداية العرض), div.anime-info:contains(تاريخ), span:contains(سنة)")?.text()
-            ?.let { Regex("""\b(19\d{2}|20\d{2})\b""").find(it)?.value?.toIntOrNull() }
-
-        val typeText = doc.select(".anime-info:contains(النوع) a, div.anime-info:contains(النوع)").text()
-        val type = when {
-            typeText.contains("Movie|فيلم".toRegex(RegexOption.IGNORE_CASE)) -> TvType.AnimeMovie
-            typeText.contains("OVA|ONA|خاصة".toRegex(RegexOption.IGNORE_CASE)) -> TvType.OVA
-            else -> TvType.Anime
-        }
-
-        val genres = doc.select("ul.anime-genres li a, div.anime-info:contains(التصنيف) a, div.anime-info:contains(النوع) a")
-            .map { it.text().trim() }
-            .filter { it.isNotBlank() }
-
-        val statusText = doc.select(".anime-info:contains(حالة) a, div.anime-info:contains(حالة)").text()
-        val status = when {
-            statusText.contains("مستمر") -> ShowStatus.Ongoing
-            statusText.contains("مكتمل") -> ShowStatus.Completed
-            else -> null
-        }
-
-        val malId = doc.selectFirst("a.anime-mal, a[href*='myanimelist.net/anime/']")?.attr("href")
-            ?.replace(Regex(""".*anime/|/.*"""), "")
-            ?.toIntOrNull()
-
-        val episodeElements = doc.select("div#DivEpisodesList > div, div.episodes-list a, div.episodes-card-container, div.episodes-list-content a")
-        val episodes = mutableListOf<Episode>()
-
-        for (elem in episodeElements) {
-            val aTag = if (elem.tagName() == "a") elem else elem.selectFirst("h3 a, a") ?: continue
-            val epHref = fixUrl(aTag.attr("href").trim())
-            if (epHref.isBlank()) continue
-
-            val epTitle = aTag.text().trim().ifBlank {
-                elem.selectFirst("h3, .episode-title")?.text()?.trim() ?: "حلقة"
-            }
-
-            val epNum = EPISODE_REGEX.find(epTitle)?.groupValues?.get(1)?.toIntOrNull()
-                ?: EPISODE_REGEX.find(epHref)?.groupValues?.get(1)?.toIntOrNull()
-                ?: NON_DIGITS.replace(epTitle, "").toIntOrNull()
-
-            val thumb = elem.selectFirst("img")?.let {
-                it.attr("data-src").ifBlank { null } ?: it.attr("data-lazy-src").ifBlank { null } ?: it.attr("src")
-            }?.let { fixUrl(it) }
-
-            episodes.add(
-                newEpisode(epHref) {
-                    this.name = epTitle
-                    this.episode = epNum
-                    this.posterUrl = thumb ?: poster
+            if (!parentAnimeUrl.isNullOrBlank()) {
+                val animeDoc = Anime4UpNetwork.fetchDocument(parentAnimeUrl, referer = targetUrl)
+                if (animeDoc != null) {
+                    targetUrl = parentAnimeUrl
+                    doc = animeDoc
                 }
+            }
+        }
+
+        val rawTitle = doc.selectFirst("h1.anime-details-title, div.anime-details h1, h1.entry-title, h1")?.text()?.trim()
+            ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.substringBefore("-")?.trim()
+            ?: return null
+
+        val title = rawTitle
+            .replace(CLEAN_TITLE_REGEX, " ")
+            .replace(Regex("""\s+"""), " ")
+            .trim()
+            .ifBlank { rawTitle }
+
+        val poster = doc.selectFirst("div.anime-thumbnail, div.anime-poster")?.extractPosterUrl()
+            ?: fixUrlNull(doc.selectFirst("meta[property=og:image]")?.attr("content"))
+
+        val description = doc.selectFirst("p.anime-story, div.anime-story")?.text()?.trim()
+            ?.takeIf { it.isNotBlank() }
+
+        val genres = doc.select("ul.anime-genres li a, div.anime-genres a")
+            .mapNotNull { it.text().trim().takeIf { g -> g.isNotEmpty() } }
+            .distinct()
+
+        var year: Int? = null
+        var status: ShowStatus? = null
+        var isDub = title.contains("مدبلج") || rawTitle.contains("مدبلج")
+        var tvType = TvType.Anime
+        var duration: Int? = null
+        var expectedEpisodeCount: Int? = null
+
+        doc.select("div.anime-info, ul.anime-info li, div.anime-details-info div").forEach { infoEl ->
+            val txt = normalizeDigits(infoEl.text().trim())
+            when {
+                txt.contains("بداية العرض") || txt.contains("سنة العرض") -> {
+                    year = YEAR_REGEX.find(txt)?.groupValues?.get(1)?.toIntOrNull() ?: year
+                }
+                txt.contains("حالة الأنمي") -> {
+                    status = when {
+                        txt.contains("يعرض الان") || txt.contains("مستمر") -> ShowStatus.Ongoing
+                        txt.contains("مكتمل") || txt.contains("منتهي") -> ShowStatus.Completed
+                        else -> status
+                    }
+                }
+                txt.contains("نوع الأنمي") -> {
+                    tvType = parseCardType(txt, rawTitle)
+                }
+                txt.contains("قسم الأنمي") -> {
+                    if (txt.contains("مدبلج")) isDub = true
+                }
+                txt.contains("مدة الحلقة") -> {
+                    duration = Regex("""(\d+)""").find(txt)?.groupValues?.get(1)?.toIntOrNull() ?: duration
+                }
+                txt.contains("عدد الحلقات") -> {
+                    expectedEpisodeCount = Regex("""(\d+)""").find(txt)?.groupValues?.get(1)?.toIntOrNull() ?: expectedEpisodeCount
+                }
+            }
+        }
+
+        val malId = doc.selectFirst("a.anime-mal[href*='myanimelist.net/anime/'], a[href*='myanimelist.net/anime/']")
+            ?.attr("href")
+            ?.let { Regex("""myanimelist\.net/anime/(\d+)""").find(it)?.groupValues?.get(1)?.toIntOrNull() }
+
+        val trailerUrl = doc.selectFirst("a.anime-trailer[href], a[href*='youtube.com/watch'], a[href*='youtu.be/']")
+            ?.attr("href")
+            ?.takeIf { it.contains("youtu") }
+
+        val recommendations = doc.select("div#related-anime div.anime-card-container")
+            .mapNotNull { it.toSearchResponse() }
+            .distinctBy { it.url }
+
+        // =====================================================================
+        // Multi-Layer Episode Extraction (fixes "Coming Soon" across all titles)
+        // =====================================================================
+        val episodeMap = LinkedHashMap<String, Episode>()
+
+        fun addEpisodeCandidate(epHrefRaw: String?, rawLabel: String?, thumbUrl: String? = null) {
+            val epUrl = fixUrlNull(epHrefRaw) ?: return
+            if (!epUrl.contains("/episode/")) return
+            val key = canonicalEpisodeKey(epUrl)
+            if (episodeMap.containsKey(key)) return
+
+            val label = rawLabel?.trim().orEmpty()
+            val epNum = extractEpisodeNumber(label, epUrl)
+            val cleanName = when {
+                label.isNotBlank() && (label.contains("الحلقة") || label.contains("الفلم") || label.contains("الفيلم") || label.contains("الخاصة") || label.contains("اوفا")) -> {
+                    if (epNum != null && !normalizeDigits(label).contains(epNum.toString())) "$label $epNum" else label
+                }
+                tvType == TvType.AnimeMovie && (epNum == null || epNum == 1) -> "الفيلم الكامل"
+                epNum != null -> "الحلقة $epNum"
+                label.isNotBlank() -> label
+                else -> "الحلقة 1"
+            }
+
+            episodeMap[key] = newEpisode(epUrl) {
+                this.name = cleanName
+                this.episode = epNum
+                if (!thumbUrl.isNullOrBlank()) this.posterUrl = thumbUrl
+            }
+        }
+
+        fun collectCardsFromAnimeDoc(pageDoc: Document) {
+            // Restrict strictly to #episodesList (never #related-anime)
+            val epCards = pageDoc.select("div#episodesList div.anime-card-container").ifEmpty {
+                pageDoc.select("div.episodes-list-content div.anime-card-container, div.episodes-card-container")
+                    .filterNot { it.parents().any { p -> p.id() == "related-anime" } }
+            }
+
+            for (card in epCards) {
+                val epAnchor = card.selectFirst(
+                    "div.ep_num a[href*='/episode/'], a.overlay[href*='/episode/'], div.episodes-card-title h3 a[href*='/episode/'], a[href*='/episode/']"
+                ) ?: continue
+                val label = card.selectFirst("div.ep_num a, div.episodes-card-title h3 a")?.text()?.trim()
+                    ?: epAnchor.attr("title").ifBlank { epAnchor.text() }
+                val cardThumb = card.extractPosterUrl()
+                addEpisodeCandidate(epAnchor.attr("href"), label, cardThumb)
+            }
+
+            // Legacy direct links inside #episodesList or ul#ULEpisodesList if rendered inline
+            pageDoc.select("ul#ULEpisodesList li a[href*='/episode/'], div#episodesList a[href*='/episode/']").forEach { a ->
+                val txt = a.text().trim().ifBlank { a.attr("title").trim() }
+                addEpisodeCandidate(a.attr("href"), txt)
+            }
+        }
+
+        // Layer 1: Collect page-1 episodes directly from the anime info document
+        collectCardsFromAnimeDoc(doc)
+
+        val hasLoadMore = doc.selectFirst("a.episodes-load-more, nav.episodes-pagination-holder a.page-numbers") != null
+        val maxPage = doc.select("nav.episodes-pagination-holder a.page-numbers, ul.page-numbers a.page-numbers")
+            .mapNotNull { normalizeDigits(it.text().trim()).toIntOrNull() }
+            .maxOrNull() ?: if (hasLoadMore) 2 else 1
+
+        val needsMoreEpisodes = episodeMap.isEmpty() ||
+            hasLoadMore ||
+            maxPage > 1 ||
+            (expectedEpisodeCount != null && expectedEpisodeCount!! > episodeMap.size)
+
+        val firstEpUrl = doc.selectFirst("a.anime-first-ep[href*='/episode/']")?.attr("href")?.let { fixUrlNull(it) }
+            ?: episodeMap.values.firstOrNull()?.data
+            ?: (if (url.contains("/episode/")) url else null)
+
+        // Layer 2: Single-request full episode list via `ul#ULEpisodesList` on the episode page
+        // (Fetches all 500 Naruto Shippuuden episodes or 1180+ One Piece episodes in 1 HTTP call!)
+        if (needsMoreEpisodes && !firstEpUrl.isNullOrBlank()) {
+            val epDoc = if (initialEpisodeDoc != null && canonicalEpisodeKey(url) == canonicalEpisodeKey(firstEpUrl)) {
+                initialEpisodeDoc
+            } else {
+                Anime4UpNetwork.fetchDocument(firstEpUrl, referer = targetUrl)
+            }
+
+            if (epDoc != null) {
+                val fullListLinks = epDoc.select(
+                    "ul#ULEpisodesList li a[href*='/episode/'], " +
+                        "ul.all-episodes-list li a[href*='/episode/'], " +
+                        "div.episodes-list-wrapper ul li a[href*='/episode/']"
+                )
+                for (a in fullListLinks) {
+                    val label = a.text().trim().ifBlank { a.attr("title").trim() }
+                    addEpisodeCandidate(a.attr("href"), label)
+                }
+            }
+        }
+
+        // Layer 3: Paginated `/page/2..N/` fallback if `ul#ULEpisodesList` wasn't populated
+        val stillIncomplete = maxPage > 1 && (
+            episodeMap.size <= 48 ||
+                (expectedEpisodeCount != null && episodeMap.size < expectedEpisodeCount!!)
+            )
+        if (stillIncomplete) {
+            val baseAnimeUrl = targetUrl.substringBefore("/page/").trimEnd('/')
+            val safeMaxPage = maxPage.coerceAtMost(40)
+            val sem = Semaphore(4)
+            val pageDocs = coroutineScope {
+                (2..safeMaxPage).map { p ->
+                    async {
+                        sem.withPermit {
+                            Anime4UpNetwork.fetchDocument("$baseAnimeUrl/page/$p/", referer = targetUrl)
+                        }
+                    }
+                }.awaitAll()
+            }
+            pageDocs.filterNotNull().forEach { collectCardsFromAnimeDoc(it) }
+        }
+
+        // Layer 4: Final single-episode / movie fallback so valid titles never show "Coming Soon"
+        if (episodeMap.isEmpty() && !firstEpUrl.isNullOrBlank()) {
+            addEpisodeCandidate(
+                firstEpUrl,
+                if (tvType == TvType.AnimeMovie) "الفيلم الكامل" else "الحلقة 1",
+                poster
             )
         }
 
-        val sortedEpisodes = episodes.distinctBy { it.data }.sortedBy { it.episode ?: 9999 }
+        val sortedEpisodes = episodeMap.values
+            .mapIndexed { idx, ep -> idx to ep }
+            .sortedWith(
+                compareBy<Pair<Int, Episode>> { it.second.episode ?: Int.MAX_VALUE }
+                    .thenBy { it.first }
+            )
+            .mapIndexed { sortedIdx, (_, ep) ->
+                if (ep.episode == null && episodeMap.size == 1) {
+                    ep.apply { this.episode = 1 }
+                } else if (ep.episode == null) {
+                    ep.apply { this.episode = sortedIdx + 1 }
+                } else {
+                    ep
+                }
+            }
 
-        return newAnimeLoadResponse(title, cleanUrl, type) {
+        return newAnimeLoadResponse(title, targetUrl, tvType) {
             this.posterUrl = poster
             this.plot = description
             this.year = year
+            this.duration = duration
             this.tags = genres
             this.showStatus = status
+            if (recommendations.isNotEmpty()) {
+                this.recommendations = recommendations
+            }
             addMalId(malId)
-            addEpisodes(if (title.contains("مدبلج")) DubStatus.Dubbed else DubStatus.Subbed, sortedEpisodes)
+            if (!trailerUrl.isNullOrBlank()) {
+                addTrailer(trailerUrl)
+            }
+            addEpisodes(if (isDub) DubStatus.Dubbed else DubStatus.Subbed, sortedEpisodes)
         }
     }
 
-    data class WatchSources(
-        @JsonProperty("fhd") var fhd: Map<String, String>? = null,
-        @JsonProperty("hd") var hd: Map<String, String>? = null,
-        @JsonProperty("sd") var sd: Map<String, String>? = null
+    // =========================================================================
+    // Load Watch & Download Video Links
+    // =========================================================================
+
+    private data class CandidateServer(
+        val url: String,
+        val serverName: String?,
+        val qualityHint: String?,
+        val priority: Int
     )
 
     override suspend fun loadLinks(
@@ -302,153 +537,123 @@ class Anime4Up(private val context: Context) : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val episodeUrl = fixUrl(data.trim())
-        val doc = fetchDocument(episodeUrl) ?: return false
+        val doc = Anime4UpNetwork.fetchDocument(data, referer = "$mainUrl/") ?: return false
 
-        var foundLinks = false
+        val candidateMap = LinkedHashMap<String, CandidateServer>()
 
-        // ==========================================
-        // 1. WATCH SERVERS: Base64 JSON in input[name="wl"]
-        // ==========================================
-        val wlVal = doc.selectFirst("input[name='wl']")?.attr("value")
-        val decodedWl = decodeBase64Safe(wlVal)
-        if (decodedWl.isNotBlank()) {
-            try {
-                val watchObj = parseJson<WatchSources>(decodedWl)
-                val allServers = listOfNotNull(
-                    watchObj.fhd?.values,
-                    watchObj.hd?.values,
-                    watchObj.sd?.values
-                ).flatten().distinct()
-
-                for (rawServerUrl in allServers) {
-                    val resolvedUrl = fixUrl(rawServerUrl.trim())
-                    if (loadExtractor(resolvedUrl, episodeUrl, subtitleCallback, callback)) {
-                        foundLinks = true
-                    }
-                }
-            } catch (_: Exception) {
-                // Ignore json parsing issues
+        fun registerCandidate(rawUrl: String?, serverName: String? = null, qualityHint: String? = null, priority: Int = 5) {
+            val cleaned = rawUrl?.trim()?.takeIf { it.isNotBlank() && !it.startsWith("javascript:") && !it.startsWith("#") } ?: return
+            val fullUrl = when {
+                cleaned.startsWith("//") -> "https:$cleaned"
+                cleaned.startsWith("http") -> cleaned
+                else -> fixUrlNull(cleaned) ?: return
             }
-        }
-
-        // ==========================================
-        // 2. MOSHAHDA INTERNAL SERVER (input[name="moshahda"])
-        // ==========================================
-        val moshahdaId = decodeBase64Safe(doc.selectFirst("input[name='moshahda']")?.attr("value"))
-        if (moshahdaId.isNotBlank()) {
-            val qualitiesMap = listOf(
-                Pair(Qualities.P1080.value, "download_o"),
-                Pair(Qualities.P720.value, "download_x"),
-                Pair(Qualities.P480.value, "download_h"),
-                Pair(Qualities.P360.value, "download_n"),
-                Pair(Qualities.P240.value, "download_l")
-            )
-
-            for ((quality, code) in qualitiesMap) {
-                val streamDirectUrl = "https://moshahda.net/$moshahdaId.html?$code"
-                callback.invoke(
-                    newExtractorLink(
-                        source = "Moshahda",
-                        name = "Moshahda (سيرفر فور اب السريع)",
-                        url = streamDirectUrl,
-                        type = ExtractorLinkType.VIDEO
-                    ) {
-                        this.referer = "https://moshahda.net/"
-                        this.quality = quality
-                        this.headers = mapOf("User-Agent" to USER_AGENT, "Referer" to "https://moshahda.net/")
-                    }
-                )
-                foundLinks = true
-            }
-
-            if (loadExtractor("https://moshahda.net/embed-$moshahdaId.html", episodeUrl, subtitleCallback, callback)) {
-                foundLinks = true
-            }
-        }
-
-        // ==========================================
-        // 3. WATCH SERVERS: Server list tabs & iframes
-        // ==========================================
-        val watchServerElements = doc.select("ul#episode-servers li a, div.server-item a, div.watch-servers a, iframe[src]")
-        for (elem in watchServerElements) {
-            val rawUrl = elem.attr("data-ep-url").ifBlank { null }
-                ?: elem.attr("data-src").ifBlank { null }
-                ?: elem.attr("src").ifBlank { null }
-                ?: elem.attr("href").ifBlank { null }
-                ?: continue
-
-            val decodedUrl = if (!rawUrl.startsWith("http") && !rawUrl.startsWith("//")) {
-                decodeBase64Safe(rawUrl)
+            val key = Anime4UpExtractorSuite.canonicalDedupKey(fullUrl)
+            val existing = candidateMap[key]
+            if (existing == null) {
+                candidateMap[key] = CandidateServer(fullUrl, serverName?.trim(), qualityHint?.trim(), priority)
             } else {
-                rawUrl
-            }
-
-            if (decodedUrl.isNotBlank()) {
-                val targetUrl = fixUrl(decodedUrl)
-                if (loadExtractor(targetUrl, episodeUrl, subtitleCallback, callback)) {
-                    foundLinks = true
+                // Keep richer quality/server metadata if the download table provides explicit resolution (e.g. FHD - 1080p)
+                val mergedQuality = when {
+                    !existing.qualityHint.isNullOrBlank() && !existing.qualityHint.contains("متعدد") -> existing.qualityHint
+                    !qualityHint.isNullOrBlank() -> qualityHint.trim()
+                    else -> existing.qualityHint
                 }
-            }
-        }
-
-        // ==========================================
-        // 4. DOWNLOAD LINKS (سيرفرات التحميل بجميع الجودات)
-        // ==========================================
-        val downloadContainers = doc.select("div.download-links, ul.download-links, div.episodes-download-container, div.downloads, table.download-table")
-        for (container in downloadContainers) {
-            val downloadAnchors = container.select("a[href]")
-            for (anchor in downloadAnchors) {
-                val dlUrl = anchor.attr("href").trim()
-                if (dlUrl.isBlank() || dlUrl.startsWith("#") || dlUrl.startsWith("javascript")) continue
-
-                val dlText = anchor.text().trim()
-                val parentText = anchor.parents().select(".quality, .badge, h4, h5, th").firstOrNull()?.text() ?: ""
-                val fullLabel = "$parentText $dlText".trim()
-
-                val quality = when {
-                    fullLabel.contains("1080") || fullLabel.contains("FHD", ignoreCase = true) -> Qualities.P1080.value
-                    fullLabel.contains("720") || fullLabel.contains("HD", ignoreCase = true) -> Qualities.P720.value
-                    fullLabel.contains("480") || fullLabel.contains("SD", ignoreCase = true) -> Qualities.P480.value
-                    fullLabel.contains("360") -> Qualities.P360.value
-                    fullLabel.contains("240") -> Qualities.P240.value
-                    else -> Qualities.Unknown.value
-                }
-
-                val serverName = when {
-                    dlUrl.contains("mega.nz") -> "Mega"
-                    dlUrl.contains("mediafire.com") -> "MediaFire"
-                    dlUrl.contains("drive.google.com") -> "Google Drive"
-                    dlUrl.contains("4shared.com") -> "4Shared"
-                    dlUrl.contains("gofile.io") -> "GoFile"
-                    dlUrl.contains("send.cm") -> "Sendcm"
-                    dlUrl.contains("uqload") -> "Uqload"
-                    dlUrl.contains("mp4upload") -> "Mp4Upload"
-                    dlUrl.contains("moshahda") -> "Moshahda Download"
-                    else -> anchor.text().ifBlank { "سيرفر تحميل" }
-                }
-
-                // Try to load via official extractor
-                if (loadExtractor(dlUrl, episodeUrl, subtitleCallback, callback)) {
-                    foundLinks = true
-                } else if (dlUrl.endsWith(".mp4", ignoreCase = true) || dlUrl.contains("mediafire.com") || dlUrl.contains("drive.google.com") || dlUrl.contains("moshahda")) {
-                    callback.invoke(
-                        newExtractorLink(
-                            source = serverName,
-                            name = "[تحميل] $serverName ($fullLabel)",
-                            url = dlUrl,
-                            type = ExtractorLinkType.VIDEO
-                        ) {
-                            this.referer = episodeUrl
-                            this.quality = quality
-                            this.headers = mapOf("User-Agent" to USER_AGENT, "Referer" to episodeUrl)
-                        }
-                    )
-                    foundLinks = true
-                }
+                val mergedServer = existing.serverName?.takeIf { it.isNotBlank() } ?: serverName?.trim()
+                candidateMap[key] = existing.copy(
+                    qualityHint = mergedQuality,
+                    serverName = mergedServer,
+                    priority = minOf(existing.priority, priority)
+                )
             }
         }
 
-        return foundLinks
+        // 1. Watch Servers (`ul#episode-servers li[data-watch]`)
+        doc.select("ul#episode-servers li[data-watch], ul#watch-servers li[data-watch], li[data-watch]").forEach { li ->
+            val watchUrl = li.attr("data-watch")
+            val sName = li.selectFirst("span.watch-server-name, span.server")?.text() ?: li.text()
+            val qHint = li.selectFirst("span.quality")?.text()
+            val prio = if (watchUrl.contains("megamax") || watchUrl.contains("share4max") || watchUrl.contains("vkvideo")) 1 else 2
+            registerCandidate(watchUrl, sName, qHint, prio)
+        }
+
+        // 2. Active / noscript iframe embeds
+        doc.select("div#episode-watch-content iframe[src], noscript iframe[src], div.player-iframe iframe[src]").forEach { iframe ->
+            registerCandidate(iframe.attr("src"), priority = 3)
+        }
+        Regex("""<iframe[^>]+src=["'](https?://[^"']+)["']""", RegexOption.IGNORE_CASE)
+            .findAll(doc.select("noscript").html())
+            .forEach { m -> registerCandidate(m.groupValues[1], priority = 3) }
+
+        // 3. Legacy Base64 `input[name=wl]` & `input[name=moshahda]`
+        doc.selectFirst("input[name='wl']")?.attr("value")?.takeIf { it.isNotBlank() }?.let { wlVal ->
+            runCatching {
+                val decoded = String(Base64.decode(wlVal, Base64.DEFAULT), Charsets.UTF_8)
+                val json = JSONObject(decoded)
+                json.keys().forEach { k ->
+                    json.optJSONObject(k)?.keys()?.forEach { serverKey ->
+                        registerCandidate(json.optJSONObject(k)?.optString(serverKey), serverKey, k, priority = 3)
+                    }
+                }
+            }
+        }
+        doc.selectFirst("input[name='moshahda']")?.attr("value")?.takeIf { it.isNotBlank() }?.let { mVal ->
+            val code = runCatching { String(Base64.decode(mVal, Base64.DEFAULT), Charsets.UTF_8).trim() }.getOrDefault(mVal.trim())
+            if (code.isNotBlank()) {
+                val mUrl = if (code.startsWith("http")) code else "https://moshahda.net/embed-$code.html"
+                registerCandidate(mUrl, "Moshahda", null, priority = 4)
+            }
+        }
+        doc.select("a[data-ep-url]").forEach { a ->
+            registerCandidate(a.attr("data-ep-url"), a.text(), null, priority = 3)
+        }
+
+        // 4. Download Table (`div#download` / `div.episode-download-container`) — all qualities (FHD 1080p / HD 720p / SD 480p)
+        doc.select(
+            "div#download table tbody tr, " +
+                "div.episode-download-container table tbody tr, " +
+                "div.download-list table tbody tr"
+        ).forEach { row ->
+            val href = row.selectFirst("td.td-link a[href], a[href]")?.attr("href") ?: return@forEach
+            val sName = row.selectFirst("span.server-name, td.td-server")?.text()
+            val qHint = row.selectFirst("td.td-quality, span.quality")?.text()
+            val prio = if (href.contains("mediafire.com") || href.contains("megamax.me") || href.contains("share4max.com")) 1 else 3
+            registerCandidate(href, sName, qHint, prio)
+        }
+
+        // Legacy download anchors outside table
+        doc.select("div.download-links a[href], a.btn-download[href]").forEach { a ->
+            registerCandidate(a.attr("href"), a.text(), null, priority = 4)
+        }
+
+        if (candidateMap.isEmpty()) return false
+
+        val orderedCandidates = candidateMap.values.sortedBy { it.priority }
+        val emittedUrls = ConcurrentHashMap.newKeySet<String>()
+        val dedupCallback: (ExtractorLink) -> Unit = { link ->
+            if (emittedUrls.add(link.url)) {
+                callback(link)
+            }
+        }
+
+        val sem = Semaphore(6)
+        coroutineScope {
+            orderedCandidates.map { item ->
+                async {
+                    sem.withPermit {
+                        Anime4UpExtractorSuite.resolve(
+                            rawUrl = item.url,
+                            referer = data,
+                            qualityHint = item.qualityHint,
+                            serverHint = item.serverName,
+                            subtitleCallback = subtitleCallback,
+                            callback = dedupCallback
+                        )
+                    }
+                }
+            }.awaitAll()
+        }
+
+        return emittedUrls.isNotEmpty()
     }
 }
