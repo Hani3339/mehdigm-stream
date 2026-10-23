@@ -1,5 +1,6 @@
 package com.cartoonanime
 
+import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -9,18 +10,26 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLDecoder
 import java.net.URLEncoder
+import java.security.SecureRandom
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
 
 /**
  * CartoonAnime provider for CloudStream.
  *
- * مبني على فحص تطبيق "مسلسلات كرتون وانمي" (com.anime.rashon.speed.loyert).
- * الـ API:
- *   - المفتاح العام: https://base-v3.apps-anime.com/ => {"base_url": "..."}
- *   - التوثيق: HTTP Basic (Authorization: Basic ...) على كل طلبات الـ API.
- *   - الرئيسية/البحث: files under cartoon_with_info (تُرجع قائمة أفلام/مسلسلات)
- *   - التفاصيل: playlist/read.php => قائمة المواسم، ثم episode/readPaging.php
- *   - الحلقات: كل حلقة تحتوي حقول video, video1..video5, video_url
- *   - السيرفرات: workers.dev لحل الروابط (test-stream / link / cdnlink)
+ * مبني على فحص تطبيق "مسلسلات كرتون وانمي" (com.anime.rashon.speed.loyert) V25.
+ *
+ * ما تغيّر في نسخة 25:
+ *   - الـ API انتقل إلى https://base-v4.apps-anime.com/
+ *   - كل طلب يحتاج توقيع HMAC (X-AUTH-TS / X-AUTH-NON / X-AUTH-SIG)
+ *     + X-App-Version: 25
+ *   - كل طلب يحتاج جلسة: Authorization: Basic base64("s1:" + session)
+ *   - الجلسة تُؤخذ من session/challenge ثم session/attest
+ *   - التطبيق الأصلي يستخدم Android Key Attestation، لكن السيرفر يقبل
+ *     أيضاً مسار "unsupported" (chain فارغة + unsupported) ويصدر جلسة.
+ *     هذا هو الـ bypass المستخدم هنا حتى تعمل الإضافة بدون جهاز حقيقي.
+ *   - البحث الموحّد: cartoon_with_info/searchCartoonUnified.php
+ *   - معلومات العمل/المواسم/الحلقات ترسل form-encoded وليس JSON.
  */
 class CartoonAnime : MainAPI() {
     override var lang = "ar"
@@ -39,60 +48,237 @@ class CartoonAnime : MainAPI() {
         "Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 " +
         "(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
 
-    // Basic base64("rabee3yamen:d^AFi%Mu9Th5Wc7uLwh1nEMG8fp2*CW@")
-    private val auth = "Basic cmFiZWUzeWFtZW46ZF5BRmklTXU5VGg1V2M3dUx3aDFuRU1HOGZwMipDV0A="
+    private val apiBase = "https://base-v4.apps-anime.com/"
 
-    private val baseV3 = "https://base-v3.apps-anime.com/"
-    private val fallbackApi = "https://anime-cartoon.developer-pro.workers.dev/API/"
+    // القيم المستخرجة من APK (defpackage/r92.java و defpackage/ab.java)
+    private val hmacSecret = "Eb6bi_DNiNd70i1qiJJ1bZSQHtFBYtqZxEijjJd2FzikYrpUplEu9n9vQyfhB9VN"
+    private val appVersion = "25"
 
-    private val headers = mapOf(
-        "Authorization" to auth,
-        "User-Agent" to ua,
-        "Accept" to "application/json, text/plain, */*",
-        "Accept-Language" to "ar,en;q=0.9"
-    )
+    private val rng = SecureRandom()
 
-    @Volatile private var cachedApi: String? = null
+    @Volatile private var sessionToken: String? = null
+    @Volatile private var sessionExpiresAt: Long = 0L
+    @Volatile private var sessionIid: String? = null
 
     // ---------------------------------------------------------------
-    // Network / JSON helpers
+    // HMAC / session
     // ---------------------------------------------------------------
 
-    private suspend fun api(): String {
-        cachedApi?.let { return it }
-        val base = try {
-            val txt = app.get(baseV3, headers = headers, timeout = 30).text
-            JSONObject(txt).optString("base_url").trim().ifBlank { fallbackApi }
-        } catch (_: Exception) {
-            fallbackApi
+    private fun hex(bytes: ByteArray): String {
+        val digits = "0123456789abcdef"
+        val sb = StringBuilder(bytes.size * 2)
+        for (b in bytes) {
+            val v = b.toInt() and 0xff
+            sb.append(digits[v ushr 4]).append(digits[v and 0x0f])
         }
-        val fixed = if (base.endsWith("/")) base else "$base/"
-        cachedApi = fixed
-        return fixed
+        return sb.toString()
+    }
+
+    private fun randomHex(bytes: Int): String {
+        val b = ByteArray(bytes)
+        rng.nextBytes(b)
+        return hex(b)
+    }
+
+    private fun hmacSha256(input: String): String {
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(SecretKeySpec(hmacSecret.toByteArray(Charsets.UTF_8), "HmacSHA256"))
+        return hex(mac.doFinal(input.toByteArray(Charsets.UTF_8)))
+    }
+
+    private fun b64(input: String): String =
+        Base64.encodeToString(input.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+
+    /**
+     * نفس ترويسات التطبيق: ختم زمني بالثواني + nonce 16 hex + توقيع HMAC.
+     * ملاحظة مهمة: السيرفر يرفض الميلي ثانية، لذلك نستخدم الثواني.
+     */
+    private fun authHeaders(token: String?): Map<String, String> {
+        val ts = (System.currentTimeMillis() / 1000L).toString()
+        val nonce = randomHex(8)
+        val headers = mutableMapOf(
+            "X-AUTH-TS" to ts,
+            "X-AUTH-NON" to nonce,
+            "X-AUTH-SIG" to hmacSha256("$ts:$nonce"),
+            "X-App-Version" to appVersion,
+            "User-Agent" to ua,
+            "Accept" to "application/json, text/plain, */*",
+            "Accept-Language" to "ar,en;q=0.9"
+        )
+        if (!token.isNullOrBlank()) {
+            headers["Authorization"] = "Basic " + b64("s1:$token")
+        }
+        return headers
+    }
+
+    private suspend fun postJsonRaw(path: String, body: Any, token: String?): String {
+        var last: Exception? = null
+        repeat(3) {
+            try {
+                val resp = app.post(
+                    apiBase + path,
+                    json = body,
+                    headers = authHeaders(token),
+                    timeout = 45
+                )
+                if (resp.code in 200..299) return resp.text
+                last = IllegalStateException("HTTP ${resp.code}: ${resp.text.take(240)}")
+            } catch (e: Exception) {
+                last = e
+            }
+        }
+        throw last ?: IllegalStateException("request failed: $path")
+    }
+
+    private suspend fun ensureSession(force: Boolean = false): String {
+        val now = System.currentTimeMillis() / 1000L
+        val cached = sessionToken
+        if (!force && !cached.isNullOrBlank() && sessionExpiresAt > now + 120L) {
+            return cached
+        }
+
+        val iid = sessionIid ?: randomHex(16).also { sessionIid = it }
+
+        val challengeJson = postJsonRaw(
+            "session/challenge",
+            mapOf("iid" to iid),
+            null
+        )
+        val challenge = JSONObject(challengeJson).optString("challenge")
+        if (challenge.isBlank()) {
+            throw IllegalStateException("session/challenge returned no challenge")
+        }
+
+        // هذا هو الـ bypass: السيرفر يقبل chain فارغة إذا أرسلنا unsupported
+        // فيعيد trust=unsupported وجلسة صالحة.
+        val attestBody = mapOf<String, Any>(
+            "iid" to iid,
+            "challenge" to challenge,
+            "chain" to emptyList<String>(),
+            "unsupported" to "IllegalStateException"
+        )
+        val attestJson = postJsonRaw("session/attest", attestBody, null)
+        val obj = JSONObject(attestJson)
+        val token = obj.optString("session")
+        if (token.isBlank()) {
+            throw IllegalStateException("session/attest failed: ${attestJson.take(240)}")
+        }
+        sessionToken = token
+        sessionExpiresAt = obj.optLong("exp", now + 3600L)
+        return token
+    }
+
+    // ---------------------------------------------------------------
+    // Network helpers
+    // ---------------------------------------------------------------
+
+    private suspend fun getOnce(url: String, token: String): Pair<Int, String> {
+        var last: Exception? = null
+        repeat(3) {
+            try {
+                val resp = app.get(url, headers = authHeaders(token), timeout = 45)
+                return resp.code to resp.text
+            } catch (e: Exception) {
+                last = e
+            }
+        }
+        throw last ?: IllegalStateException("GET failed: $url")
+    }
+
+    private suspend fun postFormOnce(
+        path: String,
+        data: Map<String, String>,
+        token: String
+    ): Pair<Int, String> {
+        var last: Exception? = null
+        repeat(3) {
+            try {
+                val resp = app.post(
+                    apiBase + path,
+                    data = data,
+                    headers = authHeaders(token),
+                    timeout = 45
+                )
+                return resp.code to resp.text
+            } catch (e: Exception) {
+                last = e
+            }
+        }
+        throw last ?: IllegalStateException("POST failed: $path")
+    }
+
+    private suspend fun getText(path: String): String {
+        var token = ensureSession()
+        var (code, text) = getOnce(apiBase + path, token)
+        if (code == 401) {
+            sessionToken = null
+            token = ensureSession(force = true)
+            val retry = getOnce(apiBase + path, token)
+            code = retry.first
+            text = retry.second
+        }
+        if (code !in 200..299) throw IllegalStateException("HTTP $code: ${text.take(240)}")
+        return text
+    }
+
+    private suspend fun postForm(path: String, data: Map<String, String>): String {
+        var token = ensureSession()
+        var (code, text) = postFormOnce(path, data, token)
+        if (code == 401) {
+            sessionToken = null
+            token = ensureSession(force = true)
+            val retry = postFormOnce(path, data, token)
+            code = retry.first
+            text = retry.second
+        }
+        if (code !in 200..299) throw IllegalStateException("HTTP $code: ${text.take(240)}")
+        return text
     }
 
     private suspend fun getArray(path: String): JSONArray =
         try {
-            JSONArray(app.get(api() + path, headers = headers, timeout = 30).text)
+            parseArray(getText(path))
         } catch (_: Exception) {
             JSONArray()
         }
 
     private suspend fun postArray(path: String, data: Map<String, String>): JSONArray =
         try {
-            JSONArray(
-                app.post(api() + path, data = data, headers = headers, timeout = 30).text
-            )
+            parseArray(postForm(path, data))
         } catch (_: Exception) {
             JSONArray()
         }
 
     private suspend fun postObject(path: String, data: Map<String, String>): JSONObject? =
         try {
-            JSONObject(app.post(api() + path, data = data, headers = headers, timeout = 30).text)
+            JSONObject(postForm(path, data))
         } catch (_: Exception) {
             null
         }
+
+    private fun parseArray(text: String): JSONArray {
+        val t = text.trim()
+        if (t.isEmpty()) return JSONArray()
+        if (t.startsWith("[")) {
+            return try {
+                JSONArray(t)
+            } catch (_: Exception) {
+                JSONArray()
+            }
+        }
+        if (t.startsWith("{")) {
+            return try {
+                val obj = JSONObject(t)
+                obj.optJSONArray("data")
+                    ?: obj.optJSONArray("result")
+                    ?: obj.optJSONArray("items")
+                    ?: JSONArray()
+            } catch (_: Exception) {
+                JSONArray()
+            }
+        }
+        return JSONArray()
+    }
 
     private fun JSONObject.str(key: String): String =
         optString(key, "").trim().let { if (it == "null") "" else it }
@@ -124,7 +310,7 @@ class CartoonAnime : MainAPI() {
     )
 
     override val mainPage: List<MainPageData> =
-        rows.map { MainPageData(it.title, it.path, it.paged) }
+        rows.map { MainPageData(it.title, it.path, false) }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val row = rows.firstOrNull { it.title == request.name }
@@ -143,17 +329,35 @@ class CartoonAnime : MainAPI() {
     private fun toSearch(obj: JSONObject?): SearchResponse? {
         if (obj == null) return null
         val cartoon = obj.optJSONObject("cartoon") ?: obj
-        val id = cartoon.str("id").ifBlank { obj.str("cartoon_id") }.ifBlank { obj.str("id") }
+
+        // EpisodeDate يستخدم cartoon_id (ورقم الصف في id) لذلك نقدّم cartoon_id
+        // على id عندما لا يكون هناك كائن cartoon متداخل.
+        val nestedId = obj.optJSONObject("cartoon")?.str("id").orEmpty()
+        val id = nestedId
+            .ifBlank { obj.str("cartoon_id") }
+            .ifBlank { obj.str("id") }
         if (id.isBlank() || id == "0") return null
-        val title = cartoon.str("title").ifBlank { obj.str("name") }
+
+        // EpisodeDate لديه title و name، نفضّل title (اسم العمل)
+        val title = cartoon.str("title")
+            .ifBlank { obj.str("title") }
+            .ifBlank { obj.str("name") }
         if (title.isBlank()) return null
+
         val thumb = cartoon.str("thumb").ifBlank { obj.str("thumb") }
         val type = cartoon.intOf("type", obj.intOf("type", 1))
         val cls = cartoon.intOf("classification", obj.intOf("classification", 0))
         val tvType = if (type == 2) TvType.Movie else TvType.Anime
         val url = buildUrl(id, title, thumb, type, cls)
-        return newMovieSearchResponse(title, url, tvType) {
-            this.posterUrl = thumb.ifBlank { null }
+
+        return if (tvType == TvType.Movie) {
+            newMovieSearchResponse(title, url, tvType) {
+                this.posterUrl = thumb.ifBlank { null }
+            }
+        } else {
+            newTvSeriesSearchResponse(title, url, tvType) {
+                this.posterUrl = thumb.ifBlank { null }
+            }
         }
     }
 
@@ -163,12 +367,32 @@ class CartoonAnime : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         val out = LinkedHashMap<String, SearchResponse>()
         val q = enc(query)
-        for (t in listOf(1, 2)) {
-            for (c in listOf(1, 2)) {
-                val arr = getArray("cartoon_with_info/searchCartoon.php?search=$q&type=$t&classification=$c")
+
+        val unified = try {
+            JSONObject(getText("cartoon_with_info/searchCartoonUnified.php?search=$q"))
+        } catch (_: Exception) {
+            null
+        }
+
+        if (unified != null) {
+            for (key in listOf("dubbed_series", "dubbed_films", "translated_series", "translated_films")) {
+                val arr = unified.optJSONArray(key) ?: continue
                 for (i in 0 until arr.length()) {
                     val r = toSearch(arr.optJSONObject(i)) ?: continue
                     out[r.url] = r
+                }
+            }
+        }
+
+        // احتياطي في حال تغيّر الـ endpoint الموحّد مستقبلاً
+        if (out.isEmpty()) {
+            for (t in listOf(1, 2)) {
+                for (c in listOf(1, 2)) {
+                    val arr = getArray("cartoon_with_info/searchCartoon.php?search=$q&type=$t&classification=$c")
+                    for (i in 0 until arr.length()) {
+                        val r = toSearch(arr.optJSONObject(i)) ?: continue
+                        out[r.url] = r
+                    }
                 }
             }
         }
@@ -203,24 +427,37 @@ class CartoonAnime : MainAPI() {
         val playlists = postArray("playlist/read.php", mapOf("cartoon_id" to id))
 
         val episodes = ArrayList<Episode>()
+        val seenEpisodes = HashSet<String>()
         for (p in 0 until playlists.length()) {
             val pl = playlists.optJSONObject(p) ?: continue
             val plId = pl.str("id")
             if (plId.isBlank()) continue
             val season = p + 1
             var page = 1
-            while (page <= 60) {
-                val arr = postArray("episode/readPaging.php?page=$page", mapOf("playlist_id" to plId))
+            while (page <= 200) {
+                val arr = postArray(
+                    "episode/readPaging.php?page=$page",
+                    mapOf("playlist_id" to plId)
+                )
                 if (arr.length() == 0) break
+
+                var added = 0
                 for (e in 0 until arr.length()) {
                     val ep = arr.optJSONObject(e) ?: continue
-                    episodes.add(makeEpisode(ep, season, poster))
+                    val built = makeEpisode(ep, season, poster)
+                    if (built.data.isNotBlank() && seenEpisodes.add(built.data)) {
+                        episodes.add(built)
+                        added++
+                    }
                 }
+                // بعض الـ endpoints تعيد آخر حلقة فقط في كل صفحة بعد النهاية
+                if (added == 0) break
                 page++
             }
         }
 
         val uniq = episodes.distinctBy { it.data }
+        val tvType = if (type == 2) TvType.Movie else TvType.Anime
 
         return if (type == 2) {
             val first = uniq.firstOrNull()
@@ -231,7 +468,7 @@ class CartoonAnime : MainAPI() {
                 this.tags = tags
             }
         } else {
-            newTvSeriesLoadResponse(title, url, TvType.TvSeries, uniq) {
+            newTvSeriesLoadResponse(title, url, tvType, uniq) {
                 this.posterUrl = poster
                 this.plot = plot
                 this.year = year
@@ -260,6 +497,76 @@ class CartoonAnime : MainAPI() {
     // Link resolution
     // ---------------------------------------------------------------
 
+    private fun workerHeaders(): Map<String, String> = mapOf(
+        "User-Agent" to ua,
+        "Accept" to "*/*",
+        "Accept-Language" to "ar,en;q=0.9"
+    )
+
+    private fun isVideoUrl(url: String): Boolean {
+        val u = url.lowercase()
+        return u.contains(".mp4") || u.contains(".m3u8") || u.contains(".mkv") ||
+            u.contains("okcdn.ru") || u.contains("vkuser.net") || u.contains("vk.com/video")
+    }
+
+    /**
+     * يستخرج الروابط من ردود الـ workers:
+     *  - {"availableQualities":[{"quality":"1080p","url":"..."}]}
+     *  - [{"url":"...","quality":"..."}]
+     *  - نص يحتوي رابطاً مباشراً
+     */
+    private fun parseWorkerPayload(text: String): List<Pair<String, String?>> {
+        val result = ArrayList<Pair<String, String?>>()
+        val t = text.trim()
+        if (t.isEmpty()) return result
+
+        if (t.startsWith("{")) {
+            try {
+                val obj = JSONObject(t)
+                val arr = obj.optJSONArray("availableQualities")
+                    ?: obj.optJSONArray("qualities")
+                    ?: obj.optJSONArray("data")
+                if (arr != null) {
+                    for (i in 0 until arr.length()) {
+                        val o = arr.optJSONObject(i) ?: continue
+                        val v = o.str("url").ifBlank { o.str("file") }.ifBlank { o.str("link") }
+                        if (v.isBlank() || !v.startsWith("http")) continue
+                        val q = o.str("quality").ifBlank { o.str("name") }.ifBlank { null }
+                        result.add(v to q)
+                    }
+                } else {
+                    val v = obj.str("url").ifBlank { obj.str("file") }.ifBlank { obj.str("link") }
+                    if (v.startsWith("http")) {
+                        val q = obj.str("quality").ifBlank { obj.str("name") }.ifBlank { null }
+                        result.add(v to q)
+                    }
+                }
+            } catch (_: Exception) {
+                // تجاهل
+            }
+            return result
+        }
+
+        if (t.startsWith("[")) {
+            try {
+                val arr = JSONArray(t)
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val v = o.str("url").ifBlank { o.str("file") }.ifBlank { o.str("link") }
+                    if (v.isBlank() || !v.startsWith("http")) continue
+                    val q = o.str("quality").ifBlank { o.str("name") }.ifBlank { null }
+                    result.add(v to q)
+                }
+            } catch (_: Exception) {
+                // تجاهل
+            }
+            return result
+        }
+
+        if (t.startsWith("http")) result.add(t to null)
+        return result
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -268,43 +575,65 @@ class CartoonAnime : MainAPI() {
     ): Boolean {
         var found = false
         val sources = data.split("\n").map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+
         for (link in sources) {
             try {
                 when {
-                    link.contains(".workers.dev/video?url=") -> {
-                        val txt = app.get(link, headers = headers, timeout = 40).text
-                        val arr = JSONObject(txt).optJSONArray("availableQualities")
-                        if (arr != null) {
-                            for (i in 0 until arr.length()) {
-                                val o = arr.optJSONObject(i) ?: continue
-                                val vurl = o.optString("url").trim()
-                                if (vurl.isBlank()) continue
-                                emit(link, vurl, o.optString("quality"), callback)
+                    // روابط Google Photos المباشرة غير قابلة للتشغيل،
+                    // لكن worker?string=https://photos.google.com/... مسموح.
+                    link.contains("photos.google.com") && !link.contains(".workers.dev") -> continue
+
+                    // روابط مباشرة (mp4/m3u8) لا نطلبها حتى لا نحمل الفيديو
+                    isVideoUrl(link) && !link.contains(".workers.dev") -> {
+                        emit(link, link, null, callback)
+                        found = true
+                    }
+
+                    // test-stream / multiplecdnqualities / أي worker يعيد JSON
+                    link.contains(".workers.dev/video?url=") ||
+                        link.contains("multiplecdnqualities") ||
+                        link.contains(".workers.dev/?string=") -> {
+                        val resp = app.get(link, headers = workerHeaders(), timeout = 45)
+                        val parsed = parseWorkerPayload(resp.text)
+                        if (parsed.isNotEmpty()) {
+                            for ((vurl, q) in parsed) {
+                                emit(link, vurl, q, callback)
+                                found = true
+                            }
+                        } else if (resp.url != link && isVideoUrl(resp.url)) {
+                            emit(link, resp.url, null, callback)
+                            found = true
+                        }
+                    }
+
+                    // link / cdnlink / linkcdn: غالباً 302 إلى mp4 مباشر
+                    link.contains(".workers.dev/") -> {
+                        val resp = app.get(link, headers = workerHeaders(), timeout = 45)
+                        val finalUrl = resp.url
+                        if (finalUrl.isNotBlank() && finalUrl != link) {
+                            try {
+                                emit(link, finalUrl, null, callback)
+                                found = true
+                            } finally {
+                                // لا نقرأ جسم الفيديو، فقط نغلق الاتصال
+                                try {
+                                    resp.okhttpResponse.close()
+                                } catch (_: Exception) {
+                                }
+                            }
+                        } else {
+                            val parsed = parseWorkerPayload(resp.text)
+                            for ((vurl, q) in parsed) {
+                                emit(link, vurl, q, callback)
                                 found = true
                             }
                         }
                     }
 
-                    link.contains(".workers.dev/") -> {
-                        val resp = app.get(link, headers = headers, timeout = 40)
-                        val finalUrl = resp.url
-                        if (finalUrl.isNotBlank() && finalUrl != link) {
-                            emit(link, finalUrl, null, callback)
-                            found = true
-                        }
-                    }
-
-                    link.contains("photos.google.com") -> {
-                        // غير قابل للتشغيل المباشر
-                    }
-
-                    else -> {
-                        if (link.contains(".mp4") || link.contains(".m3u8") ||
-                            link.contains("vkuser") || link.contains("okcdn")
-                        ) {
-                            emit(link, link, null, callback)
-                            found = true
-                        }
+                    // أي رابط فيديو آخر
+                    isVideoUrl(link) -> {
+                        emit(link, link, null, callback)
+                        found = true
                     }
                 }
             } catch (_: Exception) {
@@ -320,7 +649,13 @@ class CartoonAnime : MainAPI() {
         quality: String?,
         callback: (ExtractorLink) -> Unit
     ) {
-        val q = (quality ?: "").ifBlank { null }
+        val q = quality?.trim()?.takeIf { it.isNotBlank() }
+        val ref = when {
+            url.contains("okcdn.ru") || url.contains("vkuser.net") || referer.contains("ok.ru") ->
+                "https://ok.ru/"
+            referer.contains(".workers.dev/") -> referer
+            else -> ""
+        }
         callback(
             newExtractorLink(
                 source = this.name,
@@ -329,20 +664,27 @@ class CartoonAnime : MainAPI() {
                 type = ExtractorLinkType.VIDEO
             ) {
                 this.quality = parseQuality(q)
-                this.referer = referer
-                this.headers = mapOf("User-Agent" to ua)
+                this.referer = ref
+                this.headers = mapOf(
+                    "User-Agent" to ua,
+                    "Accept" to "*/*"
+                )
             }
         )
     }
 
-    private fun parseQuality(q: String?): Int = when (q?.lowercase()) {
-        "1080p" -> Qualities.P1080.value
-        "720p" -> Qualities.P720.value
-        "480p" -> Qualities.P480.value
-        "360p" -> Qualities.P360.value
-        "240p" -> Qualities.P240.value
-        "144p" -> Qualities.P144.value
-        else -> Qualities.Unknown.value
+    private fun parseQuality(q: String?): Int {
+        val n = Regex("\\d{3,4}").find(q ?: "")?.value?.toIntOrNull()
+            ?: return Qualities.Unknown.value
+        return when {
+            n >= 2160 -> Qualities.P2160.value
+            n >= 1080 -> Qualities.P1080.value
+            n >= 720 -> Qualities.P720.value
+            n >= 480 -> Qualities.P480.value
+            n >= 360 -> Qualities.P360.value
+            n >= 240 -> Qualities.P240.value
+            else -> Qualities.P144.value
+        }
     }
 
     // ---------------------------------------------------------------
@@ -350,10 +692,18 @@ class CartoonAnime : MainAPI() {
     // ---------------------------------------------------------------
 
     private fun enc(s: String): String =
-        try { URLEncoder.encode(s, "UTF-8") } catch (_: Exception) { s }
+        try {
+            URLEncoder.encode(s, "UTF-8")
+        } catch (_: Exception) {
+            s
+        }
 
     private fun dec(s: String): String =
-        try { URLDecoder.decode(s, "UTF-8") } catch (_: Exception) { s }
+        try {
+            URLDecoder.decode(s, "UTF-8")
+        } catch (_: Exception) {
+            s
+        }
 
     private fun param(query: String, key: String): String? {
         for (pair in query.split("&")) {

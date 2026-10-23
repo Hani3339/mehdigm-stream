@@ -90,7 +90,7 @@
         "iconUrl": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/cartoonanime.jpeg",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-        "fileSize": 23198,
+        "fileSize": 31093,
         "status": 1,
         "language": "ar",
         "authors": [
@@ -102,7 +102,7 @@
             "Movie",
             "Cartoon"
         ],
-        "version": 2,
+        "version": 3,
         "internalName": "CartoonAnime",
         "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/CartoonAnime.cs3",
         "name": "مسلسلات كرتون وأنمي (CartoonAnime)",
