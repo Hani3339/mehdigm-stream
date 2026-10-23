@@ -1,0 +1,44 @@
+{
+  "episode_url": "https://w1.anime4up.rest/episode/%d8%a7%d9%86%d9%85%d9%8a-tokyo-revengers-santen-sensou-hen-%d8%a7%d9%84%d8%ad%d9%84%d9%82%d8%a9-4-%d9%85%d8%aa%d8%b1%d8%ac%d9%85%d8%a9/",
+  "discovered_vnx_servers": [
+    {
+      "name": "anime4up1",
+      "watch_url": "https://4x.c1oiijc.shop/Anime4up-S1/mal/59088/4/sub/"
+    },
+    {
+      "name": "anime4up2",
+      "watch_url": "https://4x.c1oiijc.shop/Anime4up-S2/mal/59088/4/sub/"
+    }
+  ],
+  "extracted": {
+    "anime4up1": {
+      "canonical_url": "https://w1.anime4up.rest/Anime4up-S1/mal/59088/4/sub/",
+      "playlist_http": 200,
+      "has_separate_audio_tracks": true,
+      "variant_count": 4,
+      "variants_meta": [
+        "BANDWIDTH=900000,RESOLUTION=640x360,AUDIO=\"aud\"",
+        "BANDWIDTH=1500000,RESOLUTION=854x480,AUDIO=\"aud\"",
+        "BANDWIDTH=3000000,RESOLUTION=1280x720,AUDIO=\"aud\"",
+        "BANDWIDTH=5300000,RESOLUTION=1920x1080,AUDIO=\"aud\""
+      ],
+      "first_segment_http": 206,
+      "arabic_subtitle_verified": true,
+      "arabic_subtitle_bytes": 32835
+    },
+    "anime4up2": {
+      "canonical_url": "https://w1.anime4up.rest/Anime4up-S2/mal/59088/4/sub/",
+      "playlist_http": 200,
+      "has_separate_audio_tracks": false,
+      "variant_count": 3,
+      "variants_meta": [
+        "BANDWIDTH=5500000,RESOLUTION=1920x1080,NAME=\"1080p\"",
+        "BANDWIDTH=2800000,RESOLUTION=1280x720,NAME=\"720p\"",
+        "BANDWIDTH=800000,RESOLUTION=640x360,NAME=\"480p\""
+      ],
+      "first_segment_http": 206,
+      "arabic_subtitle_verified": true,
+      "arabic_subtitle_bytes": 32835
+    }
+  }
+}
