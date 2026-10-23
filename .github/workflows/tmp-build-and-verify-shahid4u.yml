@@ -106,11 +106,14 @@ jobs:
                       if el.get("data-token"):
                           trap_tokens.add(el["data-token"])
                       el.decompose()
-              for el in soup.select("template, [data-honeytoken], [data-trap], #download-primary-server, [hidden], [aria-hidden='true'], .d-none, .visually-hidden"):
-                  if el.get("data-token"):
-                      trap_tokens.add(el["data-token"])
-                  for sub in el.select("[data-token]"):
-                      trap_tokens.add(sub["data-token"])
+              for el in list(soup.select("template, [data-honeytoken], [data-trap], #download-primary-server, [hidden], [aria-hidden='true'], .d-none, .visually-hidden")):
+                  if getattr(el, "attrs", None) is None:
+                      continue
+                  if el.attrs.get("data-token"):
+                      trap_tokens.add(el.attrs["data-token"])
+                  for sub in list(el.select("[data-token]")):
+                      if getattr(sub, "attrs", None) and sub.attrs.get("data-token"):
+                          trap_tokens.add(sub.attrs["data-token"])
                   el.decompose()
               return soup, trap_tokens
 
