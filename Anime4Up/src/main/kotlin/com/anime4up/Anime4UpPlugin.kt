@@ -34,5 +34,12 @@ class Anime4UpPlugin : Plugin() {
         registerExtractorAPI(Anime4UpFourSharedExtractor())
         registerExtractorAPI(Anime4UpGoFileExtractor())
         registerExtractorAPI(Anime4UpMoshahdaExtractor())
+        registerExtractorAPI(Anime4UpUpnShareExtractor())
+        registerExtractorAPI(Anime4UpStreamP2PExtractor())
+        registerExtractorAPI(Anime4UpRpmShareExtractor())
+        registerExtractorAPI(Anime4UpFireStreamExtractor())
+        registerExtractorAPI(Anime4UpVidaraExtractor())
+        registerExtractorAPI(Anime4UpEarnVidsExtractor())
+        registerExtractorAPI(Anime4UpMixdropExtractor())
     }
 }

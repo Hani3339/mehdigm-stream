@@ -21,7 +21,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import org.jsoup.parser.Parser
@@ -29,11 +31,20 @@ import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.URI
+import java.net.URLDecoder
+import java.security.KeyPairGenerator
 import java.security.MessageDigest
+import java.security.Signature
+import java.security.interfaces.ECPublicKey
+import java.security.spec.ECGenParameterSpec
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
+import kotlin.math.roundToInt
 
 // =========================================================================
 // Shared helpers & smart dispatcher for Watch + Download servers
@@ -67,8 +78,33 @@ internal object Anime4UpExtractorUtils {
 
     fun originOf(url: String): String? = runCatching {
         val u = URI(url)
-        "${u.scheme}://${u.host}"
+        if (u.host.isNullOrBlank()) null else "${u.scheme}://${u.host}"
     }.getOrNull()
+
+    fun collectCookies(response: okhttp3.Response): LinkedHashMap<String, String> {
+        val chain = ArrayList<okhttp3.Response>()
+        var cur: okhttp3.Response? = response
+        while (cur != null) {
+            chain.add(cur)
+            cur = cur.priorResponse
+        }
+        val jar = LinkedHashMap<String, String>()
+        for (res in chain.asReversed()) {
+            for (raw in res.headers("Set-Cookie")) {
+                val pair = raw.substringBefore(';')
+                val eq = pair.indexOf('=')
+                if (eq > 0) {
+                    val k = pair.substring(0, eq).trim()
+                    val v = pair.substring(eq + 1).trim()
+                    if (k.isNotEmpty()) jar[k] = v
+                }
+            }
+        }
+        return jar
+    }
+
+    fun formatCookieHeader(cookies: Map<String, String>): String =
+        cookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
 
     suspend fun emitHls(
         source: String,
@@ -79,12 +115,26 @@ internal object Anime4UpExtractorUtils {
         fallbackQuality: Int = Qualities.Unknown.value,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        val explicitQuality = fallbackQuality.takeIf { it > 0 }
         val generated = runCatching {
-            M3u8Helper.generateM3u8(source, m3u8Url, referer, headers = headers)
+            M3u8Helper.generateM3u8(source, m3u8Url, referer, quality = explicitQuality, headers = headers)
         }.getOrDefault(emptyList())
 
         if (generated.isNotEmpty()) {
-            generated.forEach(callback)
+            generated.forEach { link ->
+                if (link.quality <= 0 && fallbackQuality > 0) {
+                    callback(
+                        newExtractorLink(link.source, link.name, link.url, link.type) {
+                            this.referer = link.referer
+                            this.quality = fallbackQuality
+                            this.headers = link.headers
+                            this.extractorData = link.extractorData
+                        }
+                    )
+                } else {
+                    callback(link)
+                }
+            }
             return true
         }
 
@@ -135,20 +185,24 @@ internal object Anime4UpExtractorUtils {
  * cleanly to CloudStream's built-in [loadExtractor].
  */
 object Anime4UpExtractorSuite {
-    private val SKIP_HOSTS = listOf(
+    internal val SKIP_HOSTS = listOf(
         "mega.nz",          // client-side AES-CTR browser-only decryption without SDK
         "vikingfile.",      // interactive Cloudflare Turnstile gate
         "vik1ngfile.",
         "workupload.com",   // interactive bot captcha on API
         "file-upload.com",  // multi-step countdown captcha
-        "file-upload.org"
+        "file-upload.org",
+        "nitroflare.",      // premium/captcha-only filelocker
+        "rapidgator.",      // premium/captcha-only filelocker
+        "fileserve.com",    // video mod disabled + countdown captcha
+        "clicknupload."     // multi-step captcha filelocker
     )
 
     fun canonicalDedupKey(rawUrl: String): String {
         val clean = rawUrl.trim()
         val low = clean.lowercase()
-        // Deduplicate MegaMax & Share4Max watch/download variants carrying the same hash
-        Regex("""(?:megamax\.me|share4max\.com)/(?:iframe|d|download|e)/([A-Za-z0-9_-]+)""", RegexOption.IGNORE_CASE)
+        // Deduplicate MegaMax & Share4Max watch/download/leech variants carrying the same hash
+        Regex("""(?:megamax\.me|share4max\.com)/(?:iframe|d|download|e|f|mirror)/([A-Za-z0-9_-]+)""", RegexOption.IGNORE_CASE)
             .find(clean)?.groupValues?.get(1)?.let { return "megamax:$it" }
         // Deduplicate Mp4Upload /embed-ID.html and /ID
         Regex("""mp4upload\.com/(?:embed-)?([A-Za-z0-9]{10,})(?:\.html)?""", RegexOption.IGNORE_CASE)
@@ -175,7 +229,8 @@ object Anime4UpExtractorSuite {
         qualityHint: String?,
         serverHint: String?,
         subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
+        callback: (ExtractorLink) -> Unit,
+        sourcePrefix: String? = null
     ) {
         val url = when {
             rawUrl.startsWith("//") -> "https:$rawUrl"
@@ -186,72 +241,153 @@ object Anime4UpExtractorSuite {
         val host = runCatching { URI(url).host?.lowercase().orEmpty() }.getOrDefault("")
         if (host.isBlank() || SKIP_HOSTS.any { host.contains(it) }) return
 
+        val bufferedLinks: MutableList<ExtractorLink>? = if (sourcePrefix.isNullOrBlank()) {
+            null
+        } else {
+            java.util.Collections.synchronizedList(ArrayList<ExtractorLink>())
+        }
+        val effectiveCallback: (ExtractorLink) -> Unit = if (bufferedLinks == null) {
+            callback
+        } else {
+            { link -> bufferedLinks.add(link) }
+        }
+
+        val hintLow = serverHint?.lowercase()?.trim().orEmpty()
+
         try {
             when {
                 host.contains("megamax.me") || host.contains("share4max.com") -> {
-                    Anime4UpMegaMaxExtractor().extractWithHint(url, referer, qualityHint, subtitleCallback, callback)
+                    Anime4UpMegaMaxExtractor().extractWithHint(url, referer, qualityHint, subtitleCallback, effectiveCallback)
+                }
+                host.contains("uns.bio") || host.contains("upns.") || host.contains("upnshare") || hintLow == "upnshare" -> {
+                    Anime4UpUpnShareExtractor().extractWithHint(url, referer, qualityHint, effectiveCallback)
+                }
+                host.contains("strp2p.") || host.contains("streamp2p") || hintLow == "streamp2p" -> {
+                    Anime4UpStreamP2PExtractor().extractWithHint(url, referer, qualityHint, effectiveCallback)
+                }
+                host.contains("rpmplay.") || host.contains("rpmshare") || host.contains("rpmvid.") ||
+                    host.contains("rpmvip.") || hintLow == "rpmshare" -> {
+                    Anime4UpRpmShareExtractor().extractWithHint(url, referer, qualityHint, effectiveCallback)
+                }
+                host.contains("firestream.") || hintLow == "firestream" -> {
+                    Anime4UpFireStreamExtractor().extractWithHint(url, referer, qualityHint, subtitleCallback, effectiveCallback)
+                }
+                host.contains("vidara") || hintLow == "vidara" -> {
+                    Anime4UpVidaraExtractor().extractWithHint(url, referer, qualityHint, subtitleCallback, effectiveCallback)
+                }
+                host.contains("morencius.") || host.contains("earnvids") || host.contains("movearnpre.") ||
+                    host.contains("dintezuvio.") || host.contains("dingtezuni.") || host.contains("minochinos.") ||
+                    hintLow == "earnvids" -> {
+                    Anime4UpEarnVidsExtractor().extractWithHint(url, referer, qualityHint, effectiveCallback)
+                }
+                host.contains("mixdrop.") || host.contains("mxdrop.") || host.contains("m1xdrop.") ||
+                    hintLow == "mixdrop" -> {
+                    Anime4UpMixdropExtractor().extractWithHint(url, referer, qualityHint, effectiveCallback)
                 }
                 host.contains("mediafire.com") -> {
-                    Anime4UpMediaFireExtractor().extractWithHint(url, referer, qualityHint, callback)
+                    Anime4UpMediaFireExtractor().extractWithHint(url, referer, qualityHint, effectiveCallback)
                 }
-                host.contains("voe.sx") || serverHint?.contains("voe", ignoreCase = true) == true -> {
-                    Anime4UpVoeExtractor().extractWithHint(url, referer, qualityHint, subtitleCallback, callback)
+                host.contains("voe.sx") || hintLow.contains("voe") -> {
+                    Anime4UpVoeExtractor().extractWithHint(url, referer, qualityHint, subtitleCallback, effectiveCallback)
                 }
                 host.contains("vkvideo.ru") || host == "vk.com" || host.endsWith(".vk.com") || host == "vk.ru" -> {
-                    Anime4UpVkExtractor().getUrl(url, referer, subtitleCallback, callback)
+                    Anime4UpVkExtractor().getUrl(url, referer, subtitleCallback, effectiveCallback)
                 }
-                host.contains("mp4upload.com") -> {
-                    Anime4UpMp4UploadExtractor().extractWithHint(url, referer, qualityHint, callback)
+                host.contains("mp4upload.com") || hintLow == "mp4upload" -> {
+                    Anime4UpMp4UploadExtractor().extractWithHint(url, referer, qualityHint, effectiveCallback)
                 }
                 host.contains("uqload.") -> {
-                    Anime4UpUqloadExtractor().extractWithHint(url, referer, qualityHint, callback)
+                    Anime4UpUqloadExtractor().extractWithHint(url, referer, qualityHint, effectiveCallback)
                 }
                 host.contains("playmogo.") || host.contains("dsvplay.") || host.contains("dood") ||
                     host.contains("d000") || host.contains("myvidplay.") || host.contains("vide0.") ||
-                    serverHint?.contains("dood", ignoreCase = true) == true -> {
-                    Anime4UpDoodExtractor().extractWithHint(url, referer, qualityHint, callback)
+                    hintLow.contains("dood") -> {
+                    Anime4UpDoodExtractor().extractWithHint(url, referer, qualityHint, effectiveCallback)
                 }
                 url.contains("/Anime4up-S", ignoreCase = true) ||
                     host.contains("c1oiijc.shop") ||
-                    serverHint?.contains("anime4up", ignoreCase = true) == true -> {
-                    Anime4UpVnxPlayerExtractor().extractWithHint(url, referer, serverHint, qualityHint, subtitleCallback, callback)
+                    hintLow.contains("anime4up") -> {
+                    Anime4UpVnxPlayerExtractor().extractWithHint(url, referer, serverHint, qualityHint, subtitleCallback, effectiveCallback)
                 }
-                host.contains("byse") -> {
-                    Anime4UpByseExtractor().getUrl(url, referer, subtitleCallback, callback)
+                host.contains("byse") || hintLow == "byse" -> {
+                    Anime4UpByseExtractor().extractWithHint(url, referer, qualityHint, effectiveCallback)
                 }
-                host.contains("lulustream") || host.contains("luluvdo") -> {
-                    Anime4UpLuluStreamExtractor().extractWithHint(url, referer, qualityHint, callback)
+                host.contains("lulustream") || host.contains("luluvdo") || hintLow == "lulustream" -> {
+                    Anime4UpLuluStreamExtractor().extractWithHint(url, referer, qualityHint, effectiveCallback)
                 }
-                host.contains("savefiles.") -> {
-                    Anime4UpSaveFilesExtractor().extractWithHint(url, referer, qualityHint, callback)
+                host.contains("savefiles.") || host.contains("streamhls.") || hintLow == "savefiles" -> {
+                    Anime4UpSaveFilesExtractor().extractWithHint(url, referer, qualityHint, effectiveCallback)
                 }
                 host.contains("4shared.com") -> {
-                    Anime4UpFourSharedExtractor().extractWithHint(url, referer, qualityHint, callback)
+                    Anime4UpFourSharedExtractor().extractWithHint(url, referer, qualityHint, effectiveCallback)
                 }
                 host.contains("gofile.io") -> {
-                    Anime4UpGoFileExtractor().extractWithHint(url, referer, qualityHint, callback)
+                    Anime4UpGoFileExtractor().extractWithHint(url, referer, qualityHint, effectiveCallback)
                 }
                 host.contains("moshahda.") -> {
-                    Anime4UpMoshahdaExtractor().getUrl(url, referer, subtitleCallback, callback)
+                    Anime4UpMoshahdaExtractor().getUrl(url, referer, subtitleCallback, effectiveCallback)
                 }
                 else -> {
-                    loadExtractor(url, referer, subtitleCallback, callback)
+                    loadExtractor(url, referer, subtitleCallback, effectiveCallback)
                 }
             }
         } catch (_: Throwable) {
             // Never allow one broken mirror to fail the remaining servers
         }
+
+        if (bufferedLinks != null && !sourcePrefix.isNullOrBlank()) {
+            for (link in bufferedLinks) {
+                val pSource = if (link.source.startsWith(sourcePrefix, ignoreCase = true)) {
+                    link.source
+                } else {
+                    "$sourcePrefix - ${link.source}"
+                }
+                val pName = if (link.name.startsWith(sourcePrefix, ignoreCase = true)) {
+                    link.name
+                } else {
+                    "$sourcePrefix - ${link.name}"
+                }
+                callback(
+                    newExtractorLink(pSource, pName, link.url, link.type) {
+                        this.referer = link.referer
+                        this.quality = link.quality
+                        this.headers = link.headers
+                        this.extractorData = link.extractorData
+                    }
+                )
+            }
+        }
     }
 }
 
 // =========================================================================
-// 1. MegaMax & Share4Max Multi-Host Aggregator (1080p / 720p / 480p / 360p)
+// 1. MegaMax & Share4Max Complete Multi-Source Aggregator
+//    - Leg 1: MegaMax Direct CDN777 HLS (`/e/<id>` -> Inertia `files/leech/video` + CryptoJS AES)
+//    - Leg 2: MegaMax Direct CDN777 MP4 (`/d/<id>` -> Inertia `files/leech/download` POST)
+//    - Leg 3: All Multi-Host Mirrors across 1080p / 720p / 480p / 360p
+//             (`/iframe/<id>` `files/mirror/video` partial reload + `/download/<id>` POST)
 // =========================================================================
 
 open class Anime4UpMegaMaxExtractor : ExtractorApi() {
     override val name = "MegaMax"
     override val mainUrl = "https://megamax.me"
     override val requiresReferer = false
+
+    private data class InertiaSession(
+        val url: String,
+        val origin: String,
+        val page: JSONObject,
+        val version: String,
+        val component: String,
+        val cookieHeader: String,
+        val xsrfToken: String
+    )
+
+    private data class MirrorTask(
+        val mirrorUrl: String,
+        val driver: String,
+        val qualityLabel: String
+    )
 
     override suspend fun getUrl(
         url: String,
@@ -269,85 +405,438 @@ open class Anime4UpMegaMaxExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        // Normalize /d/<id> and /download/<id> -> /iframe/<id> so we get every mirror & quality at once
-        val id = Regex("""/(?:iframe|d|download|e)/([A-Za-z0-9_-]+)""").find(url)?.groupValues?.get(1)
-        val origin = Anime4UpExtractorUtils.originOf(url) ?: mainUrl
-        val iframeUrls = buildList {
-            if (id != null) {
-                add("$origin/iframe/$id")
-                if (!origin.contains("megamax.me")) add("https://megamax.me/iframe/$id")
-                if (!origin.contains("share4max.com")) add("https://share4max.com/iframe/$id")
-            } else {
-                add(url)
+        val hashId = Regex("""/(?:iframe|d|download|e|f|mirror)/([A-Za-z0-9_-]+)""", RegexOption.IGNORE_CASE)
+            .find(url)?.groupValues?.get(1) ?: return
+        val preferredOrigin = Anime4UpExtractorUtils.originOf(url) ?: "https://share4max.com"
+        val refUrl = referer?.takeIf { it.startsWith("http") } ?: "$preferredOrigin/"
+
+        val mirrorOrigins = listOf(preferredOrigin, "https://share4max.com", "https://megamax.me").distinct()
+        val leechOrigins = listOf("https://megamax.me", "https://share4max.com", preferredOrigin).distinct()
+
+        // Run MegaMax's native CDN777 HLS (/e/), native CDN777 MP4 (/d/), and mirror discovery concurrently
+        val discoveredMirrors = coroutineScope {
+            val leechHlsJob = async {
+                extractLeechHls(hashId, leechOrigins, refUrl, subtitleCallback, callback)
+            }
+            val leechMp4Job = async {
+                extractLeechDirectMp4(hashId, leechOrigins, refUrl, callback)
+            }
+            val iframeMirrorsJob = async {
+                fetchIframeMirrors(hashId, mirrorOrigins, refUrl, qualityHint)
+            }
+            val downloadMirrorsJob = async {
+                fetchDownloadMirrors(hashId, leechOrigins, refUrl, qualityHint)
+            }
+
+            leechHlsJob.await()
+            leechMp4Job.await()
+            Pair(iframeMirrorsJob.await(), downloadMirrorsJob.await())
+        }
+
+        val (iframeResult, downloadTasks) = discoveredMirrors
+        val activeIframeUrl = iframeResult.first ?: "$preferredOrigin/iframe/$hashId"
+        val mergedTasks = ArrayList<MirrorTask>()
+        val seenIdentities = HashSet<String>()
+
+        // Prefer `/iframe/<id>` streaming URLs first (includes FireStream & Vidara + clean embed paths),
+        // then append any additional mirrors uniquely present on `/download/<id>`.
+        for (task in iframeResult.second + downloadTasks) {
+            val host = runCatching { URI(task.mirrorUrl).host?.lowercase().orEmpty() }.getOrDefault("")
+            if (host.isBlank() || Anime4UpExtractorSuite.SKIP_HOSTS.any { host.contains(it) }) continue
+            val identity = mirrorIdentityKey(task.driver, task.mirrorUrl, task.qualityLabel)
+            if (seenIdentities.add(identity)) {
+                mergedTasks.add(task)
             }
         }
 
-        var pageJsonStr: String? = null
-        var activeIframeUrl = iframeUrls.first()
-        for (candidate in iframeUrls) {
-            val doc = runCatching {
-                app.get(
-                    candidate,
-                    referer = referer ?: "$origin/",
-                    headers = mapOf("User-Agent" to Anime4UpExtractorUtils.UA)
-                ).document
-            }.getOrNull() ?: continue
+        if (mergedTasks.isEmpty()) return
 
-            val raw = doc.selectFirst("script[data-page=app]")?.html()?.trim()
-                ?: doc.selectFirst("#app[data-page]")?.attr("data-page")?.let { Parser.unescapeEntities(it, false) }
-            if (!raw.isNullOrBlank()) {
-                pageJsonStr = raw
-                activeIframeUrl = candidate
-                break
-            }
-        }
-
-        val dataPage = pageJsonStr ?: return
-        val streams = runCatching {
-            JSONObject(dataPage)
-                .optJSONObject("props")
-                ?.optJSONObject("streams")
-                ?.optJSONObject("data")
-                ?.optJSONArray("arr")
-        }.getOrNull() ?: return
-
-        data class MirrorTask(val mirrorUrl: String, val driver: String, val qualityLabel: String)
-        val tasks = ArrayList<MirrorTask>()
-        val seenUrls = HashSet<String>()
-
-        for (i in 0 until streams.length()) {
-            val tier = streams.optJSONObject(i) ?: continue
-            val tierLabel = tier.optString("label", qualityHint.orEmpty())
-            val mirrors = tier.optJSONArray("mirrors") ?: continue
-            for (j in 0 until mirrors.length()) {
-                val m = mirrors.optJSONObject(j) ?: continue
-                val driver = m.optString("driver").lowercase().trim()
-                var link = m.optString("link").trim()
-                if (link.isBlank()) continue
-                if (link.startsWith("//")) link = "https:$link"
-                if (!link.startsWith("http") || !seenUrls.add(link)) continue
-                tasks.add(MirrorTask(link, driver, tierLabel))
-            }
-        }
-
-        val sem = Semaphore(4)
+        val sem = Semaphore(6)
         coroutineScope {
-            tasks.map { task ->
+            mergedTasks.map { task ->
                 async {
                     sem.withPermit {
-                        val qHint = task.qualityLabel.ifBlank { qualityHint }
+                        val tierHint = task.qualityLabel
+                            .takeIf { it.isNotBlank() && !it.contains("متعدد") }
+                            ?: qualityHint?.takeIf { !it.contains("متعدد") }
                         Anime4UpExtractorSuite.resolve(
                             rawUrl = task.mirrorUrl,
                             referer = activeIframeUrl,
-                            qualityHint = qHint,
+                            qualityHint = tierHint,
                             serverHint = task.driver,
                             subtitleCallback = subtitleCallback,
-                            callback = callback
+                            callback = callback,
+                            sourcePrefix = "MegaMax"
                         )
                     }
                 }
             }.awaitAll()
         }
+    }
+
+    // ---- Inertia session & partial-reload helpers ---------------------------
+
+    private suspend fun openInertiaSession(targetUrl: String, referer: String): InertiaSession? = runCatching {
+        val res = app.get(
+            targetUrl,
+            referer = referer,
+            headers = mapOf(
+                "User-Agent" to Anime4UpExtractorUtils.UA,
+                "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            )
+        )
+        val doc = res.document
+        val rawPage = doc.selectFirst("script[data-page=app]")?.html()?.trim()
+            ?: doc.selectFirst("#app[data-page]")?.attr("data-page")?.let { Parser.unescapeEntities(it, false) }
+            ?: return null
+        val pageJson = JSONObject(rawPage)
+        val cookies = Anime4UpExtractorUtils.collectCookies(res.okhttpResponse)
+        val cookieHeader = Anime4UpExtractorUtils.formatCookieHeader(cookies)
+        val xsrf = cookies["XSRF-TOKEN"]?.let { runCatching { URLDecoder.decode(it, "UTF-8") }.getOrDefault(it) }.orEmpty()
+        val finalUrl = res.url.ifBlank { targetUrl }
+        val finalOrigin = Anime4UpExtractorUtils.originOf(finalUrl)
+            ?: Anime4UpExtractorUtils.originOf(targetUrl)
+            ?: mainUrl
+        InertiaSession(
+            url = finalUrl,
+            origin = finalOrigin,
+            page = pageJson,
+            version = pageJson.optString("version"),
+            component = pageJson.optString("component"),
+            cookieHeader = cookieHeader,
+            xsrfToken = xsrf
+        )
+    }.getOrNull()
+
+    private fun buildInertiaHeaders(
+        sess: InertiaSession,
+        partialComponent: String,
+        partialData: String,
+        isPost: Boolean = false
+    ): Map<String, String> = LinkedHashMap<String, String>().apply {
+        put("User-Agent", Anime4UpExtractorUtils.UA)
+        put("Accept", "text/html, application/xhtml+xml")
+        put("Content-Type", "application/json")
+        put("Referer", sess.url)
+        if (isPost) put("Origin", sess.origin)
+        put("X-Requested-With", "XMLHttpRequest")
+        put("X-Inertia", "true")
+        if (sess.version.isNotBlank()) put("X-Inertia-Version", sess.version)
+        put("X-Inertia-Partial-Component", partialComponent)
+        put("X-Inertia-Partial-Data", partialData)
+        if (sess.cookieHeader.isNotBlank()) put("Cookie", sess.cookieHeader)
+        if (sess.xsrfToken.isNotBlank()) put("X-XSRF-TOKEN", sess.xsrfToken)
+    }
+
+    // ---- Leg 1: MegaMax Direct HLS (`/e/<id>` -> `files/leech/video`) -------
+
+    private suspend fun extractLeechHls(
+        hashId: String,
+        origins: List<String>,
+        referer: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        for (base in origins) {
+            val sess = openInertiaSession("$base/e/$hashId", referer) ?: continue
+            val comp = sess.component.ifBlank { "files/leech/video" }
+            val partialText = runCatching {
+                app.get(
+                    sess.url,
+                    headers = buildInertiaHeaders(sess, comp, "streams,subtitles")
+                ).text
+            }.getOrNull() ?: continue
+
+            val props = runCatching { JSONObject(partialText).optJSONObject("props") }.getOrNull() ?: continue
+
+            // Subtitles if attached on MegaMax's native player
+            props.optJSONArray("subtitles")?.let { subs ->
+                for (i in 0 until subs.length()) {
+                    val s = subs.optJSONObject(i) ?: continue
+                    val subUrl = s.optString("file").takeIf { it.startsWith("http") } ?: continue
+                    val lang = s.optString("label").ifBlank { "Arabic" }
+                    subtitleCallback(newSubtitleFile(lang, subUrl))
+                }
+            }
+
+            val dataRaw = props.optJSONObject("streams")?.optString("data").orEmpty()
+            if (dataRaw.isBlank()) continue
+
+            val plain = if (dataRaw.contains("\"ct\"")) {
+                decryptCryptoJsAes(dataRaw, LEECH_AES_PASSPHRASE)
+            } else {
+                dataRaw
+            } ?: continue
+
+            val streamHeaders = mapOf(
+                "User-Agent" to Anime4UpExtractorUtils.UA,
+                "Referer" to "${sess.origin}/",
+                "Origin" to sess.origin
+            )
+            var emitted = false
+            val trimmed = plain.trim()
+            if (trimmed.startsWith("[")) {
+                val arr = runCatching { JSONArray(trimmed) }.getOrNull()
+                if (arr != null) {
+                    for (i in 0 until arr.length()) {
+                        val item = arr.optJSONObject(i) ?: continue
+                        if (emitLeechSourceObj(item, sess.origin, streamHeaders, callback)) emitted = true
+                    }
+                }
+            } else if (trimmed.startsWith("{")) {
+                val obj = runCatching { JSONObject(trimmed) }.getOrNull()
+                if (obj != null && emitLeechSourceObj(obj, sess.origin, streamHeaders, callback)) emitted = true
+            }
+            if (emitted) return
+        }
+    }
+
+    private suspend fun emitLeechSourceObj(
+        obj: JSONObject,
+        origin: String,
+        headers: Map<String, String>,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val fileUrl = obj.optString("file").takeIf { it.startsWith("http") } ?: return false
+        val lbl = obj.optString("label")
+        val qVal = Anime4UpExtractorUtils.parseQualityValue(lbl, fileUrl)
+        return if (fileUrl.contains(".m3u8") || obj.optString("type").contains("mpegURL", ignoreCase = true)) {
+            Anime4UpExtractorUtils.emitHls(
+                source = "MegaMax Direct",
+                label = "MegaMax Direct",
+                m3u8Url = fileUrl,
+                referer = "$origin/",
+                headers = headers,
+                fallbackQuality = qVal,
+                callback = callback
+            )
+        } else {
+            val qTag = Anime4UpExtractorUtils.formatQualityTag(qVal)
+            val fullLabel = if (qTag.isNotEmpty()) "MegaMax Direct ($qTag)" else "MegaMax Direct"
+            Anime4UpExtractorUtils.emitVideo(
+                source = "MegaMax Direct",
+                label = fullLabel,
+                videoUrl = fileUrl,
+                referer = "$origin/",
+                quality = qVal,
+                headers = headers,
+                callback = callback
+            )
+            true
+        }
+    }
+
+    // ---- Leg 2: MegaMax Direct MP4 (`/d/<id>` -> `files/leech/download`) ----
+
+    private suspend fun extractLeechDirectMp4(
+        hashId: String,
+        origins: List<String>,
+        referer: String,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        for (base in origins) {
+            val sess = openInertiaSession("$base/d/$hashId", referer) ?: continue
+            val attachments = sess.page.optJSONObject("props")?.optJSONArray("attachments") ?: continue
+            if (attachments.length() == 0) continue
+
+            val comp = sess.component.ifBlank { "files/leech/download" }
+            val headers = buildInertiaHeaders(sess, comp, "download", isPost = true)
+            var emitted = false
+
+            for (i in 0 until attachments.length()) {
+                val att = attachments.optJSONObject(i) ?: continue
+                val attachId = att.optString("hashId").takeIf { it.isNotBlank() } ?: continue
+                val attLabel = att.optString("label").ifBlank { att.optString("name") }
+                val attRes = att.optString("resolution")
+                val body = JSONObject().put("attach", attachId).toString()
+                    .toRequestBody(JSON_MEDIA_TYPE)
+
+                val postText = runCatching {
+                    app.post(sess.url, headers = headers, requestBody = body).text
+                }.getOrNull() ?: continue
+
+                val directUrl = runCatching {
+                    JSONObject(postText)
+                        .optJSONObject("props")
+                        ?.optJSONObject("download")
+                        ?.optJSONObject("data")
+                        ?.optString("url")
+                }.getOrNull()?.takeIf { it.startsWith("http") } ?: continue
+
+                val qVal = Anime4UpExtractorUtils.parseQualityValue(attLabel, attRes)
+                val qTag = Anime4UpExtractorUtils.formatQualityTag(qVal)
+                val label = if (qTag.isNotEmpty()) "MegaMax Direct MP4 ($qTag)" else "MegaMax Direct MP4"
+
+                Anime4UpExtractorUtils.emitVideo(
+                    source = "MegaMax Direct",
+                    label = label,
+                    videoUrl = directUrl,
+                    referer = "${sess.origin}/",
+                    quality = qVal,
+                    headers = mapOf(
+                        "User-Agent" to Anime4UpExtractorUtils.UA,
+                        "Referer" to "${sess.origin}/"
+                    ),
+                    callback = callback
+                )
+                emitted = true
+            }
+            if (emitted) return
+        }
+    }
+
+    // ---- Leg 3a: `/iframe/<id>` (`files/mirror/video`) ----------------------
+
+    private suspend fun fetchIframeMirrors(
+        hashId: String,
+        origins: List<String>,
+        referer: String,
+        qualityHint: String?
+    ): Pair<String?, List<MirrorTask>> {
+        for (base in origins) {
+            val sess = openInertiaSession("$base/iframe/$hashId", referer) ?: continue
+            var tiers = parseStreamTiers(sess.page.optJSONObject("props")?.optJSONObject("streams"))
+            if (tiers == null || tiers.length() == 0) {
+                val comp = sess.component.ifBlank { "files/mirror/video" }
+                val reloadText = runCatching {
+                    app.get(sess.url, headers = buildInertiaHeaders(sess, comp, "streams")).text
+                }.getOrNull()
+                if (!reloadText.isNullOrBlank()) {
+                    tiers = runCatching {
+                        parseStreamTiers(JSONObject(reloadText).optJSONObject("props")?.optJSONObject("streams"))
+                    }.getOrNull()
+                }
+            }
+            if (tiers != null && tiers.length() > 0) {
+                val list = ArrayList<MirrorTask>()
+                for (i in 0 until tiers.length()) {
+                    val tier = tiers.optJSONObject(i) ?: continue
+                    val tierLabel = tier.optString("label", qualityHint.orEmpty())
+                    val mirrors = tier.optJSONArray("mirrors") ?: continue
+                    collectMirrorsInto(mirrors, tierLabel, list)
+                }
+                if (list.isNotEmpty()) return Pair(sess.url, list)
+            }
+        }
+        return Pair(null, emptyList())
+    }
+
+    private fun parseStreamTiers(streamsObj: JSONObject?): JSONArray? {
+        if (streamsObj == null) return null
+        streamsObj.optJSONArray("data")?.let { return it }
+        return streamsObj.optJSONObject("data")?.optJSONArray("arr")
+    }
+
+    // ---- Leg 3b: `/download/<id>` (`files/mirror/download`) -----------------
+
+    private suspend fun fetchDownloadMirrors(
+        hashId: String,
+        origins: List<String>,
+        referer: String,
+        qualityHint: String?
+    ): List<MirrorTask> {
+        for (base in origins) {
+            val sess = openInertiaSession("$base/download/$hashId", referer) ?: continue
+            val attachments = sess.page.optJSONObject("props")?.optJSONArray("attachments") ?: continue
+            if (attachments.length() == 0) continue
+
+            val comp = sess.component.ifBlank { "files/mirror/download" }
+            val headers = buildInertiaHeaders(sess, comp, "download", isPost = true)
+            val tasks = ArrayList<MirrorTask>()
+
+            for (i in 0 until attachments.length()) {
+                val att = attachments.optJSONObject(i) ?: continue
+                val attachId = att.optString("hashId").takeIf { it.isNotBlank() } ?: continue
+                val tierLabel = att.optString("label")
+                    .ifBlank { att.optString("name") }
+                    .ifBlank { att.optString("resolution") }
+                    .ifBlank { qualityHint.orEmpty() }
+
+                val body = JSONObject().put("attach", attachId).toString()
+                    .toRequestBody(JSON_MEDIA_TYPE)
+                val postText = runCatching {
+                    app.post(sess.url, headers = headers, requestBody = body).text
+                }.getOrNull() ?: continue
+
+                val mirrors = runCatching {
+                    JSONObject(postText)
+                        .optJSONObject("props")
+                        ?.optJSONObject("download")
+                        ?.optJSONObject("data")
+                        ?.optJSONArray("mirrors")
+                }.getOrNull() ?: continue
+
+                collectMirrorsInto(mirrors, tierLabel, tasks)
+            }
+            if (tasks.isNotEmpty()) return tasks
+        }
+        return emptyList()
+    }
+
+    private fun collectMirrorsInto(mirrors: JSONArray, tierLabel: String, out: MutableList<MirrorTask>) {
+        for (j in 0 until mirrors.length()) {
+            val m = mirrors.optJSONObject(j) ?: continue
+            val driver = m.optString("driver").lowercase().trim()
+            var link = m.optString("link").trim()
+            if (link.isBlank()) continue
+            if (link.startsWith("//")) link = "https:$link"
+            if (!link.startsWith("http")) continue
+            out.add(MirrorTask(link, driver, tierLabel))
+        }
+    }
+
+    private fun mirrorIdentityKey(driver: String, mirrorUrl: String, tierLabel: String): String {
+        val d = driver.lowercase().trim()
+        val hashFrag = mirrorUrl.substringAfterLast('#', "")
+            .substringBefore('&')
+            .substringBefore('?')
+            .trim()
+        if (hashFrag.isNotEmpty()) {
+            return "$d:$hashFrag"
+        }
+        val cleanPath = mirrorUrl.substringBefore('?').substringBefore('#').trimEnd('/')
+        val seg = cleanPath.substringAfterLast('/')
+            .removePrefix("embed-")
+            .removeSuffix(".html")
+            .trim()
+        return if (seg.isNotEmpty()) "$d:$seg" else "$d:$mirrorUrl:$tierLabel"
+    }
+
+    // ---- OpenSSL EVP_BytesToKey (MD5) + AES-256-CBC for `/e/<id>` -----------
+
+    private fun decryptCryptoJsAes(jsonStr: String, passphrase: String): String? = runCatching {
+        val obj = JSONObject(jsonStr)
+        val ct = Base64.decode(obj.getString("ct"), Base64.DEFAULT)
+        val iv = hexToBytes(obj.getString("iv"))
+        val salt = hexToBytes(obj.getString("s"))
+        val passBytes = passphrase.toByteArray(Charsets.UTF_8)
+        val md5 = MessageDigest.getInstance("MD5")
+        var derived = ByteArray(0)
+        var block = ByteArray(0)
+        while (derived.size < 48) {
+            md5.reset()
+            md5.update(block)
+            md5.update(passBytes)
+            md5.update(salt)
+            block = md5.digest()
+            derived += block
+        }
+        val key = derived.copyOfRange(0, 32)
+        val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
+        String(cipher.doFinal(ct), Charsets.UTF_8)
+    }.getOrNull()
+
+    private fun hexToBytes(hex: String): ByteArray {
+        val clean = hex.trim()
+        return ByteArray(clean.length / 2) { idx ->
+            clean.substring(idx * 2, idx * 2 + 2).toInt(16).toByte()
+        }
+    }
+
+    companion object {
+        private const val LEECH_AES_PASSPHRASE = "k7v2m4x9bqwpnj6t"
+        private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
     }
 }
 
@@ -880,27 +1369,51 @@ open class Anime4UpByseExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        val code = Regex("""/(?:e|d|v)/([A-Za-z0-9]+)""").find(url)?.groupValues?.get(1) ?: return
+        extractWithHint(url, referer, null, callback)
+    }
+
+    suspend fun extractWithHint(
+        url: String,
+        referer: String?,
+        qualityHint: String?,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val code = Regex("""/(?:e|d|v)/([A-Za-z0-9]+)""").find(url)?.groupValues?.get(1)
+            ?: url.substringBefore('?').substringBefore('#').trimEnd('/').substringAfterLast('/')
+                .takeIf { it.isNotBlank() }
+            ?: return
         val origin = Anime4UpExtractorUtils.originOf(url) ?: mainUrl
         val embedReferer = "$origin/e/$code"
 
-        val details = fetchDetails(origin, code, embedReferer) ?: return
-        val embedDomain = details.optString("embed_frame_url")
-            .takeIf { it.isNotBlank() }
-            ?.let { Anime4UpExtractorUtils.originOf(it) }
-            ?: origin
+        val details = fetchJsonGet("$origin/api/videos/$code/embed/details", embedReferer)
+        val embedFrameUrl = details?.optString("embed_frame_url")?.takeIf { it.startsWith("http") }
+        val embedDomain = embedFrameUrl?.let { Anime4UpExtractorUtils.originOf(it) } ?: origin
+        val playbackCode = details?.optString("code")?.takeIf { it.isNotBlank() }
+            ?: embedFrameUrl?.substringBefore('?')?.substringBefore('#')?.trimEnd('/')
+                ?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
+            ?: code
+        val parentHost = runCatching { URI(origin).host }.getOrNull() ?: "byseraguci.com"
 
-        val playbackObj = if (embedDomain != origin) {
-            fetchDetails(embedDomain, code, "$embedDomain/e/$code")?.optJSONObject("playback")
-                ?: details.optJSONObject("playback")
-        } else {
-            details.optJSONObject("playback")
-        } ?: return
+        // Primary flow (`byseraguci.com` -> `n1mwq.org`): ECDSA P-256 device attestation +
+        // `/embed/settings` + `/embed/captcha` (`gr` stream PoW) + `/embed/captcha/verify` +
+        // `POST /api/videos/<code>/embed/playback` (`X-Captcha-Token`), with legacy fallbacks.
+        val playbackObj = postEmbedPlayback(
+            embedOrigin = embedDomain,
+            code = playbackCode,
+            embedPageUrl = embedFrameUrl ?: "$embedDomain/e/$playbackCode",
+            parentHost = parentHost,
+            parentFrameUrl = embedReferer,
+            parentReferer = referer ?: "$origin/"
+        )
+            ?: details?.optJSONObject("playback")
+            ?: (if (embedDomain != origin) fetchJsonGet("$embedDomain/api/videos/$playbackCode/embed/details", "$embedDomain/e/$playbackCode")?.optJSONObject("playback") else null)
+            ?: fetchJsonGet("$origin/api/videos/$code", embedReferer)?.optJSONObject("playback")
+            ?: return
 
         val decryptedStr = decryptPlayback(playbackObj) ?: return
         val decrypted = runCatching { JSONObject(decryptedStr) }.getOrNull() ?: return
         val sources = decrypted.optJSONArray("sources") ?: return
-        val edgeAuth = solvePow(playbackObj.optJSONObject("edge_challenge"))
+        val edgeAuth = solveSha256EdgePow(playbackObj.optJSONObject("edge_challenge"))
 
         val headers = LinkedHashMap<String, String>().apply {
             put("Referer", "$embedDomain/")
@@ -909,13 +1422,16 @@ open class Anime4UpByseExtractor : ExtractorApi() {
             if (edgeAuth != null) put("X-Edge-Auth", edgeAuth)
         }
 
+        val hintQuality = Anime4UpExtractorUtils.parseQualityValue(qualityHint)
         for (i in 0 until sources.length()) {
             val s = sources.optJSONObject(i) ?: continue
-            val streamUrl = s.optString("url").takeIf { it.startsWith("http") } ?: continue
+            val streamUrl = (s.optString("url").ifBlank { s.optString("file") })
+                .takeIf { it.startsWith("http") } ?: continue
             val qVal = Anime4UpExtractorUtils.parseQualityValue(
                 s.optString("label").ifBlank { s.optString("quality") },
                 s.optInt("height", 0).takeIf { it > 0 }?.let { "${it}p" }.orEmpty()
-            )
+            ).let { if (it > 0) it else hintQuality }
+
             if (streamUrl.contains(".m3u8")) {
                 Anime4UpExtractorUtils.emitHls(name, name, streamUrl, "$embedDomain/", headers, qVal, callback)
             } else {
@@ -924,29 +1440,358 @@ open class Anime4UpByseExtractor : ExtractorApi() {
         }
     }
 
-    private suspend fun fetchDetails(base: String, code: String, referer: String): JSONObject? = runCatching {
-        val text = app.get(
-            "$base/api/videos/$code/embed/details",
-            referer = referer,
-            headers = mapOf("Accept" to "application/json", "User-Agent" to Anime4UpExtractorUtils.UA)
-        ).text
-        JSONObject(text)
+    private suspend fun fetchJsonGet(apiUrl: String, referer: String, extraHeaders: Map<String, String> = emptyMap()): JSONObject? =
+        runCatching {
+            val origin = Anime4UpExtractorUtils.originOf(referer) ?: mainUrl
+            val headers = LinkedHashMap<String, String>().apply {
+                put("Accept", "application/json")
+                put("User-Agent", Anime4UpExtractorUtils.UA)
+                put("Origin", origin)
+                putAll(extraHeaders)
+            }
+            val text = app.get(apiUrl, referer = referer, headers = headers).text
+            JSONObject(text)
+        }.getOrNull()
+
+    private suspend fun postEmbedPlayback(
+        embedOrigin: String,
+        code: String,
+        embedPageUrl: String,
+        parentHost: String,
+        parentFrameUrl: String,
+        parentReferer: String
+    ): JSONObject? = runCatching {
+        val baseHeaders = LinkedHashMap<String, String>().apply {
+            put("User-Agent", Anime4UpExtractorUtils.UA)
+            put("Accept", "*/*")
+            put("Origin", embedOrigin)
+            put("Referer", embedPageUrl)
+            put("X-Embed-Origin", parentHost)
+            put("X-Embed-Parent", parentFrameUrl)
+            if (parentReferer.startsWith("http")) {
+                put("X-Embed-Referer", parentReferer)
+            }
+        }
+
+        val settings = runCatching {
+            JSONObject(app.get("$embedOrigin/api/videos/$code/embed/settings", headers = baseHeaders).text)
+        }.getOrNull()
+
+        val fingerprint = obtainAttestedFingerprint(embedOrigin, baseHeaders)
+        var captchaToken: String? = null
+
+        if (settings?.optBoolean("captcha_required", false) == true) {
+            val capBodyJson = JSONObject().apply {
+                if (fingerprint != null) put("fingerprint", fingerprint)
+            }
+            val capHeaders = HashMap(baseHeaders).apply { put("Content-Type", "application/json") }
+            val capChallenge = runCatching {
+                val txt = app.post(
+                    "$embedOrigin/api/videos/$code/embed/captcha",
+                    headers = capHeaders,
+                    requestBody = capBodyJson.toString().toRequestBody(BYSE_JSON_MEDIA)
+                ).text
+                JSONObject(txt)
+            }.getOrNull()
+
+            if (capChallenge != null) {
+                val powNonce = capChallenge.optString("pow_nonce")
+                val powToken = capChallenge.optString("pow_token")
+                val powDiff = capChallenge.optInt("pow_difficulty", 14)
+                if (powNonce.isNotBlank() && powToken.isNotBlank()) {
+                    val solution = solveByseStreamPowParallel(powNonce, powDiff)
+                    if (solution != null) {
+                        val verifyJson = JSONObject()
+                            .put("pow_token", powToken)
+                            .put("solution", solution)
+                            .apply { if (fingerprint != null) put("fingerprint", fingerprint) }
+                        val verifyRes = runCatching {
+                            val txt = app.post(
+                                "$embedOrigin/api/videos/$code/embed/captcha/verify",
+                                headers = capHeaders,
+                                requestBody = verifyJson.toString().toRequestBody(BYSE_JSON_MEDIA)
+                            ).text
+                            JSONObject(txt)
+                        }.getOrNull()
+                        if (verifyRes?.optString("status") == "ok") {
+                            captchaToken = verifyRes.optString("token").takeIf { it.isNotBlank() }
+                        }
+                    }
+                }
+            }
+        }
+
+        val pbHeaders = HashMap(baseHeaders).apply {
+            if (!captchaToken.isNullOrBlank()) put("X-Captcha-Token", captchaToken!!)
+        }
+        val resText = if (fingerprint != null) {
+            pbHeaders["Content-Type"] = "application/json"
+            val body = JSONObject().put("fingerprint", fingerprint).toString().toRequestBody(BYSE_JSON_MEDIA)
+            app.post("$embedOrigin/api/videos/$code/embed/playback", headers = pbHeaders, requestBody = body).text
+        } else {
+            app.get("$embedOrigin/api/videos/$code/embed/playback", headers = pbHeaders).text
+        }
+        val root = JSONObject(resText)
+        root.optJSONObject("playback") ?: if (root.has("payload")) root else null
     }.getOrNull()
 
+    private suspend fun obtainAttestedFingerprint(
+        embedOrigin: String,
+        baseHeaders: Map<String, String>
+    ): JSONObject? {
+        val now = System.currentTimeMillis()
+        attestCache[embedOrigin]?.let { (expiry, cached) ->
+            if (expiry > now) return cached
+        }
+        return runCatching {
+            val chText = app.post(
+                "$embedOrigin/api/videos/access/challenge",
+                headers = baseHeaders,
+                requestBody = "".toRequestBody(null)
+            ).text
+            val ch = JSONObject(chText)
+            val challengeId = ch.optString("challenge_id").takeIf { it.isNotBlank() } ?: return null
+            val nonce = ch.optString("nonce").takeIf { it.isNotBlank() } ?: return null
+
+            val kpg = KeyPairGenerator.getInstance("EC").apply {
+                initialize(ECGenParameterSpec("secp256r1"))
+            }
+            val kp = kpg.generateKeyPair()
+            val pub = kp.public as ECPublicKey
+            val xB64 = b64UrlEncode(bigIntToFixed32(pub.w.affineX))
+            val yB64 = b64UrlEncode(bigIntToFixed32(pub.w.affineY))
+
+            val derSig = Signature.getInstance("SHA256withECDSA").run {
+                initSign(kp.private)
+                update(nonce.toByteArray(Charsets.UTF_8))
+                sign()
+            }
+            val p1363SigB64 = b64UrlEncode(derToP1363(derSig))
+
+            val randHash = b64UrlEncode(MessageDigest.getInstance("SHA-256").digest("$embedOrigin|$nonce".toByteArray(Charsets.UTF_8)))
+            val attestPayload = JSONObject().apply {
+                put("viewer_id", "")
+                put("device_id", "")
+                put("challenge_id", challengeId)
+                put("nonce", nonce)
+                put("signature", p1363SigB64)
+                put("public_key", JSONObject().apply {
+                    put("kty", "EC")
+                    put("crv", "P-256")
+                    put("x", xB64)
+                    put("y", yB64)
+                })
+                put("client", JSONObject().apply {
+                    put("user_agent", Anime4UpExtractorUtils.UA)
+                    put("pixel_ratio", 1)
+                    put("screen_width", 1920)
+                    put("screen_height", 1080)
+                    put("color_depth", 24)
+                    put("languages", JSONArray(listOf("en-US", "en")))
+                    put("timezone", "UTC")
+                    put("hardware_concurrency", 8)
+                    put("device_memory", 8)
+                    put("touch_points", 0)
+                    put("webgl_vendor", "Google Inc. (Intel)")
+                    put("webgl_renderer", "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)")
+                    put("canvas_hash", randHash)
+                    put("audio_hash", randHash)
+                    put("pointer_type", "fine,hover")
+                    put("media_devices", "ai1ao2vi1")
+                    put("extra", JSONObject().apply {
+                        put("vendor", "Google Inc.")
+                        put("appVersion", Anime4UpExtractorUtils.UA.removePrefix("Mozilla/"))
+                    })
+                })
+                put("storage", JSONObject())
+                put("attributes", JSONObject().put("entropy", "medium"))
+            }
+
+            val postHeaders = HashMap(baseHeaders).apply { put("Content-Type", "application/json") }
+            val attestRes = JSONObject(
+                app.post(
+                    "$embedOrigin/api/videos/access/attest",
+                    headers = postHeaders,
+                    requestBody = attestPayload.toString().toRequestBody(BYSE_JSON_MEDIA)
+                ).text
+            )
+            val token = attestRes.optString("token").takeIf { it.isNotBlank() } ?: return null
+            val fp = JSONObject()
+                .put("token", token)
+                .put("viewer_id", attestRes.optString("viewer_id"))
+                .put("device_id", attestRes.optString("device_id"))
+                .put("confidence", attestRes.optString("confidence", "medium"))
+            attestCache[embedOrigin] = (now + 240_000L) to fp
+            fp
+        }.getOrNull()
+    }
+
+    private suspend fun solveByseStreamPowParallel(nonceStr: String, difficulty: Int): String? {
+        if (difficulty <= 0) return "0"
+        val targetBits = difficulty.coerceAtMost(26)
+        val prefixBytes = "$nonceStr:".toByteArray(Charsets.ISO_8859_1)
+        val found = AtomicReference<String?>(null)
+        val workers = 4
+        val maxIterations = 8_000_000L
+        coroutineScope {
+            (0 until workers).map { workerId ->
+                async(Dispatchers.Default) {
+                    val e = IntArray(4)
+                    val r = IntArray(512)
+                    val buf = ByteArray(prefixBytes.size + 16)
+                    System.arraycopy(prefixBytes, 0, buf, 0, prefixBytes.size)
+                    var nVal = workerId.toLong()
+                    while (nVal < maxIterations && found.get() == null) {
+                        val sStr = nVal.toString()
+                        val totalLen = prefixBytes.size + sStr.length
+                        for (idx in sStr.indices) {
+                            buf[prefixBytes.size + idx] = sStr[idx].code.toByte()
+                        }
+                        if (byseGrLeadingZeros(buf, totalLen, e, r) >= targetBits) {
+                            found.compareAndSet(null, sStr)
+                            break
+                        }
+                        nVal += workers
+                    }
+                }
+            }.awaitAll()
+        }
+        return found.get()
+    }
+
+    private fun byseQuarterRound(e: IntArray) {
+        e[0] = e[0] + e[1]
+        e[3] = Integer.rotateLeft(e[3] xor e[0], 16)
+        e[2] = e[2] + e[3]
+        e[1] = Integer.rotateLeft(e[1] xor e[2], 12)
+        e[0] = e[0] + e[1]
+        e[3] = Integer.rotateLeft(e[3] xor e[0], 8)
+        e[2] = e[2] + e[3]
+        e[1] = Integer.rotateLeft(e[1] xor e[2], 7)
+    }
+
+    private fun byseGrLeadingZeros(input: ByteArray, length: Int, e: IntArray, r: IntArray): Int {
+        e[0] = 0x6A09E667
+        e[1] = -0x4498517B // 3144134277 unsigned
+        e[2] = 0x3C6EF372
+        e[3] = -0x5AB00AC6 // 2773480762 unsigned
+
+        for (i in 0 until length) {
+            e[0] = e[0] + (input[i].toInt() and 0xFF)
+            e[0] = Integer.rotateLeft(e[0], 7)
+            byseQuarterRound(e)
+        }
+        for (i in 0 until 8) {
+            byseQuarterRound(e)
+        }
+        for (i in 0 until 512) {
+            byseQuarterRound(e)
+            r[i] = e[0] xor e[2]
+        }
+        for (round in 0 until 2) {
+            for (s in 0 until 512) {
+                val a = r[s] and 511
+                var c = r[s] + r[a]
+                c = Integer.rotateLeft(c, 13)
+                c = c xor (r[(s + 1) and 511] * (-0x61C8864F)) // 2654435761 unsigned
+                r[s] = c
+                e[0] = e[0] xor c
+                byseQuarterRound(e)
+            }
+        }
+        var lz = 0
+        for (i in 0 until 8) {
+            byseQuarterRound(e)
+            var sVal = e[0]
+            val base = i shl 6
+            for (c in 0 until 64) {
+                val d = r[base + c]
+                sVal += d
+                sVal = Integer.rotateLeft(sVal, 5)
+                sVal = sVal xor (d * (-0x7A143589)) // 2246822519 unsigned
+            }
+            val word = sVal xor e[2]
+            if (word == 0) {
+                lz += 32
+            } else {
+                lz += Integer.numberOfLeadingZeros(word)
+                break
+            }
+        }
+        return lz
+    }
+
+    private fun bigIntToFixed32(bi: java.math.BigInteger): ByteArray {
+        val raw = bi.toByteArray()
+        val out = ByteArray(32)
+        copyRightAligned32(raw, out, 0)
+        return out
+    }
+
+    private fun derToP1363(der: ByteArray): ByteArray {
+        var offset = 2
+        if ((der[1].toInt() and 0x80) != 0) {
+            offset += (der[1].toInt() and 0x7F)
+        }
+        val rLen = der[offset + 1].toInt() and 0xFF
+        val rBytes = der.copyOfRange(offset + 2, offset + 2 + rLen)
+        val sPos = offset + 2 + rLen
+        val sLen = der[sPos + 1].toInt() and 0xFF
+        val sBytes = der.copyOfRange(sPos + 2, sPos + 2 + sLen)
+        val out = ByteArray(64)
+        copyRightAligned32(rBytes, out, 0)
+        copyRightAligned32(sBytes, out, 32)
+        return out
+    }
+
+    private fun copyRightAligned32(src: ByteArray, dst: ByteArray, dstOffset: Int) {
+        val start = if (src.size > 32) src.size - 32 else 0
+        val len = minOf(src.size - start, 32)
+        System.arraycopy(src, start, dst, dstOffset + (32 - len), len)
+    }
+
+    private fun b64UrlEncode(bytes: ByteArray): String =
+        Base64.encodeToString(bytes, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
+
     private fun b64UrlDecode(s: String): ByteArray {
-        var padded = s.replace('-', '+').replace('_', '/')
+        var padded = s.trim().replace('-', '+').replace('_', '/')
         val rem = padded.length % 4
         if (rem != 0) padded += "=".repeat(4 - rem)
         return Base64.decode(padded, Base64.DEFAULT)
     }
 
     private fun decryptPlayback(pb: JSONObject): String? {
-        val keyParts = pb.optJSONArray("key_parts") ?: return null
-        if (keyParts.length() < 2) return null
-        val key1 = b64UrlDecode(keyParts.optString(0)) + b64UrlDecode(keyParts.optString(1))
-        val iv1 = b64UrlDecode(pb.optString("iv"))
-        val payload1 = b64UrlDecode(pb.optString("payload"))
-        aesGcmDecrypt(key1, iv1, payload1)?.let { return it }
+        val keyParts = pb.optJSONArray("key_parts")
+        if (keyParts != null && keyParts.length() >= 1) {
+            val total = keyParts.length()
+            val v = pb.optString("version", "1").trim().toIntOrNull() ?: pb.optInt("version", 1)
+            val iv1 = runCatching { b64UrlDecode(pb.optString("iv")) }.getOrNull()
+            val payload1 = runCatching { b64UrlDecode(pb.optString("payload")) }.getOrNull()
+            if (iv1 != null && payload1 != null) {
+                val candidateKeys = ArrayList<ByteArray>()
+                // Exact `Qa` mapping in `videoPagesBundle.js`: 1-based `[v, 31 - v]` when both <= total
+                if (v in 1..20 && v <= total && (31 - v) in 1..total) {
+                    candidateKeys.add(b64UrlDecode(keyParts.optString(v - 1)) + b64UrlDecode(keyParts.optString(30 - v)))
+                }
+                // Secondary `[v - 1, total - v]` + `[0, 1]` + full concatenation fallbacks
+                if (total >= 2) {
+                    val idxA = (v - 1).coerceIn(0, total - 1)
+                    val idxB = (total - v).coerceIn(0, total - 1)
+                    candidateKeys.add(b64UrlDecode(keyParts.optString(idxA)) + b64UrlDecode(keyParts.optString(idxB)))
+                    candidateKeys.add(b64UrlDecode(keyParts.optString(0)) + b64UrlDecode(keyParts.optString(1)))
+                }
+                runCatching {
+                    var all = ByteArray(0)
+                    for (idx in 0 until total) all += b64UrlDecode(keyParts.optString(idx))
+                    if (all.size in listOf(16, 24, 32)) candidateKeys.add(all)
+                }
+                for (key in candidateKeys) {
+                    aesGcmDecrypt(key, iv1, payload1)?.let { plain ->
+                        if (plain.contains("sources")) return plain
+                    }
+                }
+            }
+        }
 
         val p2 = pb.optString("payload2")
         val iv2s = pb.optString("iv2")
@@ -956,7 +1801,7 @@ open class Anime4UpByseExtractor : ExtractorApi() {
             val edge2 = decryptKeys?.optString("edge_2")?.takeIf { it.isNotBlank() }
             if (edge1 != null && edge2 != null) {
                 val key2 = b64UrlDecode(edge1) + b64UrlDecode(edge2)
-                return aesGcmDecrypt(key2, b64UrlDecode(iv2s), b64UrlDecode(p2))
+                aesGcmDecrypt(key2, b64UrlDecode(iv2s), b64UrlDecode(p2))?.let { return it }
             }
         }
         return null
@@ -968,7 +1813,7 @@ open class Anime4UpByseExtractor : ExtractorApi() {
         String(cipher.doFinal(cipherBytes), Charsets.UTF_8)
     }.getOrNull()
 
-    private fun solvePow(challenge: JSONObject?): String? {
+    private fun solveSha256EdgePow(challenge: JSONObject?): String? {
         if (challenge == null || !challenge.optBoolean("enabled", false)) return null
         val token = challenge.optString("token").takeIf { it.isNotBlank() } ?: return null
         val ts = challenge.optLong("timestamp", 0L)
@@ -991,6 +1836,11 @@ open class Anime4UpByseExtractor : ExtractorApi() {
             if (ok) return "$token.$ts.$nonce"
         }
         return null
+    }
+
+    companion object {
+        private val BYSE_JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
+        private val attestCache = ConcurrentHashMap<String, Pair<Long, JSONObject>>()
     }
 }
 
@@ -1018,7 +1868,10 @@ class Anime4UpLuluStreamExtractor : ExtractorApi() {
         qualityHint: String?,
         callback: (ExtractorLink) -> Unit
     ) {
-        val code = url.trimEnd('/').substringAfterLast('/')
+        val code = url.substringBefore('?').substringBefore('#').trimEnd('/')
+            .substringAfterLast('/')
+            .removePrefix("embed-")
+            .removeSuffix(".html")
         if (code.isBlank()) return
         val qVal = Anime4UpExtractorUtils.parseQualityValue(qualityHint)
         for (host in listOf("luluvdo.com", "lulustream.com")) {
@@ -1026,18 +1879,25 @@ class Anime4UpLuluStreamExtractor : ExtractorApi() {
             val html = runCatching {
                 app.get(
                     embedUrl,
-                    referer = referer ?: "$mainUrl/",
+                    referer = referer ?: "https://$host/",
                     headers = mapOf("User-Agent" to Anime4UpExtractorUtils.UA)
                 ).text
             }.getOrNull() ?: continue
 
             val combined = Anime4UpExtractorUtils.unpackAllScripts(html)
-            val m3u8 = Regex("""["'](https?://[^"']+\.m3u8[^"']*)["']""").find(combined)?.groupValues?.get(1) ?: continue
+            val m3u8 = Regex("""["'](https?://[^"']+(?:\.m3u8|/master\.txt)[^"']*)["']""")
+                .find(combined)?.groupValues?.get(1) ?: continue
+            val headers = mapOf(
+                "User-Agent" to Anime4UpExtractorUtils.UA,
+                "Referer" to embedUrl,
+                "Origin" to "https://$host"
+            )
             Anime4UpExtractorUtils.emitHls(
                 source = name,
                 label = name,
                 m3u8Url = m3u8,
                 referer = embedUrl,
+                headers = headers,
                 fallbackQuality = qVal,
                 callback = callback
             )
@@ -1066,14 +1926,16 @@ class Anime4UpSaveFilesExtractor : ExtractorApi() {
         qualityHint: String?,
         callback: (ExtractorLink) -> Unit
     ) {
-        val fileCode = Regex("""savefiles\.com/(?:e/|d/)?([A-Za-z0-9]+)""").find(url)?.groupValues?.get(1) ?: return
-        val embedUrl = "$mainUrl/e/$fileCode"
+        val fileCode = Regex("""(?:savefiles\.com|streamhls\.to)/(?:e/|d/)?([A-Za-z0-9]+)""", RegexOption.IGNORE_CASE)
+            .find(url)?.groupValues?.get(1) ?: return
+        val origin = Anime4UpExtractorUtils.originOf(url) ?: mainUrl
+        val embedUrl = "$origin/e/$fileCode"
         val html = runCatching {
             app.post(
-                url = "$mainUrl/dl",
+                url = "$origin/dl",
                 headers = mapOf(
                     "Referer" to embedUrl,
-                    "Origin" to mainUrl,
+                    "Origin" to origin,
                     "User-Agent" to Anime4UpExtractorUtils.UA,
                     "Content-Type" to "application/x-www-form-urlencoded"
                 ),
@@ -1081,7 +1943,7 @@ class Anime4UpSaveFilesExtractor : ExtractorApi() {
                     "op" to "embed",
                     "file_code" to fileCode,
                     "auto" to "1",
-                    "referer" to (referer ?: "$mainUrl/")
+                    "referer" to (referer ?: "$origin/")
                 )
             ).text
         }.getOrNull() ?: return
@@ -1093,7 +1955,12 @@ class Anime4UpSaveFilesExtractor : ExtractorApi() {
             source = name,
             label = name,
             m3u8Url = m3u8,
-            referer = "$mainUrl/",
+            referer = "$origin/",
+            headers = mapOf(
+                "User-Agent" to Anime4UpExtractorUtils.UA,
+                "Referer" to "$origin/",
+                "Origin" to origin
+            ),
             fallbackQuality = qVal,
             callback = callback
         )
@@ -1745,3 +2612,588 @@ class Anime4UpMoshahdaExtractor : ExtractorApi() {
             }
     }
 }
+
+// =========================================================================
+// 11. Vidstack AES-128-CBC SPA Extractors (UPNShare / StreamP2P / RPMShare)
+//     (`megamax.uns.bio`, `megamax.strp2p.site`, `rpmplay.me` -> `megamax.rpmplay.me`)
+// =========================================================================
+
+abstract class Anime4UpVidstackExtractor : ExtractorApi() {
+    override val requiresReferer = true
+
+    override suspend fun getUrl(
+        url: String,
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        extractWithHint(url, referer, null, callback)
+    }
+
+    suspend fun extractWithHint(
+        url: String,
+        referer: String?,
+        qualityHint: String?,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val videoId = url.substringAfterLast('#', "")
+            .substringBefore('&')
+            .substringBefore('?')
+            .trim()
+            .ifEmpty {
+                url.substringBefore('?').substringBefore('#').trimEnd('/')
+                    .substringAfterLast('/')
+                    .takeIf { it.isNotBlank() && !it.contains('.') }
+                    .orEmpty()
+            }
+        if (videoId.isBlank()) return
+
+        val rawHost = runCatching { URI(url).host?.lowercase().orEmpty() }.getOrDefault("")
+        val candidateOrigins = buildList {
+            // Bare Vidstack domains (`rpmplay.me`, `uns.bio`, `strp2p.site`) reject requests without
+            // the tenant subdomain (`400 {"message": "player is not recognized"}`).
+            if (rawHost == "rpmplay.me" || rawHost == "www.rpmplay.me") add("https://megamax.rpmplay.me")
+            if (rawHost == "uns.bio" || rawHost == "www.uns.bio") add("https://megamax.uns.bio")
+            if (rawHost == "strp2p.site" || rawHost == "www.strp2p.site") add("https://megamax.strp2p.site")
+            Anime4UpExtractorUtils.originOf(url)?.let { add(it) }
+            add(mainUrl)
+        }.distinct()
+
+        val qVal = Anime4UpExtractorUtils.parseQualityValue(qualityHint)
+
+        for (origin in candidateOrigins) {
+            val apiUrl = "$origin/api/v1/video?id=$videoId"
+            val reqHeaders = mapOf(
+                "User-Agent" to Anime4UpExtractorUtils.UA,
+                "Referer" to "$origin/",
+                "Origin" to origin,
+                "Accept" to "*/*"
+            )
+            val rawHex = runCatching {
+                app.get(apiUrl, headers = reqHeaders).text.trim().trim('"')
+            }.getOrNull() ?: continue
+
+            if (rawHex.length < 32 || rawHex.startsWith("{")) continue
+
+            val decrypted = decryptVidstackHex(rawHex) ?: continue
+            val root = runCatching { JSONObject(decrypted) }.getOrNull() ?: continue
+
+            val streamUrls = LinkedHashSet<String>()
+            // 1. `cfNative` (`master.*.m3u8?k=...`) — multi-quality 200 OK master playlist
+            collectVidstackUrls(root.opt("cfNative"), origin, streamUrls)
+            // 2. `source` — primary origin HLS master playlist
+            collectVidstackUrls(root.opt("source"), origin, streamUrls)
+            // 3. Fallback `cf` only if neither `cfNative` nor `source` is present
+            if (streamUrls.isEmpty()) {
+                collectVidstackUrls(root.opt("cf"), origin, streamUrls)
+            }
+
+            if (streamUrls.isEmpty()) continue
+
+            val streamHeaders = mapOf(
+                "User-Agent" to Anime4UpExtractorUtils.UA,
+                "Referer" to "$origin/",
+                "Origin" to origin
+            )
+            for (hlsUrl in streamUrls) {
+                Anime4UpExtractorUtils.emitHls(
+                    source = name,
+                    label = name,
+                    m3u8Url = hlsUrl,
+                    referer = "$origin/",
+                    headers = streamHeaders,
+                    fallbackQuality = qVal,
+                    callback = callback
+                )
+            }
+            return
+        }
+    }
+
+    private fun collectVidstackUrls(node: Any?, origin: String, out: MutableSet<String>) {
+        when (node) {
+            is String -> {
+                val u = normalizeVidstackUrl(node, origin)
+                if (u != null) out.add(u)
+            }
+            is JSONObject -> {
+                val keys = node.keys()
+                while (keys.hasNext()) {
+                    val v = node.optString(keys.next())
+                    val u = normalizeVidstackUrl(v, origin)
+                    if (u != null) out.add(u)
+                }
+            }
+            is JSONArray -> {
+                for (i in 0 until node.length()) {
+                    collectVidstackUrls(node.opt(i), origin, out)
+                }
+            }
+        }
+    }
+
+    private fun normalizeVidstackUrl(raw: String, origin: String): String? {
+        val clean = raw.trim()
+        if (clean.isEmpty()) return null
+        return when {
+            clean.startsWith("http://") || clean.startsWith("https://") -> clean
+            clean.startsWith("//") -> "https:$clean"
+            clean.startsWith("/") -> "$origin$clean"
+            else -> null
+        }
+    }
+
+    private fun decryptVidstackHex(hexCipher: String): String? = runCatching {
+        val clean = hexCipher.replace(Regex("""\s+"""), "")
+        if (clean.length % 2 != 0) return null
+        val cipherBytes = ByteArray(clean.length / 2) { idx ->
+            clean.substring(idx * 2, idx * 2 + 2).toInt(16).toByte()
+        }
+        val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+        cipher.init(
+            Cipher.DECRYPT_MODE,
+            SecretKeySpec(VIDSTACK_AES_KEY.toByteArray(Charsets.UTF_8), "AES"),
+            IvParameterSpec(VIDSTACK_AES_IV.toByteArray(Charsets.UTF_8))
+        )
+        val plain = String(cipher.doFinal(cipherBytes), Charsets.UTF_8)
+        plain.trim { it <= ' ' || it.code < 0x20 }
+    }.getOrNull()
+
+    companion object {
+        private const val VIDSTACK_AES_KEY = "kiemtienmua911ca"
+        private const val VIDSTACK_AES_IV = "1234567890oiuytr"
+    }
+}
+
+class Anime4UpUpnShareExtractor : Anime4UpVidstackExtractor() {
+    override val name = "UPNShare"
+    override val mainUrl = "https://megamax.uns.bio"
+}
+
+class Anime4UpStreamP2PExtractor : Anime4UpVidstackExtractor() {
+    override val name = "StreamP2P"
+    override val mainUrl = "https://megamax.strp2p.site"
+}
+
+class Anime4UpRpmShareExtractor : Anime4UpVidstackExtractor() {
+    override val name = "RPMShare"
+    override val mainUrl = "https://megamax.rpmplay.me"
+}
+
+// =========================================================================
+// 12. FireStream Extractor (`firestream.to/e/<slug>` -> `firestream.site` `/resolve`)
+// =========================================================================
+
+class Anime4UpFireStreamExtractor : ExtractorApi() {
+    override val name = "FireStream"
+    override val mainUrl = "https://firestream.to"
+    override val requiresReferer = true
+
+    override suspend fun getUrl(
+        url: String,
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        extractWithHint(url, referer, null, subtitleCallback, callback)
+    }
+
+    suspend fun extractWithHint(
+        url: String,
+        referer: String?,
+        qualityHint: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val slug = Regex("""/(?:e|d|v)/([A-Za-z0-9_-]+)""").find(url)?.groupValues?.get(1)
+            ?: url.substringBefore('?').substringBefore('#').trimEnd('/').substringAfterLast('/')
+                .takeIf { it.isNotBlank() }
+            ?: return
+        val initialOrigin = Anime4UpExtractorUtils.originOf(url) ?: mainUrl
+        val embedUrl = "$initialOrigin/e/$slug"
+
+        val res = runCatching {
+            app.get(
+                embedUrl,
+                referer = referer ?: "$initialOrigin/",
+                headers = mapOf("User-Agent" to Anime4UpExtractorUtils.UA)
+            )
+        }.getOrNull() ?: return
+
+        val finalUrl = res.url.ifBlank { embedUrl }
+        val finalOrigin = Anime4UpExtractorUtils.originOf(finalUrl) ?: "https://firestream.site"
+        val cookieHeader = Anime4UpExtractorUtils.formatCookieHeader(
+            Anime4UpExtractorUtils.collectCookies(res.okhttpResponse)
+        )
+        val doc = res.document
+
+        // Optional external subtitles inside `<script id="video-data" type="application/json">`
+        doc.selectFirst("script#video-data")?.let { scriptEl ->
+            val rawVideoData = scriptEl.data().ifBlank { scriptEl.html() }.trim()
+            runCatching {
+                val subs = JSONObject(rawVideoData).optJSONObject("video")?.optJSONArray("subtitles")
+                if (subs != null) {
+                    for (i in 0 until subs.length()) {
+                        val s = subs.optJSONObject(i) ?: continue
+                        val subUrl = (s.optString("url").ifBlank { s.optString("file") })
+                            .takeIf { it.startsWith("http") } ?: continue
+                        val lang = s.optString("label").ifBlank { s.optString("language").ifBlank { "Arabic" } }
+                        subtitleCallback(newSubtitleFile(lang, subUrl))
+                    }
+                }
+            }
+        }
+
+        val tokenBlob = doc.selectFirst("script#token-blob")?.let { el ->
+            el.data().ifBlank { el.html() }.trim()
+        }?.takeIf { it.isNotBlank() } ?: return
+
+        val postHeaders = LinkedHashMap<String, String>().apply {
+            put("User-Agent", Anime4UpExtractorUtils.UA)
+            put("Accept", "application/json")
+            put("Content-Type", "application/json")
+            put("Referer", finalUrl)
+            put("Origin", finalOrigin)
+            if (cookieHeader.isNotBlank()) put("Cookie", cookieHeader)
+        }
+        val postBody = JSONObject().put("blob", tokenBlob).toString()
+            .toRequestBody("application/json; charset=utf-8".toMediaType())
+
+        val resolveJson = runCatching {
+            val txt = app.post("$finalOrigin/api/videos/$slug/resolve", headers = postHeaders, requestBody = postBody).text
+            JSONObject(txt)
+        }.getOrNull() ?: return
+
+        val primaryUrl = resolveJson.optString("signedVideoUrl").takeIf { it.startsWith("http") }
+        val sdUrl = resolveJson.optString("signedVideoSdUrl").takeIf { it.startsWith("http") }
+        val qVal = Anime4UpExtractorUtils.parseQualityValue(qualityHint)
+
+        val streamHeaders = mapOf(
+            "User-Agent" to Anime4UpExtractorUtils.UA,
+            "Referer" to "$finalOrigin/",
+            "Origin" to finalOrigin
+        )
+
+        if (primaryUrl != null) {
+            emitFireStreamMedia(primaryUrl, finalOrigin, streamHeaders, qVal, callback)
+        }
+        if (sdUrl != null && sdUrl != primaryUrl) {
+            val sdQuality = if (qVal in 1..Qualities.P480.value) qVal else Qualities.P480.value
+            emitFireStreamMedia(sdUrl, finalOrigin, streamHeaders, sdQuality, callback)
+        }
+    }
+
+    private suspend fun emitFireStreamMedia(
+        mediaUrl: String,
+        origin: String,
+        headers: Map<String, String>,
+        quality: Int,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        if (mediaUrl.contains(".m3u8", ignoreCase = true)) {
+            Anime4UpExtractorUtils.emitHls(
+                source = name,
+                label = name,
+                m3u8Url = mediaUrl,
+                referer = "$origin/",
+                headers = headers,
+                fallbackQuality = quality,
+                callback = callback
+            )
+        } else {
+            val qTag = Anime4UpExtractorUtils.formatQualityTag(quality)
+            val label = if (qTag.isNotEmpty()) "$name ($qTag)" else name
+            Anime4UpExtractorUtils.emitVideo(
+                source = name,
+                label = label,
+                videoUrl = mediaUrl,
+                referer = "$origin/",
+                quality = quality,
+                headers = headers,
+                callback = callback
+            )
+        }
+    }
+}
+
+// =========================================================================
+// 13. Vidara Extractor (`vidaraa.cc/e/<filecode>` / `vidara.so` / `vidara.to`)
+// =========================================================================
+
+class Anime4UpVidaraExtractor : ExtractorApi() {
+    override val name = "Vidara"
+    override val mainUrl = "https://vidaraa.cc"
+    override val requiresReferer = true
+
+    override suspend fun getUrl(
+        url: String,
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        extractWithHint(url, referer, null, subtitleCallback, callback)
+    }
+
+    suspend fun extractWithHint(
+        url: String,
+        referer: String?,
+        qualityHint: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val filecode = Regex("""/(?:e|d|v)/([A-Za-z0-9_-]+)""").find(url)?.groupValues?.get(1)
+            ?: url.substringBefore('?').substringBefore('#').trimEnd('/').substringAfterLast('/')
+                .takeIf { it.isNotBlank() }
+            ?: return
+        val initialOrigin = Anime4UpExtractorUtils.originOf(url) ?: mainUrl
+        val embedUrl = "$initialOrigin/e/$filecode"
+
+        val pageRes = runCatching {
+            app.get(
+                embedUrl,
+                referer = referer ?: "$initialOrigin/",
+                headers = mapOf("User-Agent" to Anime4UpExtractorUtils.UA)
+            )
+        }.getOrNull()
+
+        val finalEmbedUrl = pageRes?.url?.takeIf { it.isNotBlank() } ?: embedUrl
+        val finalOrigin = Anime4UpExtractorUtils.originOf(finalEmbedUrl) ?: initialOrigin
+        val cookieHeader = pageRes?.okhttpResponse?.let {
+            Anime4UpExtractorUtils.formatCookieHeader(Anime4UpExtractorUtils.collectCookies(it))
+        }.orEmpty()
+
+        val apiHeaders = LinkedHashMap<String, String>().apply {
+            put("User-Agent", Anime4UpExtractorUtils.UA)
+            put("Accept", "application/json")
+            put("Content-Type", "application/json")
+            put("Referer", finalEmbedUrl)
+            put("Origin", finalOrigin)
+            if (cookieHeader.isNotBlank()) put("Cookie", cookieHeader)
+        }
+        val payload = JSONObject()
+            .put("filecode", filecode)
+            .put("device", "web")
+            .put("codecs", JSONArray())
+            .toString()
+            .toRequestBody("application/json; charset=utf-8".toMediaType())
+
+        val streamJson = runCatching {
+            val txt = app.post("$finalOrigin/api/stream", headers = apiHeaders, requestBody = payload).text
+            JSONObject(txt)
+        }.getOrNull() ?: return
+
+        streamJson.optJSONArray("subtitles")?.let { subs ->
+            for (i in 0 until subs.length()) {
+                val s = subs.optJSONObject(i) ?: continue
+                if (s.optInt("type", 0) != 0) continue
+                val subUrl = s.optString("file_path").takeIf { it.startsWith("http") } ?: continue
+                val lang = s.optString("language").ifBlank { s.optString("label").ifBlank { "Arabic" } }
+                subtitleCallback(newSubtitleFile(lang, subUrl))
+            }
+        }
+
+        val streamingUrl = streamJson.optString("streaming_url").takeIf { it.startsWith("http") } ?: return
+        val qVal = Anime4UpExtractorUtils.parseQualityValue(qualityHint, streamJson.optString("title"))
+        val streamHeaders = mapOf(
+            "User-Agent" to Anime4UpExtractorUtils.UA,
+            "Referer" to "$finalOrigin/",
+            "Origin" to finalOrigin
+        )
+        Anime4UpExtractorUtils.emitHls(
+            source = name,
+            label = name,
+            m3u8Url = streamingUrl,
+            referer = "$finalOrigin/",
+            headers = streamHeaders,
+            fallbackQuality = qVal,
+            callback = callback
+        )
+    }
+}
+
+// =========================================================================
+// 14. EarnVids Extractor (`morencius.com/v/<code>`, `movearnpre`, `dintezuvio`, etc.)
+// =========================================================================
+
+class Anime4UpEarnVidsExtractor : ExtractorApi() {
+    override val name = "EarnVids"
+    override val mainUrl = "https://morencius.com"
+    override val requiresReferer = true
+
+    override suspend fun getUrl(
+        url: String,
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        extractWithHint(url, referer, null, callback)
+    }
+
+    suspend fun extractWithHint(
+        url: String,
+        referer: String?,
+        qualityHint: String?,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val code = Regex("""/(?:v|d|e|embed|file|f)/([A-Za-z0-9]+)""", RegexOption.IGNORE_CASE)
+            .find(url)?.groupValues?.get(1)
+            ?: url.substringBefore('?').substringBefore('#').trimEnd('/').substringAfterLast('/')
+                .removeSuffix(".html")
+                .takeIf { it.isNotBlank() }
+            ?: return
+        val initialOrigin = Anime4UpExtractorUtils.originOf(url) ?: mainUrl
+
+        // Note: on `morencius.com`, `/e/<code>` returns 404 and `/d/<code>` is the download page;
+        // `/v/<code>` (and `/embed/<code>`) serve the packed JWPlayer stream links.
+        for (pathPrefix in listOf("v", "embed")) {
+            val candidateUrl = "$initialOrigin/$pathPrefix/$code"
+            val res = runCatching {
+                app.get(
+                    candidateUrl,
+                    referer = referer ?: "$initialOrigin/",
+                    headers = mapOf("User-Agent" to Anime4UpExtractorUtils.UA)
+                )
+            }.getOrNull() ?: continue
+
+            if (res.code >= 400) continue
+            val finalEmbedUrl = res.url.ifBlank { candidateUrl }
+            val finalOrigin = Anime4UpExtractorUtils.originOf(finalEmbedUrl) ?: initialOrigin
+
+            // Two unpack passes in case a script is double-packed
+            val pass1 = Anime4UpExtractorUtils.unpackAllScripts(res.text)
+            val combined = Anime4UpExtractorUtils.unpackAllScripts(pass1)
+
+            val candidateStreams = LinkedHashSet<String>()
+            Regex("""var\s+links\s*=\s*(\{[^;]+\})""").find(combined)?.groupValues?.get(1)?.let { rawLinks ->
+                runCatching {
+                    val obj = JSONObject(rawLinks)
+                    for (key in listOf("hls4", "hls2", "hls3", "hls")) {
+                        val v = obj.optString(key).trim()
+                        resolveEarnVidsStreamUrl(v, finalOrigin)?.let { candidateStreams.add(it) }
+                    }
+                }
+            }
+            if (candidateStreams.isEmpty()) {
+                for (key in listOf("hls4", "hls2", "hls3", "hls")) {
+                    Regex("""["']$key["']\s*:\s*["']([^"']+)["']""").findAll(combined).forEach { m ->
+                        resolveEarnVidsStreamUrl(m.groupValues[1], finalOrigin)?.let { candidateStreams.add(it) }
+                    }
+                }
+            }
+            if (candidateStreams.isEmpty()) {
+                Regex("""file\s*:\s*["'](https?://[^"']+\.m3u8[^"']*)["']""").findAll(combined).forEach { m ->
+                    candidateStreams.add(m.groupValues[1])
+                }
+            }
+
+            if (candidateStreams.isEmpty()) continue
+
+            val qVal = Anime4UpExtractorUtils.parseQualityValue(qualityHint)
+            val streamHeaders = mapOf(
+                "User-Agent" to Anime4UpExtractorUtils.UA,
+                "Referer" to finalEmbedUrl,
+                "Origin" to finalOrigin
+            )
+            for (hlsUrl in candidateStreams) {
+                Anime4UpExtractorUtils.emitHls(
+                    source = name,
+                    label = name,
+                    m3u8Url = hlsUrl,
+                    referer = finalEmbedUrl,
+                    headers = streamHeaders,
+                    fallbackQuality = qVal,
+                    callback = callback
+                )
+            }
+            return
+        }
+    }
+
+    private fun resolveEarnVidsStreamUrl(raw: String, origin: String): String? {
+        val clean = raw.trim().replace("\\/", "/")
+        if (clean.isEmpty()) return null
+        return when {
+            clean.startsWith("http://") || clean.startsWith("https://") -> clean
+            clean.startsWith("//") -> "https:$clean"
+            clean.startsWith("/") -> "$origin$clean"
+            else -> null
+        }
+    }
+}
+
+// =========================================================================
+// 15. Mixdrop Extractor (`mixdrop.ag/e/<code>` -> `mxdrop.click` `MDCore.wurl`)
+// =========================================================================
+
+class Anime4UpMixdropExtractor : ExtractorApi() {
+    override val name = "Mixdrop"
+    override val mainUrl = "https://mixdrop.ag"
+    override val requiresReferer = true
+
+    override suspend fun getUrl(
+        url: String,
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        extractWithHint(url, referer, null, callback)
+    }
+
+    suspend fun extractWithHint(
+        url: String,
+        referer: String?,
+        qualityHint: String?,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val code = Regex("""/(?:e|f)/([A-Za-z0-9]+)""", RegexOption.IGNORE_CASE)
+            .find(url)?.groupValues?.get(1)
+            ?: url.substringBefore('?').substringBefore('#').trimEnd('/').substringAfterLast('/')
+                .takeIf { it.isNotBlank() }
+            ?: return
+        val initialOrigin = Anime4UpExtractorUtils.originOf(url) ?: mainUrl
+        val embedUrl = "$initialOrigin/e/$code"
+
+        val res = runCatching {
+            app.get(
+                embedUrl,
+                referer = referer ?: "$initialOrigin/",
+                headers = mapOf("User-Agent" to Anime4UpExtractorUtils.UA)
+            )
+        }.getOrNull() ?: return
+
+        val finalEmbedUrl = res.url.ifBlank { embedUrl }
+        val finalOrigin = Anime4UpExtractorUtils.originOf(finalEmbedUrl) ?: initialOrigin
+        val combined = Anime4UpExtractorUtils.unpackAllScripts(res.text)
+
+        val rawWurl = Regex("""MDCore\.wurl\s*=\s*["']([^"']+)["']""")
+            .find(combined)?.groupValues?.get(1)?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?: return
+
+        val videoUrl = when {
+            rawWurl.startsWith("//") -> "https:$rawWurl"
+            rawWurl.startsWith("http") -> rawWurl
+            rawWurl.startsWith("/") -> "$finalOrigin$rawWurl"
+            else -> "https://$rawWurl"
+        }
+
+        val qVal = Anime4UpExtractorUtils.parseQualityValue(qualityHint, videoUrl)
+        val qTag = Anime4UpExtractorUtils.formatQualityTag(qVal)
+        val label = if (qTag.isNotEmpty()) "$name ($qTag)" else name
+        val headers = mapOf(
+            "User-Agent" to Anime4UpExtractorUtils.UA,
+            "Referer" to "$finalOrigin/",
+            "Origin" to finalOrigin
+        )
+        Anime4UpExtractorUtils.emitVideo(
+            source = name,
+            label = label,
+            videoUrl = videoUrl,
+            referer = "$finalOrigin/",
+            quality = qVal,
+            headers = headers,
+            callback = callback
+        )
+    }
+}
+
