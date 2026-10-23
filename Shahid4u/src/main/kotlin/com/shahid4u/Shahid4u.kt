@@ -587,9 +587,14 @@ class Shahid4u : MainAPI() {
         val watchPage = Shahid4uNetwork.getPage(watchUrl, referer = data)
         if (watchPage != null) {
             val watchDoc = watchPage.document
-            val csrfToken = watchDoc.selectFirst("meta[name=csrf-token]")?.attr("content")?.trim().orEmpty()
+            val csrfToken = Regex("""csrfToken\s*=\s*["']([^"']+)["']""")
+                .find(watchPage.rawHtml)?.groupValues?.get(1)?.trim()
+                ?.takeIf { it.isNotEmpty() }
+                ?: watchDoc.selectFirst("meta[name=csrf-token]")?.attr("content")?.trim().orEmpty()
             val watchKey = Regex("""watchResolveKey\s*=\s*["']([^"']+)["']""")
                 .find(watchPage.rawHtml)?.groupValues?.get(1)?.trim().orEmpty()
+            val customResolveUrl = Regex("""resolveUrl\s*=\s*["']([^"']+)["']""")
+                .find(watchPage.rawHtml)?.groupValues?.get(1)?.replace("\\/", "/")?.trim()
 
             // Collect any high-rank honeytrap tokens from inline `const servers = [...]` JSON
             val allTrapTokens = HashSet(watchPage.trapTokens)
@@ -615,7 +620,8 @@ class Shahid4u : MainAPI() {
                     }
                     .distinctBy { it.attr("data-token").trim() }
 
-                val resolveEndpoint = "${mainUrl.trimEnd('/')}/watch/resolve"
+                val resolveEndpoint = Shahid4uNetwork.resolveUrl(customResolveUrl, mainUrl)
+                    ?: "${mainUrl.trimEnd('/')}/watch/resolve"
 
                 for ((idx, btn) in visibleButtons.withIndex()) {
                     val serverTok = btn.attr("data-token").trim()

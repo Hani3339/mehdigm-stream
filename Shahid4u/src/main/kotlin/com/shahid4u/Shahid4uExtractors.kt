@@ -16,6 +16,9 @@ import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import okhttp3.Cookie
 import okhttp3.CookieJar
@@ -39,6 +42,7 @@ import java.security.interfaces.ECPublicKey
 import java.security.spec.ECGenParameterSpec
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.IvParameterSpec
@@ -191,6 +195,7 @@ object Shahid4uExtractors {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val url = rawUrl.trim().takeIf { it.startsWith("http") } ?: return false
+        val safeReferer = referer?.takeIf { it.isNotBlank() }?.let { Shahid4uNetwork.encodeUrl(it) }
         val host = hostOf(url)
         var emitted = false
         val wrappedCallback: (ExtractorLink) -> Unit = { link ->
@@ -201,53 +206,53 @@ object Shahid4uExtractors {
         try {
             when {
                 host.contains("vinovo") ->
-                    extractVinovo(url, referer, qualityHint, subtitleCallback, wrappedCallback)
+                    extractVinovo(url, safeReferer, qualityHint, subtitleCallback, wrappedCallback)
 
                 host.contains("vidara") ->
-                    extractVidara(url, referer, qualityHint, subtitleCallback, wrappedCallback)
+                    extractVidara(url, safeReferer, qualityHint, subtitleCallback, wrappedCallback)
 
                 host.contains("fastvid") || host.contains("earnvids") || host.contains("dingtezuni") ||
                     host.contains("dintezuvio") || host.contains("vidhide") || host.contains("minochinos") ||
                     host.contains("movearnpre") || host.contains("smoothpre") ->
-                    extractEarnVids(url, referer, qualityHint, subtitleCallback, wrappedCallback)
+                    extractEarnVids(url, safeReferer, qualityHint, subtitleCallback, wrappedCallback)
 
                 host.contains("byse") || host == "n1mwq.org" ->
-                    extractByse(url, referer, qualityHint, subtitleCallback, wrappedCallback)
+                    extractByse(url, safeReferer, qualityHint, subtitleCallback, wrappedCallback)
 
                 host.contains("m1xdrop") || host.contains("mxdrop") || host.contains("mixdrop") ||
                     host.contains("mdy48tn97") || host.contains("mdbekjwqa") || host.contains("mdfx9dc8n") ->
-                    extractMixDrop(url, referer, qualityHint, subtitleCallback, wrappedCallback)
+                    extractMixDrop(url, safeReferer, qualityHint, subtitleCallback, wrappedCallback)
 
                 host.contains("playmogo") || host.contains("dood") || host.contains("dsvplay") ||
                     host.contains("myvidplay") || host.contains("d000") || host.contains("vide0") ||
                     host.contains("do7go") ->
-                    extractDood(url, referer, qualityHint, wrappedCallback)
+                    extractDood(url, safeReferer, qualityHint, wrappedCallback)
 
                 host.contains("voe.") || host.contains("derricknationtop") ->
-                    extractVoe(url, referer, qualityHint, subtitleCallback, wrappedCallback)
+                    extractVoe(url, safeReferer, qualityHint, subtitleCallback, wrappedCallback)
 
                 host.contains("uqload") ->
-                    extractUqload(url, referer, qualityHint, wrappedCallback)
+                    extractUqload(url, safeReferer, qualityHint, wrappedCallback)
 
                 host.contains("savefiles") || host.contains("streamhls") ->
-                    extractSaveFiles(url, referer, qualityHint, wrappedCallback)
+                    extractSaveFiles(url, safeReferer, qualityHint, wrappedCallback)
 
                 host == "vids.st" || host.endsWith(".vids.st") ->
-                    extractVidsSt(url, referer, qualityHint, subtitleCallback, wrappedCallback)
+                    extractVidsSt(url, safeReferer, qualityHint, subtitleCallback, wrappedCallback)
 
                 host.contains("upzur") ->
-                    extractUpzur(url, referer, qualityHint, wrappedCallback)
+                    extractUpzur(url, safeReferer, qualityHint, wrappedCallback)
 
                 host == "ok.ru" || host.endsWith(".ok.ru") || host.contains("odnoklassniki") ->
-                    extractOkRu(url, referer, wrappedCallback)
+                    extractOkRu(url, safeReferer, wrappedCallback)
 
                 host.contains("upns.") || host.contains("uns.bio") || host.contains("rpmplay") ||
                     host.contains("streamp2p") || host.contains("p2pplay") ->
-                    extractVidstackAes(url, referer, wrappedCallback)
+                    extractVidstackAes(url, safeReferer, wrappedCallback)
             }
 
             if (!emitted) {
-                loadExtractor(url, referer, subtitleCallback, wrappedCallback)
+                loadExtractor(url, safeReferer, subtitleCallback, wrappedCallback)
             }
         } catch (e: Throwable) {
             if (e is CancellationException) throw e
@@ -266,92 +271,101 @@ object Shahid4uExtractors {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) = withContext(Dispatchers.IO) {
-        val origin = originOf(url) ?: "https://vinovo.to"
-        val fileCode = URI(url).path.trim('/').substringAfterLast('/').trim()
-        if (fileCode.isBlank()) return@withContext
-        val embedUrl = "$origin/e/$fileCode"
+        val initialOrigin = originOf(url) ?: "https://vinovo.to"
+        val urlFileCode = URI(url).path.trim('/').substringAfterLast('/').trim()
+        if (urlFileCode.isBlank()) return@withContext
 
-        val client = newSessionClient()
-        val html = runCatching {
-            val req = Request.Builder()
-                .url(embedUrl)
-                .header("User-Agent", DESKTOP_UA)
-                .header("Referer", referer ?: "$origin/")
-                .build()
-            client.newCall(req).execute().use { if (it.isSuccessful) it.body?.string().orEmpty() else "" }
-        }.getOrDefault("")
-        if (html.isBlank()) return@withContext
+        val candidateOrigins = linkedSetOf(initialOrigin, "https://vinovo.to", "https://vinovo.si")
 
-        val doc = Jsoup.parse(html, embedUrl)
-        val metaToken = doc.selectFirst("meta[name=token]")?.attr("content")?.trim().orEmpty()
-        val videoEl = doc.selectFirst("video#player, video[data-base]")
-        val dataBase = videoEl?.attr("data-base")?.trim()?.takeIf { it.startsWith("http") } ?: origin
-        val titleQuality = detectQualityFromText(doc.title(), qualityHint ?: Qualities.P1080.value)
-        val finalQual = qualityHint ?: titleQuality
+        for (origin in candidateOrigins) {
+            val embedUrl = "$origin/e/$urlFileCode"
+            val client = newSessionClient()
+            val html = runCatching {
+                val req = Request.Builder()
+                    .url(embedUrl)
+                    .header("User-Agent", DESKTOP_UA)
+                    .header("Referer", referer ?: "$origin/")
+                    .build()
+                client.newCall(req).execute().use { if (it.isSuccessful) it.body?.string().orEmpty() else "" }
+            }.getOrDefault("")
+            if (html.isBlank()) continue
 
-        // Subtitles if present inside <video><track ...>
-        doc.select("track[src]").forEach { tr ->
-            val subSrc = tr.absUrl("src").ifBlank { tr.attr("src") }
-            if (subSrc.startsWith("http")) {
-                val label = tr.attr("label").ifBlank { tr.attr("srclang").ifBlank { "Arabic" } }
-                subtitleCallback(newSubtitleFile(label, subSrc))
-            }
-        }
+            val doc = Jsoup.parse(html, embedUrl)
+            val metaToken = doc.selectFirst("meta[name=token]")?.attr("content")?.trim().orEmpty()
+            val apiFileCode = doc.selectFirst("meta[name=file_code]")?.attr("content")?.trim()
+                ?.takeIf { it.isNotEmpty() } ?: urlFileCode
+            val videoEl = doc.selectFirst("video#video, video#player, video[data-base]")
+            val dataBase = videoEl?.attr("data-base")?.trim()?.takeIf { it.startsWith("http") } ?: origin
+            val titleQuality = detectQualityFromText(doc.title(), qualityHint ?: Qualities.P1080.value)
+            val finalQual = qualityHint ?: titleQuality
 
-        if (metaToken.isBlank()) return@withContext
-
-        val apiBody = FormBody.Builder()
-            .add("recaptcha", "")
-            .add("token", metaToken)
-            .build()
-
-        val apiJson = runCatching {
-            val req = Request.Builder()
-                .url("$origin/api/file/url/$fileCode")
-                .post(apiBody)
-                .header("User-Agent", DESKTOP_UA)
-                .header("Accept", "application/json, text/javascript, */*; q=0.01")
-                .header("X-Requested-With", "XMLHttpRequest")
-                .header("Origin", origin)
-                .header("Referer", embedUrl)
-                .build()
-            client.newCall(req).execute().use { res ->
-                if (res.isSuccessful) JSONObject(res.body?.string().orEmpty()) else null
-            }
-        }.getOrNull() ?: return@withContext
-
-        val streamTok = apiJson.optString("token").trim()
-        if (streamTok.isBlank()) return@withContext
-
-        val decodedTok = runCatching { URLDecoder.decode(streamTok, "UTF-8") }.getOrDefault(streamTok)
-        val streamUrl = if (decodedTok.startsWith("http")) {
-            decodedTok
-        } else {
-            "${dataBase.trimEnd('/')}/stream/${decodedTok.trimStart('/')}"
-        }
-
-        val headers = mapOf(
-            "User-Agent" to DESKTOP_UA,
-            "Referer" to "$origin/"
-        )
-
-        val linkName = if (qualityHint != null) "Vinovo" else "Vinovo"
-        if (streamUrl.contains(".m3u8", ignoreCase = true)) {
-            M3u8Helper.generateM3u8(linkName, streamUrl, "$origin/", quality = qualityHint, headers = headers)
-                .forEach(callback)
-        } else {
-            callback(
-                newExtractorLink(
-                    source = linkName,
-                    name = linkName,
-                    url = streamUrl,
-                    type = ExtractorLinkType.VIDEO
-                ) {
-                    this.referer = "$origin/"
-                    this.quality = finalQual
-                    this.headers = headers
+            doc.select("track[src]").forEach { tr ->
+                val subSrc = tr.absUrl("src").ifBlank { tr.attr("src") }
+                if (subSrc.startsWith("http")) {
+                    val label = tr.attr("label").ifBlank { tr.attr("srclang").ifBlank { "Arabic" } }
+                    subtitleCallback(newSubtitleFile(label, subSrc))
                 }
+            }
+
+            if (metaToken.isBlank()) continue
+
+            val apiBody = FormBody.Builder()
+                .add("recaptcha", "")
+                .add("token", metaToken)
+                .build()
+
+            val apiJson = runCatching {
+                val req = Request.Builder()
+                    .url("$origin/api/file/url/$apiFileCode")
+                    .post(apiBody)
+                    .header("User-Agent", DESKTOP_UA)
+                    .header("Accept", "*/*")
+                    .header("X-Requested-With", "XMLHttpRequest")
+                    .header("Origin", origin)
+                    .header("Referer", embedUrl)
+                    .build()
+                client.newCall(req).execute().use { res ->
+                    if (!res.isSuccessful) null
+                    else {
+                        val txt = res.body?.string()?.trim().orEmpty()
+                        if (txt.startsWith("{")) JSONObject(txt) else null
+                    }
+                }
+            }.getOrNull() ?: continue
+
+            val streamTok = apiJson.optString("token").trim()
+            if (streamTok.isBlank()) continue
+
+            val decodedTok = runCatching { URLDecoder.decode(streamTok, "UTF-8") }.getOrDefault(streamTok)
+            val streamUrl = if (decodedTok.startsWith("http")) {
+                decodedTok
+            } else {
+                "${dataBase.trimEnd('/')}/stream/${decodedTok.trimStart('/')}"
+            }
+
+            val headers = mapOf(
+                "User-Agent" to DESKTOP_UA,
+                "Referer" to "$origin/"
             )
+
+            if (streamUrl.contains(".m3u8", ignoreCase = true)) {
+                M3u8Helper.generateM3u8("Vinovo", streamUrl, "$origin/", quality = qualityHint, headers = headers)
+                    .forEach(callback)
+            } else {
+                callback(
+                    newExtractorLink(
+                        source = "Vinovo",
+                        name = "Vinovo",
+                        url = streamUrl,
+                        type = ExtractorLinkType.VIDEO
+                    ) {
+                        this.referer = "$origin/"
+                        this.quality = finalQual
+                        this.headers = headers
+                    }
+                )
+            }
+            return@withContext
         }
     }
 
@@ -587,6 +601,9 @@ object Shahid4uExtractors {
 
     // ── 4. Byse (`bysevepoin.com`, `n1mwq.org`, etc.) — ECDSA PoW + AES-GCM ──
 
+    private val byseAttestCache = ConcurrentHashMap<String, Pair<Long, JSONObject>>()
+    private val BYSE_JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
+
     suspend fun extractByse(
         url: String,
         referer: String?,
@@ -594,78 +611,65 @@ object Shahid4uExtractors {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) = withContext(Dispatchers.IO) {
-        val initialOrigin = originOf(url) ?: return@withContext
+        val origin = originOf(url) ?: return@withContext
         val code = URI(url).path.trim('/').substringAfterLast('/').substringBefore('?').trim()
         if (code.isBlank()) return@withContext
+        val embedReferer = "$origin/e/$code"
 
-        var apiOrigin = initialOrigin
-        var videoCode = code
+        val details = byseFetchJsonGet("$origin/api/videos/$code/embed/details", embedReferer, origin)
+        val embedFrameUrl = details?.optString("embed_frame_url")?.takeIf { it.startsWith("http") }
+        val embedDomain = embedFrameUrl?.let { originOf(it) } ?: origin
+        val playbackCode = details?.optString("code")?.takeIf { it.isNotBlank() }
+            ?: embedFrameUrl?.substringBefore('?')?.substringBefore('#')?.trimEnd('/')
+                ?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
+            ?: code
+        val parentHost = runCatching { URI(origin).host }.getOrNull() ?: "bysevepoin.com"
 
-        // Follow `embed_frame_url` (e.g. `bysevepoin.com` -> `https://n1mwq.org/e/<code>`)
-        runCatching {
-            val detailsReq = Request.Builder()
-                .url("$initialOrigin/api/videos/$code/embed/details")
-                .header("User-Agent", DESKTOP_UA)
-                .header("Referer", "$initialOrigin/e/$code")
-                .build()
-            app.baseClient.newCall(detailsReq).execute().use { res ->
-                if (res.isSuccessful) {
-                    val det = JSONObject(res.body?.string().orEmpty())
-                    val frameUrl = det.optString("embed_frame_url").trim()
-                    if (frameUrl.startsWith("http")) {
-                        originOf(frameUrl)?.let { apiOrigin = it }
-                        val fCode = URI(frameUrl).path.trim('/').substringAfterLast('/').trim()
-                        if (fCode.isNotEmpty()) videoCode = fCode
-                    }
-                }
-            }
-        }
-
-        val embedReferer = "$apiOrigin/e/$videoCode"
-        val playbackUrl = "$apiOrigin/api/videos/$videoCode/playback"
-
-        // Attempt 1: direct playback JSON (sometimes open without PoW)
-        var playbackJson = fetchBysePlayback(playbackUrl, embedReferer, apiOrigin, captchaToken = null)
-
-        // Attempt 2: Full 3-step ECDSA P-256 + SHA-256 PoW `/access/challenge` -> `/access/attest`
-        if (playbackJson == null || (!playbackJson.has("playback") && !playbackJson.has("sources"))) {
-            val token = solveByseAccessChallenge(apiOrigin, embedReferer)
-            if (!token.isNullOrBlank()) {
-                playbackJson = fetchBysePlayback(playbackUrl, embedReferer, apiOrigin, captchaToken = token)
-            }
-        }
-
-        val root = playbackJson ?: return@withContext
-
-        // Decrypt AES-GCM `playback` object if encrypted, else read `sources` directly
-        val decryptedObj: JSONObject = if (root.has("playback")) {
-            decryptBysePlaybackObject(root.optJSONObject("playback")) ?: return@withContext
-        } else {
-            root
-        }
-
-        val headers = mapOf(
-            "User-Agent" to DESKTOP_UA,
-            "Referer" to "$apiOrigin/",
-            "Origin" to apiOrigin
+        val playbackObj = bysePostEmbedPlayback(
+            embedOrigin = embedDomain,
+            code = playbackCode,
+            embedPageUrl = embedFrameUrl ?: "$embedDomain/e/$playbackCode",
+            parentHost = parentHost,
+            parentFrameUrl = embedReferer,
+            parentReferer = referer ?: "$origin/"
         )
+            ?: details?.optJSONObject("playback")
+            ?: (if (embedDomain != origin) {
+                byseFetchJsonGet("$embedDomain/api/videos/$playbackCode/embed/details", "$embedDomain/e/$playbackCode", embedDomain)
+                    ?.optJSONObject("playback")
+            } else null)
+            ?: byseFetchJsonGet("$origin/api/videos/$code", embedReferer, origin)?.optJSONObject("playback")
+            ?: return@withContext
+
+        val decryptedStr = decryptBysePlayback(playbackObj) ?: return@withContext
+        val decryptedObj = runCatching { JSONObject(decryptedStr) }.getOrNull() ?: return@withContext
+        val edgeAuth = solveByseSha256EdgePow(playbackObj.optJSONObject("edge_challenge"))
+
+        val headers = LinkedHashMap<String, String>().apply {
+            put("User-Agent", DESKTOP_UA)
+            put("Referer", "$embedDomain/")
+            put("Origin", embedDomain)
+            if (edgeAuth != null) put("X-Edge-Auth", edgeAuth)
+        }
 
         val sources = decryptedObj.optJSONArray("sources") ?: JSONArray()
         for (i in 0 until sources.length()) {
             val sObj = sources.optJSONObject(i) ?: continue
             val sUrl = sObj.optString("url").ifBlank { sObj.optString("file") }.trim()
             if (!sUrl.startsWith("http")) continue
-            val labelQual = detectQualityFromText(sObj.optString("label"), qualityHint ?: Qualities.Unknown.value)
+            val labelText = sObj.optString("label").ifBlank { sObj.optString("quality") }
+            val heightText = sObj.optInt("height", 0).takeIf { it > 0 }?.let { "${it}p" }.orEmpty()
+            val labelQual = detectQualityFromText("$labelText $heightText", qualityHint ?: Qualities.Unknown.value)
             val effQual = qualityHint ?: labelQual.takeIf { it != Qualities.Unknown.value }
 
             if (sUrl.contains(".m3u8", ignoreCase = true)) {
-                val links = M3u8Helper.generateM3u8("Byse", sUrl, "$apiOrigin/", quality = effQual, headers = headers)
+                val links = M3u8Helper.generateM3u8("Byse", sUrl, "$embedDomain/", quality = effQual, headers = headers)
                 if (links.isNotEmpty()) {
                     links.forEach(callback)
                 } else {
                     callback(
                         newExtractorLink("Byse", "Byse", sUrl, ExtractorLinkType.M3U8) {
-                            this.referer = "$apiOrigin/"
+                            this.referer = "$embedDomain/"
                             this.quality = effQual ?: Qualities.P1080.value
                             this.headers = headers
                         }
@@ -674,7 +678,7 @@ object Shahid4uExtractors {
             } else {
                 callback(
                     newExtractorLink("Byse", "Byse", sUrl, ExtractorLinkType.VIDEO) {
-                        this.referer = "$apiOrigin/"
+                        this.referer = "$embedDomain/"
                         this.quality = effQual ?: Qualities.P1080.value
                         this.headers = headers
                     }
@@ -682,7 +686,7 @@ object Shahid4uExtractors {
             }
         }
 
-        val tracks = decryptedObj.optJSONArray("tracks") ?: root.optJSONArray("tracks") ?: JSONArray()
+        val tracks = decryptedObj.optJSONArray("tracks") ?: playbackObj.optJSONArray("tracks") ?: JSONArray()
         for (i in 0 until tracks.length()) {
             val tObj = tracks.optJSONObject(i) ?: continue
             val kind = tObj.optString("kind", "captions").lowercase()
@@ -695,153 +699,377 @@ object Shahid4uExtractors {
         }
     }
 
-    private fun fetchBysePlayback(
-        playbackUrl: String,
-        referer: String,
-        origin: String,
-        captchaToken: String?
-    ): JSONObject? = runCatching {
-        val rb = Request.Builder()
-            .url(playbackUrl)
-            .header("User-Agent", DESKTOP_UA)
+    private fun byseFetchJsonGet(apiUrl: String, referer: String, origin: String): JSONObject? = runCatching {
+        val req = Request.Builder()
+            .url(apiUrl)
             .header("Accept", "application/json")
-            .header("Referer", referer)
+            .header("User-Agent", DESKTOP_UA)
             .header("Origin", origin)
-            .header("X-Embed-Parent", referer)
-        if (!captchaToken.isNullOrBlank()) {
-            rb.header("X-Captcha-Token", captchaToken)
-        }
-        app.baseClient.newCall(rb.build()).execute().use { res ->
+            .header("Referer", referer)
+            .build()
+        app.baseClient.newCall(req).execute().use { res ->
             if (!res.isSuccessful) null else JSONObject(res.body?.string().orEmpty())
         }
     }.getOrNull()
 
-    private fun solveByseAccessChallenge(origin: String, referer: String): String? = runCatching {
-        // Generate ephemeral P-256 ECDSA keypair -> uncompressed 65-byte raw public key
-        val kpg = KeyPairGenerator.getInstance("EC")
-        kpg.initialize(ECGenParameterSpec("secp256r1"))
-        val kp = kpg.generateKeyPair()
-        val pub = kp.public as ECPublicKey
-        val rawPub = ByteArray(65)
-        rawPub[0] = 0x04
-        val xBytes = toFixed32Bytes(pub.w.affineX)
-        val yBytes = toFixed32Bytes(pub.w.affineY)
-        System.arraycopy(xBytes, 0, rawPub, 1, 32)
-        System.arraycopy(yBytes, 0, rawPub, 33, 32)
-        val pubB64Url = b64UrlEncode(rawPub)
-
-        val chalBody = JSONObject()
-            .put("purpose", "playback")
-            .put("public_key", pubB64Url)
-            .toString()
-
-        val chalJson = app.baseClient.newCall(
-            Request.Builder()
-                .url("$origin/access/challenge")
-                .post(chalBody.toRequestBody("application/json; charset=utf-8".toMediaType()))
-                .header("User-Agent", DESKTOP_UA)
-                .header("Accept", "application/json")
-                .header("Origin", origin)
-                .header("Referer", referer)
-                .build()
-        ).execute().use { res ->
-            if (!res.isSuccessful) return@runCatching null
-            JSONObject(res.body?.string().orEmpty())
+    private suspend fun bysePostEmbedPlayback(
+        embedOrigin: String,
+        code: String,
+        embedPageUrl: String,
+        parentHost: String,
+        parentFrameUrl: String,
+        parentReferer: String
+    ): JSONObject? = runCatching {
+        val baseHeaders = LinkedHashMap<String, String>().apply {
+            put("User-Agent", DESKTOP_UA)
+            put("Accept", "*/*")
+            put("Origin", embedOrigin)
+            put("Referer", embedPageUrl)
+            put("X-Embed-Origin", parentHost)
+            put("X-Embed-Parent", parentFrameUrl)
+            if (parentReferer.startsWith("http")) {
+                put("X-Embed-Referer", parentReferer)
+            }
         }
 
-        val challengeId = chalJson.optString("challenge_id")
-        val nonce = chalJson.optString("nonce")
-        val difficulty = chalJson.optInt("difficulty", 12)
-        if (challengeId.isBlank() || nonce.isBlank()) return@runCatching null
+        val settings = runCatching {
+            val req = Request.Builder().url("$embedOrigin/api/videos/$code/embed/settings")
+            baseHeaders.forEach { (k, v) -> req.header(k, v) }
+            app.baseClient.newCall(req.build()).execute().use {
+                if (it.isSuccessful) JSONObject(it.body?.string().orEmpty()) else null
+            }
+        }.getOrNull()
 
-        // PoW: find integer `counter` where SHA-256("$nonce$counter") has >= `difficulty` leading zero bits
-        val md = MessageDigest.getInstance("SHA-256")
-        var counter = 0L
-        while (counter < 5_000_000L) {
-            val candidate = "$nonce$counter"
-            val hash = md.digest(candidate.toByteArray(Charsets.UTF_8))
-            if (hasLeadingZeroBits(hash, difficulty)) break
-            counter++
+        val fingerprint = byseObtainAttestedFingerprint(embedOrigin, baseHeaders)
+        var captchaToken: String? = null
+
+        if (settings?.optBoolean("captcha_required", false) == true) {
+            val capBodyJson = JSONObject().apply {
+                if (fingerprint != null) put("fingerprint", fingerprint)
+            }
+            val capChallenge = runCatching {
+                val req = Request.Builder()
+                    .url("$embedOrigin/api/videos/$code/embed/captcha")
+                    .post(capBodyJson.toString().toRequestBody(BYSE_JSON_MEDIA))
+                baseHeaders.forEach { (k, v) -> req.header(k, v) }
+                req.header("Content-Type", "application/json")
+                app.baseClient.newCall(req.build()).execute().use {
+                    if (it.isSuccessful) JSONObject(it.body?.string().orEmpty()) else null
+                }
+            }.getOrNull()
+
+            if (capChallenge != null) {
+                val powNonce = capChallenge.optString("pow_nonce")
+                val powToken = capChallenge.optString("pow_token")
+                val powDiff = capChallenge.optInt("pow_difficulty", 14)
+                if (powNonce.isNotBlank() && powToken.isNotBlank()) {
+                    val solution = solveByseStreamPowParallel(powNonce, powDiff)
+                    if (solution != null) {
+                        val verifyJson = JSONObject()
+                            .put("pow_token", powToken)
+                            .put("solution", solution)
+                            .apply { if (fingerprint != null) put("fingerprint", fingerprint) }
+                        val verifyRes = runCatching {
+                            val req = Request.Builder()
+                                .url("$embedOrigin/api/videos/$code/embed/captcha/verify")
+                                .post(verifyJson.toString().toRequestBody(BYSE_JSON_MEDIA))
+                            baseHeaders.forEach { (k, v) -> req.header(k, v) }
+                            req.header("Content-Type", "application/json")
+                            app.baseClient.newCall(req.build()).execute().use {
+                                if (it.isSuccessful) JSONObject(it.body?.string().orEmpty()) else null
+                            }
+                        }.getOrNull()
+                        if (verifyRes?.optString("status") == "ok") {
+                            captchaToken = verifyRes.optString("token").takeIf { it.isNotBlank() }
+                        }
+                    }
+                }
+            }
         }
 
-        // Sign "$challengeId.$nonce.$counter" with ECDSA SHA256 (convert DER -> raw 64-byte P1363 R||S)
-        val messageBytes = "$challengeId.$nonce.$counter".toByteArray(Charsets.UTF_8)
-        val derSig = Signature.getInstance("SHA256withECDSA").apply {
-            initSign(kp.private)
-            update(messageBytes)
-        }.sign()
-        val rawSig64 = derEcdsaToP1363(derSig)
-        val sigB64Url = b64UrlEncode(rawSig64)
-
-        val attestBody = JSONObject()
-            .put("challenge_id", challengeId)
-            .put("pow_nonce", counter)
-            .put("signature", sigB64Url)
-            .put("signals", JSONObject().apply {
-                put("webdriver", false)
-                put("languages", 2)
-                put("plugins", 5)
-            })
-            .toString()
-
-        app.baseClient.newCall(
-            Request.Builder()
-                .url("$origin/access/attest")
-                .post(attestBody.toRequestBody("application/json; charset=utf-8".toMediaType()))
-                .header("User-Agent", DESKTOP_UA)
-                .header("Accept", "application/json")
-                .header("Origin", origin)
-                .header("Referer", referer)
-                .build()
-        ).execute().use { res ->
-            if (!res.isSuccessful) null
-            else JSONObject(res.body?.string().orEmpty()).optString("token").takeIf { it.isNotBlank() }
+        val pbUrl = "$embedOrigin/api/videos/$code/embed/playback"
+        val resText = if (fingerprint != null) {
+            val req = Request.Builder()
+                .url(pbUrl)
+                .post(JSONObject().put("fingerprint", fingerprint).toString().toRequestBody(BYSE_JSON_MEDIA))
+            baseHeaders.forEach { (k, v) -> req.header(k, v) }
+            req.header("Content-Type", "application/json")
+            if (!captchaToken.isNullOrBlank()) req.header("X-Captcha-Token", captchaToken!!)
+            app.baseClient.newCall(req.build()).execute().use { it.body?.string().orEmpty() }
+        } else {
+            val req = Request.Builder().url(pbUrl)
+            baseHeaders.forEach { (k, v) -> req.header(k, v) }
+            if (!captchaToken.isNullOrBlank()) req.header("X-Captcha-Token", captchaToken!!)
+            app.baseClient.newCall(req.build()).execute().use { it.body?.string().orEmpty() }
         }
+        val root = JSONObject(resText)
+        root.optJSONObject("playback") ?: if (root.has("payload")) root else null
     }.getOrNull()
 
-    private fun decryptBysePlaybackObject(pb: JSONObject?): JSONObject? {
-        if (pb == null) return null
-        val keyParts = pb.optJSONArray("key_parts")
-        if (keyParts != null && keyParts.length() >= 2) {
-            val k0 = b64UrlDecode(keyParts.optString(0))
-            val k1 = b64UrlDecode(keyParts.optString(1))
-            val fullKey = k0 + k1
-            // Try primary `iv` + `payload`
-            runCatching {
-                val iv = b64UrlDecode(pb.optString("iv"))
-                val cipherBytes = b64UrlDecode(pb.optString("payload"))
-                val plain = aesGcmDecrypt(fullKey, iv, cipherBytes)
-                return JSONObject(String(plain, Charsets.UTF_8))
+    private fun byseObtainAttestedFingerprint(
+        embedOrigin: String,
+        baseHeaders: Map<String, String>
+    ): JSONObject? {
+        val now = System.currentTimeMillis()
+        byseAttestCache[embedOrigin]?.let { (expiry, cached) ->
+            if (expiry > now) return cached
+        }
+        return runCatching {
+            val chReq = Request.Builder()
+                .url("$embedOrigin/api/videos/access/challenge")
+                .post("".toRequestBody(null))
+            baseHeaders.forEach { (k, v) -> chReq.header(k, v) }
+            val ch = app.baseClient.newCall(chReq.build()).execute().use { res ->
+                if (!res.isSuccessful) return@runCatching null
+                JSONObject(res.body?.string().orEmpty())
             }
-            // Fallback `iv2` + `payload2`
-            runCatching {
-                val iv2 = b64UrlDecode(pb.optString("iv2"))
-                val cipher2 = b64UrlDecode(pb.optString("payload2"))
-                val plain2 = aesGcmDecrypt(fullKey, iv2, cipher2)
-                return JSONObject(String(plain2, Charsets.UTF_8))
+            val challengeId = ch.optString("challenge_id").takeIf { it.isNotBlank() } ?: return@runCatching null
+            val nonce = ch.optString("nonce").takeIf { it.isNotBlank() } ?: return@runCatching null
+
+            val kpg = KeyPairGenerator.getInstance("EC").apply {
+                initialize(ECGenParameterSpec("secp256r1"))
+            }
+            val kp = kpg.generateKeyPair()
+            val pub = kp.public as ECPublicKey
+            val xB64 = b64UrlEncode(toFixed32Bytes(pub.w.affineX))
+            val yB64 = b64UrlEncode(toFixed32Bytes(pub.w.affineY))
+
+            val derSig = Signature.getInstance("SHA256withECDSA").run {
+                initSign(kp.private)
+                update(nonce.toByteArray(Charsets.UTF_8))
+                sign()
+            }
+            val p1363SigB64 = b64UrlEncode(derEcdsaToP1363(derSig))
+            val randHash = b64UrlEncode(
+                MessageDigest.getInstance("SHA-256").digest("$embedOrigin|$nonce".toByteArray(Charsets.UTF_8))
+            )
+
+            val attestPayload = JSONObject().apply {
+                put("viewer_id", "")
+                put("device_id", "")
+                put("challenge_id", challengeId)
+                put("nonce", nonce)
+                put("signature", p1363SigB64)
+                put("public_key", JSONObject().apply {
+                    put("kty", "EC")
+                    put("crv", "P-256")
+                    put("x", xB64)
+                    put("y", yB64)
+                })
+                put("client", JSONObject().apply {
+                    put("user_agent", DESKTOP_UA)
+                    put("pixel_ratio", 1)
+                    put("screen_width", 1920)
+                    put("screen_height", 1080)
+                    put("color_depth", 24)
+                    put("languages", JSONArray(listOf("en-US", "en")))
+                    put("timezone", "UTC")
+                    put("hardware_concurrency", 8)
+                    put("device_memory", 8)
+                    put("touch_points", 0)
+                    put("webgl_vendor", "Google Inc. (Intel)")
+                    put("webgl_renderer", "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)")
+                    put("canvas_hash", randHash)
+                    put("audio_hash", randHash)
+                    put("pointer_type", "fine,hover")
+                    put("media_devices", "ai1ao2vi1")
+                    put("extra", JSONObject().apply {
+                        put("vendor", "Google Inc.")
+                        put("appVersion", DESKTOP_UA.removePrefix("Mozilla/"))
+                    })
+                })
+                put("storage", JSONObject())
+                put("attributes", JSONObject().put("entropy", "medium"))
+            }
+
+            val atReq = Request.Builder()
+                .url("$embedOrigin/api/videos/access/attest")
+                .post(attestPayload.toString().toRequestBody(BYSE_JSON_MEDIA))
+            baseHeaders.forEach { (k, v) -> atReq.header(k, v) }
+            atReq.header("Content-Type", "application/json")
+
+            val attestRes = app.baseClient.newCall(atReq.build()).execute().use { res ->
+                if (!res.isSuccessful) return@runCatching null
+                JSONObject(res.body?.string().orEmpty())
+            }
+            val token = attestRes.optString("token").takeIf { it.isNotBlank() } ?: return@runCatching null
+            val fp = JSONObject()
+                .put("token", token)
+                .put("viewer_id", attestRes.optString("viewer_id"))
+                .put("device_id", attestRes.optString("device_id"))
+                .put("confidence", attestRes.optString("confidence", "medium"))
+            byseAttestCache[embedOrigin] = (now + 240_000L) to fp
+            fp
+        }.getOrNull()
+    }
+
+    private suspend fun solveByseStreamPowParallel(nonceStr: String, difficulty: Int): String? {
+        if (difficulty <= 0) return "0"
+        val targetBits = difficulty.coerceAtMost(26)
+        val prefixBytes = "$nonceStr:".toByteArray(Charsets.ISO_8859_1)
+        val found = AtomicReference<String?>(null)
+        val workers = 4
+        val maxIterations = 8_000_000L
+        coroutineScope {
+            (0 until workers).map { workerId ->
+                async(Dispatchers.Default) {
+                    val e = IntArray(4)
+                    val r = IntArray(512)
+                    val buf = ByteArray(prefixBytes.size + 16)
+                    System.arraycopy(prefixBytes, 0, buf, 0, prefixBytes.size)
+                    var nVal = workerId.toLong()
+                    while (nVal < maxIterations && found.get() == null) {
+                        val sStr = nVal.toString()
+                        val totalLen = prefixBytes.size + sStr.length
+                        for (idx in sStr.indices) {
+                            buf[prefixBytes.size + idx] = sStr[idx].code.toByte()
+                        }
+                        if (byseGrLeadingZeros(buf, totalLen, e, r) >= targetBits) {
+                            found.compareAndSet(null, sStr)
+                            break
+                        }
+                        nVal += workers
+                    }
+                }
+            }.awaitAll()
+        }
+        return found.get()
+    }
+
+    private fun byseQuarterRound(e: IntArray) {
+        e[0] = e[0] + e[1]
+        e[3] = Integer.rotateLeft(e[3] xor e[0], 16)
+        e[2] = e[2] + e[3]
+        e[1] = Integer.rotateLeft(e[1] xor e[2], 12)
+        e[0] = e[0] + e[1]
+        e[3] = Integer.rotateLeft(e[3] xor e[0], 8)
+        e[2] = e[2] + e[3]
+        e[1] = Integer.rotateLeft(e[1] xor e[2], 7)
+    }
+
+    private fun byseGrLeadingZeros(input: ByteArray, length: Int, e: IntArray, r: IntArray): Int {
+        e[0] = 0x6A09E667
+        e[1] = -0x4498517B
+        e[2] = 0x3C6EF372
+        e[3] = -0x5AB00AC6
+
+        for (i in 0 until length) {
+            e[0] = e[0] + (input[i].toInt() and 0xFF)
+            e[0] = Integer.rotateLeft(e[0], 7)
+            byseQuarterRound(e)
+        }
+        for (i in 0 until 8) byseQuarterRound(e)
+        for (i in 0 until 512) {
+            byseQuarterRound(e)
+            r[i] = e[0] xor e[2]
+        }
+        for (round in 0 until 2) {
+            for (s in 0 until 512) {
+                val a = r[s] and 511
+                var c = r[s] + r[a]
+                c = Integer.rotateLeft(c, 13)
+                c = c xor (r[(s + 1) and 511] * (-0x61C8864F))
+                r[s] = c
+                e[0] = e[0] xor c
+                byseQuarterRound(e)
+            }
+        }
+        var lz = 0
+        for (i in 0 until 8) {
+            byseQuarterRound(e)
+            var sVal = e[0]
+            val base = i shl 6
+            for (c in 0 until 64) {
+                val d = r[base + c]
+                sVal += d
+                sVal = Integer.rotateLeft(sVal, 5)
+                sVal = sVal xor (d * (-0x7A143589))
+            }
+            val word = sVal xor e[2]
+            if (word == 0) {
+                lz += 32
+            } else {
+                lz += Integer.numberOfLeadingZeros(word)
+                break
+            }
+        }
+        return lz
+    }
+
+    private fun decryptBysePlayback(pb: JSONObject): String? {
+        val keyParts = pb.optJSONArray("key_parts")
+        if (keyParts != null && keyParts.length() >= 1) {
+            val total = keyParts.length()
+            val v = pb.optString("version", "1").trim().toIntOrNull() ?: pb.optInt("version", 1)
+            val iv1 = runCatching { b64UrlDecode(pb.optString("iv")) }.getOrNull()
+            val payload1 = runCatching { b64UrlDecode(pb.optString("payload")) }.getOrNull()
+            if (iv1 != null && payload1 != null) {
+                val candidateKeys = ArrayList<ByteArray>()
+                if (v in 1..20 && v <= total && (31 - v) in 1..total) {
+                    candidateKeys.add(b64UrlDecode(keyParts.optString(v - 1)) + b64UrlDecode(keyParts.optString(30 - v)))
+                }
+                if (total >= 2) {
+                    val idxA = (v - 1).coerceIn(0, total - 1)
+                    val idxB = (total - v).coerceIn(0, total - 1)
+                    candidateKeys.add(b64UrlDecode(keyParts.optString(idxA)) + b64UrlDecode(keyParts.optString(idxB)))
+                    candidateKeys.add(b64UrlDecode(keyParts.optString(0)) + b64UrlDecode(keyParts.optString(1)))
+                }
+                runCatching {
+                    var all = ByteArray(0)
+                    for (idx in 0 until total) all += b64UrlDecode(keyParts.optString(idx))
+                    if (all.size in listOf(16, 24, 32)) candidateKeys.add(all)
+                }
+                for (key in candidateKeys) {
+                    aesGcmDecryptStr(key, iv1, payload1)?.let { plain ->
+                        if (plain.contains("sources")) return plain
+                    }
+                }
+            }
+        }
+
+        val p2 = pb.optString("payload2")
+        val iv2s = pb.optString("iv2")
+        if (p2.isNotBlank() && iv2s.isNotBlank()) {
+            val decryptKeys = pb.optJSONObject("decrypt_keys")
+            val edge1 = decryptKeys?.optString("edge_1")?.takeIf { it.isNotBlank() }
+            val edge2 = decryptKeys?.optString("edge_2")?.takeIf { it.isNotBlank() }
+            if (edge1 != null && edge2 != null) {
+                val key2 = b64UrlDecode(edge1) + b64UrlDecode(edge2)
+                aesGcmDecryptStr(key2, b64UrlDecode(iv2s), b64UrlDecode(p2))?.let { return it }
             }
         }
         return null
     }
 
-    private fun aesGcmDecrypt(key: ByteArray, iv: ByteArray, ciphertextWithTag: ByteArray): ByteArray {
+    private fun aesGcmDecryptStr(key: ByteArray, iv: ByteArray, ciphertextWithTag: ByteArray): String? = runCatching {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, iv))
-        return cipher.doFinal(ciphertextWithTag)
-    }
+        String(cipher.doFinal(ciphertextWithTag), Charsets.UTF_8)
+    }.getOrNull()
 
-    private fun hasLeadingZeroBits(bytes: ByteArray, bits: Int): Boolean {
-        val fullBytes = bits / 8
-        val remBits = bits % 8
-        for (i in 0 until fullBytes) {
-            if (i >= bytes.size || bytes[i].toInt() != 0) return false
+    private fun solveByseSha256EdgePow(challenge: JSONObject?): String? {
+        if (challenge == null || !challenge.optBoolean("enabled", false)) return null
+        val token = challenge.optString("token").takeIf { it.isNotBlank() } ?: return null
+        val ts = challenge.optLong("timestamp", 0L)
+        val difficulty = challenge.optInt("difficulty", 0)
+        if (difficulty <= 0 || difficulty > 24) return null
+        val fullBytes = difficulty / 8
+        val remBits = difficulty % 8
+        val mask = if (remBits == 0) 0 else (0xFF shl (8 - remBits)) and 0xFF
+        val md = MessageDigest.getInstance("SHA-256")
+        for (nonce in 0 until 2_000_000) {
+            val digest = md.digest("$token$ts$nonce".toByteArray(Charsets.UTF_8))
+            var ok = true
+            for (b in 0 until fullBytes) {
+                if (digest[b].toInt() != 0) {
+                    ok = false
+                    break
+                }
+            }
+            if (ok && remBits > 0 && (digest[fullBytes].toInt() and mask) != 0) ok = false
+            if (ok) return "$token.$ts.$nonce"
         }
-        if (remBits > 0) {
-            if (fullBytes >= bytes.size) return false
-            val mask = (0xFF shl (8 - remBits)) and 0xFF
-            if ((bytes[fullBytes].toInt() and mask) != 0) return false
-        }
-        return true
+        return null
     }
 
     private fun toFixed32Bytes(bi: BigInteger): ByteArray {
@@ -856,11 +1084,11 @@ object Shahid4uExtractors {
     private fun derEcdsaToP1363(der: ByteArray): ByteArray {
         var idx = 2
         if (der[1].toInt() and 0x80 != 0) idx += (der[1].toInt() and 0x7F)
-        idx++ // 0x02
+        idx++
         val rLen = der[idx++].toInt() and 0xFF
         val rBytes = der.copyOfRange(idx, idx + rLen)
         idx += rLen
-        idx++ // 0x02
+        idx++
         val sLen = der[idx++].toInt() and 0xFF
         val sBytes = der.copyOfRange(idx, idx + sLen)
 
@@ -973,62 +1201,71 @@ object Shahid4uExtractors {
         val fileCode = URI(url).path.trim('/').substringAfterLast('/').trim()
         if (fileCode.isBlank()) return@withContext
         val orig = originOf(url) ?: "https://playmogo.com"
-        val embedUrl = "$orig/e/$fileCode"
-
-        val client = newSessionClient()
-        val (finalEmbedUrl, html) = runCatching {
-            val req = Request.Builder()
-                .url(embedUrl)
-                .header("User-Agent", DESKTOP_UA)
-                .header("Referer", referer ?: "$orig/")
-                .build()
-            client.newCall(req).execute().use { res ->
-                if (!res.isSuccessful) null
-                else res.request.url.toString() to res.body?.string().orEmpty()
-            }
-        }.getOrNull() ?: return@withContext
-
-        val finalOrigin = originOf(finalEmbedUrl) ?: orig
-        val passMd5Path = Regex("""/pass_md5/[^'"\s<>]+""").find(html)?.value ?: return@withContext
-        val token = passMd5Path.substringAfterLast('/')
-
-        val mediaBase = runCatching {
-            val req = Request.Builder()
-                .url("$finalOrigin$passMd5Path")
-                .header("User-Agent", DESKTOP_UA)
-                .header("Referer", finalEmbedUrl)
-                .header("X-Requested-With", "XMLHttpRequest")
-                .build()
-            client.newCall(req).execute().use { res ->
-                if (res.isSuccessful) res.body?.string()?.trim().orEmpty() else ""
-            }
-        }.getOrDefault("")
-        if (!mediaBase.startsWith("http")) return@withContext
-
-        val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-        val rand10 = (1..10).map { alphabet.random() }.joinToString("")
-        val directMp4 = "$mediaBase$rand10?token=$token&expiry=${System.currentTimeMillis()}"
-
-        val pageTitle = Regex("""<title>(.*?)</title>""", RegexOption.DOT_MATCHES_ALL).find(html)?.groupValues?.get(1)
-        val effQual = qualityHint ?: detectQualityFromText(pageTitle, Qualities.P1080.value)
-
-        val headers = mapOf(
-            "User-Agent" to DESKTOP_UA,
-            "Referer" to "$finalOrigin/"
+        val candidates = linkedSetOf(
+            "$orig/e/$fileCode",
+            "https://myvidplay.com/e/$fileCode",
+            "https://dsvplay.com/e/$fileCode",
+            "https://d000d.com/e/$fileCode",
+            "https://vide0.net/e/$fileCode"
         )
 
-        callback(
-            newExtractorLink(
-                source = "DoodStream",
-                name = "DoodStream",
-                url = directMp4,
-                type = ExtractorLinkType.VIDEO
-            ) {
-                this.referer = "$finalOrigin/"
-                this.quality = effQual
-                this.headers = headers
-            }
-        )
+        for (embedUrl in candidates) {
+            val client = newSessionClient()
+            val (finalEmbedUrl, html) = runCatching {
+                val req = Request.Builder()
+                    .url(embedUrl)
+                    .header("User-Agent", DESKTOP_UA)
+                    .header("Referer", referer ?: "$orig/")
+                    .build()
+                client.newCall(req).execute().use { res ->
+                    if (!res.isSuccessful) null
+                    else res.request.url.toString() to res.body?.string().orEmpty()
+                }
+            }.getOrNull() ?: continue
+
+            val passMd5Path = Regex("""/pass_md5/[^'"\s<>]+""").find(html)?.value ?: continue
+            val finalOrigin = originOf(finalEmbedUrl) ?: originOf(embedUrl) ?: orig
+            val token = passMd5Path.substringAfterLast('/')
+
+            val mediaBase = runCatching {
+                val req = Request.Builder()
+                    .url("$finalOrigin$passMd5Path")
+                    .header("User-Agent", DESKTOP_UA)
+                    .header("Referer", finalEmbedUrl)
+                    .header("X-Requested-With", "XMLHttpRequest")
+                    .build()
+                client.newCall(req).execute().use { res ->
+                    if (res.isSuccessful) res.body?.string()?.trim().orEmpty() else ""
+                }
+            }.getOrDefault("")
+            if (!mediaBase.startsWith("http")) continue
+
+            val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+            val rand10 = (1..10).map { alphabet.random() }.joinToString("")
+            val directMp4 = "$mediaBase$rand10?token=$token&expiry=${System.currentTimeMillis()}"
+
+            val pageTitle = Regex("""<title>(.*?)</title>""", RegexOption.DOT_MATCHES_ALL).find(html)?.groupValues?.get(1)
+            val effQual = qualityHint ?: detectQualityFromText(pageTitle, Qualities.P1080.value)
+
+            val headers = mapOf(
+                "User-Agent" to DESKTOP_UA,
+                "Referer" to "$finalOrigin/"
+            )
+
+            callback(
+                newExtractorLink(
+                    source = "DoodStream",
+                    name = "DoodStream",
+                    url = directMp4,
+                    type = ExtractorLinkType.VIDEO
+                ) {
+                    this.referer = "$finalOrigin/"
+                    this.quality = effQual
+                    this.headers = headers
+                }
+            )
+            return@withContext
+        }
     }
 
     // ── 7. VOE (`voe.sx` + rotating JS redirect mirrors) ─────────────────────
