@@ -1,0 +1,61 @@
+
+Welcome to Gradle 8.12!
+
+Here are the highlights of this release:
+ - Enhanced error and warning reporting with the Problems API
+ - File-system watching support on Alpine Linux
+ - Build and test Swift 6 libraries and apps
+
+For more details see https://docs.gradle.org/8.12/release-notes.html
+
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/8.12/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+> Task :Cimawbas:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :Cimawbas:preBuild UP-TO-DATE
+> Task :Cimawbas:preDebugBuild UP-TO-DATE
+> Task :Anime4Up:clean UP-TO-DATE
+> Task :Anime4Up:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :Anime4Up:preBuild UP-TO-DATE
+> Task :Anime4Up:preDebugBuild UP-TO-DATE
+> Task :Anime4Up:generateDebugResValues
+> Task :Anime4Up:generateDebugResources
+> Task :Anime4Up:packageDebugResources
+> Task :Anime4Up:parseDebugLocalResources
+> Task :Anime4Up:generateDebugRFile
+
+> Task :Anime4Up:compileDebugKotlin
+w: file:///home/runner/work/mehdigm-stream/mehdigm-stream/Anime4Up/src/main/kotlin/com/anime4up/Anime4UpExtractors.kt:1161:34 'constructor(lang: String, url: String): SubtitleFile' is deprecated. Use newSubtitleFile method.
+w: file:///home/runner/work/mehdigm-stream/mehdigm-stream/Anime4Up/src/main/kotlin/com/anime4up/Anime4UpNetwork.kt:383:47 This declaration needs opt-in. Its usage should be marked with '@kotlinx.coroutines.ExperimentalCoroutinesApi' or '@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)'
+w: file:///home/runner/work/mehdigm-stream/mehdigm-stream/Anime4Up/src/main/kotlin/com/anime4up/Anime4UpNetwork.kt:442:21 'var databaseEnabled: Boolean' is deprecated. Deprecated in Java.
+
+> Task :Anime4Up:compileDex
+Compiled dex to /home/runner/work/mehdigm-stream/mehdigm-stream/Anime4Up/build/intermediates/classes.dex
+
+> Task :Anime4Up:generateManifest
+> Task :Cimawbas:clean UP-TO-DATE
+> Task :Cimawbas:generateDebugResValues
+> Task :Cimawbas:generateDebugResources
+> Task :Cimawbas:packageDebugResources
+> Task :Cimawbas:parseDebugLocalResources
+
+> Task :Anime4Up:make
+Made CloudStream package at /home/runner/work/mehdigm-stream/mehdigm-stream/Anime4Up/build/Anime4Up.cs3
+
+> Task :Cimawbas:generateDebugRFile
+
+> Task :Cimawbas:compileDebugKotlin
+w: file:///home/runner/work/mehdigm-stream/mehdigm-stream/Cimawbas/src/main/kotlin/com/cimawbas/BysebuhoCustom.kt:107:17 'constructor(source: String, name: String, url: String, referer: String, quality: Int, headers: Map<String, String> = ..., extractorData: String? = ..., type: ExtractorLinkType, audioTracks: List<AudioFile> = ...): ExtractorLink' is deprecated. Use newExtractorLink.
+w: file:///home/runner/work/mehdigm-stream/mehdigm-stream/Cimawbas/src/main/kotlin/com/cimawbas/BysebuhoCustom.kt:119:17 'constructor(source: String, name: String, url: String, referer: String, quality: Int, headers: Map<String, String> = ..., extractorData: String? = ..., type: ExtractorLinkType, audioTracks: List<AudioFile> = ...): ExtractorLink' is deprecated. Use newExtractorLink.
+w: file:///home/runner/work/mehdigm-stream/mehdigm-stream/Cimawbas/src/main/kotlin/com/cimawbas/MixdropExtractor.kt:62:13 'constructor(source: String, name: String, url: String, referer: String, quality: Int, headers: Map<String, String> = ..., extractorData: String? = ..., type: ExtractorLinkType, audioTracks: List<AudioFile> = ...): ExtractorLink' is deprecated. Use newExtractorLink.
+w: file:///home/runner/work/mehdigm-stream/mehdigm-stream/Cimawbas/src/main/kotlin/com/cimawbas/StreamHgExtractor.kt:150:13 'constructor(source: String, name: String, url: String, referer: String, quality: Int, headers: Map<String, String> = ..., extractorData: String? = ..., type: ExtractorLinkType, audioTracks: List<AudioFile> = ...): ExtractorLink' is deprecated. Use newExtractorLink.
+
+> Task :Cimawbas:compileDex
+Compiled dex to /home/runner/work/mehdigm-stream/mehdigm-stream/Cimawbas/build/intermediates/classes.dex
+
+> Task :Cimawbas:generateManifest
+
+> Task :Cimawbas:make
+Made CloudStream package at /home/runner/work/mehdigm-stream/mehdigm-stream/Cimawbas/build/Cimawbas.cs3
+
+BUILD SUCCESSFUL in 26s
+20 actionable tasks: 18 executed, 2 up-to-date
