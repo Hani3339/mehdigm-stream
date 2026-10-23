@@ -1,5 +1,29 @@
 [
     {
+        "iconUrl": "https://raw.githubusercontent.com/mehdigm4life/mehdigm-stream/main/build/Anime4Up.png",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
+        "fileSize": 29174,
+        "status": 1,
+        "language": "ar",
+        "authors": [
+            "mehdigm4life"
+        ],
+        "tvTypes": [
+            "Anime",
+            "AnimeMovie",
+            "Cartoon",
+            "TvSeries",
+            "Movie",
+            "OVA"
+        ],
+        "version": 1,
+        "internalName": "Anime4Up",
+        "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/Anime4Up.cs3",
+        "name": "انمي فور اب (Anime4Up)",
+        "description": "موقع انمي فور اب — مشاهدة وتحميل أحدث مسلسلات وأفلام الأنمي والكرتون المترجمة والمدبلجة بجودة عالية مع جميع سيرفرات المشاهدة والتحميل."
+    },
+    {
         "iconUrl": "https://animezid.org/uploads/custom-logo.png",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
