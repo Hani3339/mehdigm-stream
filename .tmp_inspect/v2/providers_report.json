@@ -1,0 +1,24 @@
+{
+  "good_proxies": [
+    "http://62.68.48.22:8080",
+    "http://188.132.249.148:8080"
+  ],
+  "workupload": {
+    "r1": 200,
+    "r2": 200,
+    "r3_status": 200,
+    "r3_body": "<html>\n  <head>\n    <title>workupload - Are you a human?</title>\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n                <script src=\"/js/39b9ad5.js?v=KUUBLZ75\"></script>\n        \n                <link rel=\"stylesheet\" type=\"text/css\" href=\"/css/4280ebd.css?v=KUUBLZ75\"/>\n        \n      <link rel=\"preconnect\" href=\"https://fundingchoicesmessages.google.com\" />\n      <link rel=\"preconnect\" href=\"https://googleads.g.doubleclick.net\" />\n      <link rel=\"preconnect\" href=\"https://pagead2.googlesyndication.com\" />\n\n      <!-- Matomo -->\n      <script>\n        var _paq = window._paq = window._paq || [];\n        _paq.push([\"disableCookies\"]);\n        _paq.push(['trackPageView']);\n        _paq.push(['enableLinkTracking']);\n        (function() {\n          var u=\"//t.workupload.com/\";\n          _paq.push(['setTrackerUrl', u+'matomo.php']);\n          _paq.push(['setSiteId', '1']);\n          var d=document, g=d.createElement('script'), s=d.getElementsByTagName('sc",
+    "cookies": {}
+  },
+  "gofile": {
+    "token_ok": true,
+    "wt": "4fd6sg89d7s6",
+    "cnt_status": 401,
+    "cnt_body": "{\"status\":\"error-notPremium\",\"data\":{}}"
+  },
+  "mediafire": {
+    "status": 200,
+    "direct": "https://download2434.mediafire.com/gkx7bvq29fzgGB76ONSGHbOhhTac2KfTQGWgl3MVLRw1fAI9MqhWWcEh0LCaMGToTpwS_yhV6Iwnlh_31UMzJ6dMrNGLBqv3PtSAUvvCqN9-PYdO0Mds_FvrzSXgwfz6W3YAxHjdq37EVPAHyBrHHViWP3iGSc5HGcg7uEGqXI3xKH4/a7nxsp84rbvukf9/%5BAnime4up.rest%5D+BC2S+EP+03+FHD.mp4",
+    "scrambled": null
+  }
+}
