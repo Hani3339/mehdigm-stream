@@ -237,29 +237,15 @@ object Anime4UpExtractorSuite {
         val host = runCatching { URI(url).host?.lowercase().orEmpty() }.getOrDefault("")
         if (host.isBlank() || SKIP_HOSTS.any { host.contains(it) }) return
 
-        val effectiveCallback: (ExtractorLink) -> Unit = if (sourcePrefix.isNullOrBlank()) {
+        val bufferedLinks: MutableList<ExtractorLink>? = if (sourcePrefix.isNullOrBlank()) {
+            null
+        } else {
+            java.util.Collections.synchronizedList(ArrayList<ExtractorLink>())
+        }
+        val effectiveCallback: (ExtractorLink) -> Unit = if (bufferedLinks == null) {
             callback
         } else {
-            { link ->
-                val pSource = if (link.source.startsWith(sourcePrefix, ignoreCase = true)) {
-                    link.source
-                } else {
-                    "$sourcePrefix - ${link.source}"
-                }
-                val pName = if (link.name.startsWith(sourcePrefix, ignoreCase = true)) {
-                    link.name
-                } else {
-                    "$sourcePrefix - ${link.name}"
-                }
-                callback(
-                    newExtractorLink(pSource, pName, link.url, link.type) {
-                        this.referer = link.referer
-                        this.quality = link.quality
-                        this.headers = link.headers
-                        this.extractorData = link.extractorData
-                    }
-                )
-            }
+            { link -> bufferedLinks.add(link) }
         }
 
         val hintLow = serverHint?.lowercase()?.trim().orEmpty()
@@ -343,6 +329,29 @@ object Anime4UpExtractorSuite {
             }
         } catch (_: Throwable) {
             // Never allow one broken mirror to fail the remaining servers
+        }
+
+        if (bufferedLinks != null && !sourcePrefix.isNullOrBlank()) {
+            for (link in bufferedLinks) {
+                val pSource = if (link.source.startsWith(sourcePrefix, ignoreCase = true)) {
+                    link.source
+                } else {
+                    "$sourcePrefix - ${link.source}"
+                }
+                val pName = if (link.name.startsWith(sourcePrefix, ignoreCase = true)) {
+                    link.name
+                } else {
+                    "$sourcePrefix - ${link.name}"
+                }
+                callback(
+                    newExtractorLink(pSource, pName, link.url, link.type) {
+                        this.referer = link.referer
+                        this.quality = link.quality
+                        this.headers = link.headers
+                        this.extractorData = link.extractorData
+                    }
+                )
+            }
         }
     }
 }
@@ -1407,8 +1416,7 @@ open class Anime4UpByseExtractor : ExtractorApi() {
                 .takeIf { it.startsWith("http") } ?: continue
             val qVal = Anime4UpExtractorUtils.parseQualityValue(
                 s.optString("label").ifBlank { s.optString("quality") },
-                s.optInt("height", 0).takeIf { it > 0 }?.let { "${it}p" }.orEmpty(),
-                qualityHint
+                s.optInt("height", 0).takeIf { it > 0 }?.let { "${it}p" }.orEmpty()
             ).let { if (it > 0) it else hintQuality }
 
             if (streamUrl.contains(".m3u8")) {

@@ -33,6 +33,7 @@ jobs:
 
       - name: Build Anime4Up.cs3
         run: |
+          set -euo pipefail
           mkdir -p .tmp_build_verify build
           ./gradlew :Anime4Up:clean :Anime4Up:make --stacktrace 2>&1 | tee .tmp_build_verify/gradle_build.log
           cp Anime4Up/build/Anime4Up.cs3 build/Anime4Up.cs3
