@@ -1,4 +1,4 @@
-version = 1
+version = 2
 
 cloudstream {
     description = "انمي فور اب (Anime4Up) — مشاهدة وتحميل أحدث مسلسلات وأفلام الأنمي والكرتون المترجمة والمدبلجة بجودة عالية مع جميع سيرفرات المشاهدة والتحميل."
@@ -16,5 +16,5 @@ cloudstream {
         "Cartoon"
     )
 
-    iconUrl = "https://w1.anime4up.rest/assets/img/Anime4up-Icon-1.png"
+    iconUrl = "https://raw.githubusercontent.com/mehdigm4life/mehdigm-stream/main/build/Anime4Up.png"
 }
