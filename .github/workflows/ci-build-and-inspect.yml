@@ -32,6 +32,7 @@ jobs:
 
       - name: Build Anime4Up & Cimawbas (.cs3)
         run: |
+          set -eo pipefail
           chmod +x gradlew
           ./gradlew :Anime4Up:clean :Anime4Up:make :Cimawbas:clean :Cimawbas:make --stacktrace --no-daemon | tee .tmp_gradle_build.log
           mkdir -p build
@@ -41,6 +42,7 @@ jobs:
 
       - name: Live End-to-End Verification
         run: |
+          set -eo pipefail
           pip install -q curl_cffi beautifulsoup4
           python3 -u - << 'PYEOF' 2>&1 | tee .tmp_verify_log.txt
           import base64, json, re, urllib.parse
@@ -303,9 +305,13 @@ jobs:
           PYEOF
 
       - name: Commit built .cs3 artifacts and verification report
+        if: always()
         run: |
           git config --local user.name "github-actions[bot]"
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git add -f build/Anime4Up.cs3 build/Cimawbas.cs3 .tmp_verify_report.json .tmp_verify_log.txt .tmp_gradle_build.log
-          git commit -m "chore: attach built Anime4Up.cs3, Cimawbas.cs3, and verification report [skip ci]"
+          for f in build/Anime4Up.cs3 build/Cimawbas.cs3 .tmp_verify_report.json .tmp_verify_log.txt .tmp_gradle_build.log; do
+            if [ -f "$f" ]; then git add -f "$f"; fi
+          done
+          git commit --allow-empty -m "chore: attach built Anime4Up.cs3, Cimawbas.cs3, and verification report [skip ci]"
+          git pull --rebase origin "${{ github.ref_name }}" || true
           git push origin "${{ github.ref_name }}"
