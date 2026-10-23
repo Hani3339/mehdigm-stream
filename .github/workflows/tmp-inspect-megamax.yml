@@ -101,6 +101,14 @@ jobs:
 
           public class VerifyMain {
               public static void main(String[] args) throws Exception {
+                  // Smoke check `app.get` first so any missing JVM classpath jar is immediately visible
+                  try {
+                      Object appClient = com.lagradost.cloudstream3.MainActivityKt.getApp();
+                      System.out.println("CloudStream app singleton initialized: " + appClient);
+                  } catch (Throwable t) {
+                      t.printStackTrace();
+                  }
+
                   List<ExtractorLink> links = new CopyOnWriteArrayList<>();
                   List<SubtitleFile> subs = new CopyOnWriteArrayList<>();
                   long t0 = System.currentTimeMillis();
@@ -165,7 +173,7 @@ jobs:
             CS_JAR=$(find . /home/runner -name "cloudstream*.jar" 2>/dev/null | head -n 1)
           fi
           GRADLE_JARS=$(find ~/.gradle/caches/modules-2/files-2.1 -name "*.jar" \
-            | grep -E "(kotlin-stdlib|kotlinx-coroutines|nicehttp|okhttp|okio|jsoup|jackson)" \
+            | grep -vE "(-sources\.jar|-javadoc\.jar|gradle|lint|aapt|kotlin-compiler|apkanalyzer)" \
             | tr '\n' ':')
 
           CP="$WORK_TMP/classes:$WORK_TMP/json.jar:$KOTLIN_CLASSES:$CS_JAR:$GRADLE_JARS"
@@ -174,7 +182,7 @@ jobs:
             "$WORK_TMP/src/android/util/Log.java" \
             "$WORK_TMP/src/VerifyMain.java"
 
-          java -cp "$CP" VerifyMain
+          java -cp "$CP" VerifyMain 2>&1 | tee .tmp_build_verify/jvm_verify.log
 
       - name: Commit build & live Kotlin E2E report
         if: always()
