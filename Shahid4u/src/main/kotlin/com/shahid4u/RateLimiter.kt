@@ -27,17 +27,17 @@ class SiteCooldownException(val remainingMs: Long) :
  * كان يفعّل الحظر. هذه البوابة تجعل الطلبات بطيئة بما يكفي ولا تسمح بانفجار.
  */
 object SiteGate {
-    private const val MIN_INTERVAL_MS = 2_200L
-    private const val SLOW_INTERVAL_MS = 6_000L
-    private const val MAX_BLOCKING_WAIT_MS = 6_000L
-    private const val MAX_WINDOW_WAIT_MS = 30_000L
+    private const val MIN_INTERVAL_MS = 1_800L
+    private const val SLOW_INTERVAL_MS = 4_000L
+    private const val MAX_BLOCKING_WAIT_MS = 4_000L
+    private const val MAX_WINDOW_WAIT_MS = 20_000L
 
     private const val WINDOW_MS = 60_000L
-    private const val WINDOW_LIMIT = 18
+    private const val WINDOW_LIMIT = 24
     private const val LONG_WINDOW_MS = 10 * 60_000L
-    private const val LONG_WINDOW_LIMIT = 50
+    private const val LONG_WINDOW_LIMIT = 65
 
-    private const val SUCCESS_BEFORE_RELAX = 15
+    private const val SUCCESS_BEFORE_RELAX = 12
     private const val PREFS = "shahid4u_gate_v1"
 
     private val mutex = Mutex()

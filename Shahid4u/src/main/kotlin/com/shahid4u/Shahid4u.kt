@@ -126,6 +126,7 @@ class Shahid4u : MainAPI() {
         "a.glide_post[href]",
         "a.glide-item[href]",
         "div.glide li.glide__slide:not(.glide__slide--clone)",
+        "div.row div[class*='col'] a[href]",
         "a[href*='/watch/']",
         "a[href*='/film/']",
         "a[href*='/episode/']",
@@ -342,7 +343,7 @@ class Shahid4u : MainAPI() {
                     cookies = cookiesFor(url),
                     interceptor = cfInterceptor,
                     allowRedirects = allowRedirects,
-                    timeout = 25L
+                    timeout = 30L
                 )
             }
         } catch (e: SiteCooldownException) {
@@ -401,7 +402,7 @@ class Shahid4u : MainAPI() {
     ): Document {
         if (allowCache) {
             docCache[url]?.let { (at, doc) ->
-                if (isFresh(at, 10 * 60_000L)) return doc
+                if (isFresh(at, 5 * 60_000L)) return doc
             }
         }
         val doc = siteGet(url, referer).document
@@ -534,7 +535,14 @@ class Shahid4u : MainAPI() {
             throw e
         } catch (e: Exception) {
             Log.w(logTag, "search failed: ${e.message}")
-            emptyList()
+            // محاولة fallback مع ترميز مختلف
+            try {
+                val doc2 = getDocument("${mainUrl}?s=${URLEncoder.encode(query, "UTF-8")}", referer = mainUrl)
+                val res = parseCards(doc2)
+                if (res.isNotEmpty()) res else emptyList()
+            } catch (e2: Exception) {
+                emptyList()
+            }
         }
     }
 
@@ -543,7 +551,13 @@ class Shahid4u : MainAPI() {
             throw ErrorLoadingException("تم إيقاف الطلبات مؤقتاً بسبب حد الموقع. أعد المحاولة لاحقاً.")
         }
         val url = if (request.data.isBlank()) withPage(mainUrl, page) else withPage(request.data, page)
-        val doc = getDocument(url, referer = mainUrl)
+        val doc = try {
+            getDocument(url, referer = mainUrl)
+        } catch (e: Exception) {
+            Log.w(logTag, "getMainPage getDocument failed for $url: ${e.message}")
+            // محاولة بدون ريفرير في حالة مشكلة الترويسات
+            getDocument(url, referer = null)
+        }
         val lists = ArrayList<HomePageList>()
 
         if (request.data.isBlank() && page <= 1) {
@@ -1028,7 +1042,7 @@ class Shahid4u : MainAPI() {
                     referer = headerSafe(watch.watchUrl),
                     requestBody = body.toRequestBody(jsonMediaType),
                     interceptor = cfInterceptor,
-                    timeout = 25L
+                    timeout = 30L
                 )
             }
         } catch (e: SiteCooldownException) {
@@ -1095,7 +1109,7 @@ class Shahid4u : MainAPI() {
                     cookies = cookiesFor(url),
                     interceptor = cfInterceptor,
                     allowRedirects = false,
-                    timeout = 25L
+                    timeout = 30L
                 )
             }
             rememberCookies(url, res)
