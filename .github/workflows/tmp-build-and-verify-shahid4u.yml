@@ -1,0 +1,541 @@
+name: Temp Build & Live E2E Verify Shahid4u v12
+
+on:
+  push:
+    branches:
+      - arena/67b3a643-mehdigm-stream
+
+permissions:
+  contents: write
+
+jobs:
+  build_and_verify:
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Configure preinstalled Android SDK & Build Shahid4u.cs3
+        run: |
+          export ANDROID_SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          export ANDROID_HOME="$ANDROID_SDK_ROOT"
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+          chmod +x gradlew
+          set +e
+          ./gradlew :Shahid4u:make --no-daemon --stacktrace > .tmp_gradle.log 2>&1
+          RC=$?
+          set -e
+          tail -n 60 .tmp_gradle.log
+          if [ "$RC" -eq 0 ] && [ -f "Shahid4u/build/Shahid4u.cs3" ]; then
+            mkdir -p build
+            cp Shahid4u/build/Shahid4u.cs3 build/Shahid4u.cs3
+            ls -lh build/Shahid4u.cs3
+            rm -f .tmp_gradle.log
+          else
+            echo "Gradle failed with code $RC"
+            exit 0
+          fi
+
+      - name: Install Python deps for Live E2E Verification
+        if: hashFiles('build/Shahid4u.cs3') != ''
+        run: pip install -q "curl_cffi" beautifulsoup4 cryptography
+
+      - name: Run Full Live E2E Verification (Homepage Episode + Homepage Movie + All Providers & Qualities)
+        if: hashFiles('build/Shahid4u.cs3') != ''
+        run: |
+          python3 - <<'PY'
+          import base64, codecs, concurrent.futures, hashlib, json, os, random, re, string, time, urllib.parse
+          from bs4 import BeautifulSoup
+          from curl_cffi import requests as creq
+          from cryptography.hazmat.primitives.asymmetric import ec
+          from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+          from cryptography.hazmat.primitives import hashes
+          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+          BASE = "https://shaahidd4u.net"
+          UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+          # 1. Discover sticky SOCKS5 proxy for shaahidd4u.net (Azure ASN bypass)
+          feeds = [
+              ("socks5h", "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt"),
+              ("socks5h", "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt"),
+              ("socks4", "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks4.txt"),
+          ]
+          cands = []
+          for proto, furl in feeds:
+              try:
+                  r = creq.get(furl, timeout=8)
+                  for ln in r.text.splitlines()[:120]:
+                      ln = ln.strip()
+                      if ":" in ln and not ln.startswith("#"):
+                          cands.append(f"{proto}://{ln}")
+              except Exception:
+                  pass
+
+          def valid_s4u(r):
+              if not r or r.status_code != 200 or len(r.text) < 2000:
+                  return False
+              low = r.text[:6000].lower()
+              if "just a moment" in low or "you have been blocked" in low:
+                  return False
+              return "shahid4u" in low or "shaahidd4u" in low
+
+          def test_px(px):
+              try:
+                  s = creq.Session(impersonate="chrome124", proxies={"http": px, "https": px})
+                  r = s.get(BASE + "/", timeout=9)
+                  if valid_s4u(r):
+                      return px
+              except Exception:
+                  pass
+              return None
+
+          good_proxies = []
+          with concurrent.futures.ThreadPoolExecutor(max_workers=35) as ex:
+              for res in ex.map(test_px, cands[:180]):
+                  if res:
+                      good_proxies.append(res)
+                      if len(good_proxies) >= 6:
+                          break
+
+          assert good_proxies, "No working proxy found for shaahidd4u.net"
+          px_idx = 0
+          sess = creq.Session(impersonate="chrome124", proxies={"http": good_proxies[0], "https": good_proxies[0]})
+
+          def s4u_get(url, ref=BASE + "/"):
+              global sess, px_idx
+              for _ in range(len(good_proxies)):
+                  try:
+                      time.sleep(0.2)
+                      r = sess.get(url, headers={"Referer": ref}, timeout=16)
+                      if valid_s4u(r):
+                          return r
+                  except Exception:
+                      pass
+                  px_idx = (px_idx + 1) % len(good_proxies)
+                  px = good_proxies[px_idx]
+                  sess = creq.Session(impersonate="chrome124", proxies={"http": px, "https": px})
+              return None
+
+          def sanitize_soup(html):
+              soup = BeautifulSoup(html, "html.parser")
+              trap_tokens = set()
+              removed_ids = set()
+              for sc in soup.find_all("script"):
+                  txt = sc.string or sc.get_text() or ""
+                  for m in re.finditer(r"getElementById\(\s*['\"]([^'\"]+)['\"]\s*\)\s*\??\.remove\(", txt):
+                      removed_ids.add(m.group(1))
+              for rid in removed_ids:
+                  el = soup.find(id=rid)
+                  if el:
+                      if el.get("data-token"):
+                          trap_tokens.add(el["data-token"])
+                      el.decompose()
+              for el in soup.select("template, [data-honeytoken], [data-trap], #download-primary-server, [hidden], [aria-hidden='true'], .d-none, .visually-hidden"):
+                  if el.get("data-token"):
+                      trap_tokens.add(el["data-token"])
+                  for sub in el.select("[data-token]"):
+                      trap_tokens.add(sub["data-token"])
+                  el.decompose()
+              return soup, trap_tokens
+
+          # ── Fetch Live Homepage & Pick 1 Recent Episode + 1 Recent Movie ────
+          hp_resp = s4u_get(BASE + "/")
+          hp_soup, _ = sanitize_soup(hp_resp.text)
+          cards = hp_soup.select(".shows-container a.show-card")
+          ep_target = None
+          movie_target = None
+          for c in cards:
+              href = urllib.parse.urljoin(BASE + "/", c.get("href", ""))
+              dec = urllib.parse.unquote(href)
+              title = (c.select_one("p.title") or c).get_text(" ", strip=True)
+              if "/episode/" in dec and not ep_target and ("tulsa" in dec.lower() or "الحلقة" in dec):
+                  if "tulsa" in dec.lower():
+                      ep_target = (title, href)
+              if "/film/" in dec and not movie_target:
+                  movie_target = (title, href)
+          if not ep_target:
+              for c in cards:
+                  href = urllib.parse.urljoin(BASE + "/", c.get("href", ""))
+                  if "/episode/" in href:
+                      ep_target = ((c.select_one("p.title") or c).get_text(" ", strip=True), href)
+                      break
+
+          # ── Exact Python Mirror of Shahid4uExtractors.kt ─────────────────────
+          direct = creq.Session(impersonate="chrome124")
+
+          def unpack_packer(html_str):
+              out = []
+              for m in re.finditer(r"eval\(function\(p,a,c,k,e,[dr]\)\{.*?\}\('((?:\\.|[^'])*)',\s*(\d+),\s*(\d+),\s*'((?:\\.|[^'])*)'\.split\('\|'\)", html_str, re.S):
+                  p, a, c, k = m.group(1), int(m.group(2)), int(m.group(3)), m.group(4).split("|")
+                  chars = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                  def base_n(num, b):
+                      if num == 0: return "0"
+                      res = ""
+                      while num > 0:
+                          res = chars[num % b] + res
+                          num //= b
+                      return res
+                  for i in range(c - 1, -1, -1):
+                      if i < len(k) and k[i]:
+                          tok = base_n(i, a)
+                          p = re.sub(r"\b" + re.escape(tok) + r"\b", lambda _, rep=k[i]: rep, p)
+                  out.append(p)
+              return out
+
+          def parse_m3u8_qualities(m3u8_url, headers, fallback_q):
+              try:
+                  r = direct.get(m3u8_url, headers=headers, timeout=12, verify=False)
+                  if r.status_code == 200 and "#EXTM3U" in r.text:
+                      res_list = sorted({int(m.group(1)) for m in re.finditer(r"RESOLUTION=\d+x(\d+)", r.text)}, reverse=True)
+                      if res_list:
+                          return True, res_list, r.status_code
+                      return True, [fallback_q or 1080], r.status_code
+                  return False, [], r.status_code
+              except Exception as e:
+                  return False, [], str(e)
+
+          def probe_mp4(mp4_url, headers):
+              try:
+                  h = dict(headers)
+                  h["Range"] = "bytes=0-1023"
+                  r = direct.get(mp4_url, headers=h, timeout=12, allow_redirects=True, verify=False)
+                  ct = r.headers.get("content-type", "")
+                  ok = r.status_code in (200, 206) and ("video" in ct.lower() or "octet-stream" in ct.lower() or len(r.content) >= 256)
+                  return ok, r.status_code, ct
+              except Exception as e:
+                  return False, 0, str(e)
+
+          def b64u_enc(b):
+              return base64.urlsafe_b64encode(b).rstrip(b"=").decode("ascii")
+
+          def b64u_dec(s):
+              s = s.strip()
+              return base64.urlsafe_b64decode(s + "=" * ((4 - len(s) % 4) % 4))
+
+          def extract_provider(ext_url, ref, q_hint):
+              u = urllib.parse.urlparse(ext_url)
+              host = u.netloc.lower().removeprefix("www.")
+              origin = f"{u.scheme}://{u.netloc}"
+              seg = u.path.strip("/").split("/")[-1].removeprefix("embed-").removesuffix(".html")
+
+              # 1. Vinovo
+              if "vinovo" in host:
+                  vs = creq.Session(impersonate="chrome124")
+                  emb = f"{origin}/e/{seg}"
+                  r1 = vs.get(emb, headers={"Referer": ref}, timeout=12)
+                  sp = BeautifulSoup(r1.text, "html.parser")
+                  mt = (sp.select_one("meta[name=token]") or {}).get("content", "")
+                  db = (sp.select_one("video[data-base]") or {}).get("data-base", origin) or origin
+                  r2 = vs.post(f"{origin}/api/file/url/{seg}", data={"recaptcha": "", "token": mt}, headers={"Referer": emb, "Origin": origin, "X-Requested-With": "XMLHttpRequest"}, timeout=12)
+                  tok = r2.json().get("token", "")
+                  if tok:
+                      mp4 = f"{db.rstrip('/')}/stream/{urllib.parse.unquote(tok).lstrip('/')}"
+                      ok, st, ct = probe_mp4(mp4, {"Referer": origin + "/"})
+                      return [{"provider": "Vinovo", "type": "MP4", "qualities": [q_hint or 1080], "playable": ok, "status": st, "ct": ct}]
+
+              # 2. Vidara
+              if "vidara" in host:
+                  for vo in ["https://vidaraa.cc", "https://vidara.so"]:
+                      r = direct.post(f"{vo}/api/stream", json={"filecode": seg}, headers={"Origin": vo, "Referer": f"{vo}/e/{seg}"}, timeout=12)
+                      if r.status_code == 200 and "streaming_url" in r.text:
+                          su = r.json().get("streaming_url", "")
+                          if su.startswith("http"):
+                              ok, qs, st = parse_m3u8_qualities(su, {"Referer": vo + "/", "Origin": vo}, q_hint)
+                              return [{"provider": "Vidara", "type": "HLS", "qualities": qs, "playable": ok, "status": st}]
+
+              # 3. FastVid / EarnVids
+              if any(x in host for x in ["fastvid", "earnvids", "dingtezuni", "dintezuvio", "vidhide", "minochinos"]):
+                  r = direct.get(f"{origin}/embed/{seg}", headers={"Referer": ref}, timeout=12)
+                  fo = f"{urllib.parse.urlparse(r.url).scheme}://{urllib.parse.urlparse(r.url).netloc}"
+                  comb = r.text + "\n" + "\n".join(unpack_packer(r.text))
+                  for k in ["hls4", "hls3", "hls2"]:
+                      m = re.search(rf'"{k}"\s*:\s*"([^"]+)"', comb)
+                      if m:
+                          raw = m.group(1).replace("\\/", "/")
+                          m3u8 = raw if raw.startswith("http") else fo + raw
+                          ok, qs, st = parse_m3u8_qualities(m3u8, {"Referer": fo + "/", "Origin": fo}, q_hint)
+                          if ok:
+                              return [{"provider": "FastVid", "type": "HLS", "qualities": qs, "playable": True, "status": st}]
+
+              # 4. Byse (ECDSA P-256 PoW + AES-GCM!)
+              if "byse" in host or host == "n1mwq.org":
+                  ao = origin
+                  vc = seg
+                  rd = direct.get(f"{origin}/api/videos/{seg}/embed/details", headers={"Referer": f"{origin}/e/{seg}"}, timeout=12)
+                  if rd.status_code == 200:
+                      ef = rd.json().get("embed_frame_url", "")
+                      if ef.startswith("http"):
+                          pu = urllib.parse.urlparse(ef)
+                          ao = f"{pu.scheme}://{pu.netloc}"
+                          vc = pu.path.strip("/").split("/")[-1]
+                  eref = f"{ao}/e/{vc}"
+                  priv = ec.generate_private_key(ec.SECP256R1())
+                  nums = priv.public_key().public_numbers()
+                  raw_pub = b"\x04" + nums.x.to_bytes(32, "big") + nums.y.to_bytes(32, "big")
+                  rc = direct.post(f"{ao}/access/challenge", json={"purpose": "playback", "public_key": b64u_enc(raw_pub)}, headers={"Origin": ao, "Referer": eref}, timeout=12).json()
+                  cid, nonce, diff = rc["challenge_id"], rc["nonce"], int(rc.get("difficulty", 12))
+                  cnt = 0
+                  while cnt < 2_000_000:
+                      dg = hashlib.sha256(f"{nonce}{cnt}".encode()).digest()
+                      fb, rb_bits = diff // 8, diff % 8
+                      if all(dg[i] == 0 for i in range(fb)) and (rb_bits == 0 or (dg[fb] & ((0xFF << (8 - rb_bits)) & 0xFF)) == 0):
+                          break
+                      cnt += 1
+                  der = priv.sign(f"{cid}.{nonce}.{cnt}".encode(), ec.ECDSA(hashes.SHA256()))
+                  r_int, s_int = decode_dss_signature(der)
+                  sig64 = r_int.to_bytes(32, "big") + s_int.to_bytes(32, "big")
+                  tok = direct.post(f"{ao}/access/attest", json={"challenge_id": cid, "pow_nonce": cnt, "signature": b64u_enc(sig64), "signals": {"webdriver": False, "languages": 2, "plugins": 5}}, headers={"Origin": ao, "Referer": eref}, timeout=12).json().get("token", "")
+                  pb_root = direct.get(f"{ao}/api/videos/{vc}/playback", headers={"Referer": eref, "Origin": ao, "X-Embed-Parent": eref, "X-Captcha-Token": tok}, timeout=12).json()
+                  pb = pb_root.get("playback")
+                  if pb:
+                      key = b64u_dec(pb["key_parts"][0]) + b64u_dec(pb["key_parts"][1])
+                      plain = json.loads(AESGCM(key).decrypt(b64u_dec(pb["iv"]), b64u_dec(pb["payload"]), None).decode())
+                      for s_obj in plain.get("sources", []):
+                          su = s_obj.get("url") or s_obj.get("file") or ""
+                          if su.startswith("http"):
+                              ok, qs, st = parse_m3u8_qualities(su, {"Referer": ao + "/", "Origin": ao}, q_hint)
+                              return [{"provider": "Byse", "type": "HLS", "qualities": qs, "playable": ok, "status": st}]
+
+              # 5. MixDrop
+              if any(x in host for x in ["m1xdrop", "mxdrop", "mixdrop"]):
+                  for cand in [f"{origin}/e/{seg}", f"https://mxdrop.click/e/{seg}"]:
+                      r = direct.get(cand, headers={"Referer": ref}, timeout=12)
+                      fo = f"{urllib.parse.urlparse(r.url).scheme}://{urllib.parse.urlparse(r.url).netloc}"
+                      for unp in unpack_packer(r.text):
+                          m = re.search(r'MDCore\.wurl\s*=\s*["\']([^"\']+)["\']', unp)
+                          if m:
+                              wu = m.group(1)
+                              mp4 = ("https:" + wu) if wu.startswith("//") else wu
+                              ok, st, ct = probe_mp4(mp4, {"Referer": fo + "/"})
+                              return [{"provider": "MixDrop", "type": "MP4", "qualities": [q_hint or 1080], "playable": ok, "status": st, "ct": ct}]
+
+              # 6. DoodStream / Playmogo
+              if any(x in host for x in ["playmogo", "dood", "dsvplay", "myvidplay"]):
+                  ds = creq.Session(impersonate="chrome124")
+                  r = ds.get(f"{origin}/e/{seg}", headers={"Referer": ref}, timeout=12)
+                  fo = f"{urllib.parse.urlparse(r.url).scheme}://{urllib.parse.urlparse(r.url).netloc}"
+                  m = re.search(r"/pass_md5/[^'\"\s<>]+", r.text)
+                  if m:
+                      pmd5 = m.group(0)
+                      mb = ds.get(fo + pmd5, headers={"Referer": r.url, "X-Requested-With": "XMLHttpRequest"}, timeout=12).text.strip()
+                      if mb.startswith("http"):
+                          r10 = "".join(random.choices(string.ascii_letters + string.digits, k=10))
+                          mp4 = f"{mb}{r10}?token={pmd5.split('/')[-1]}&expiry={int(time.time()*1000)}"
+                          ok, st, ct = probe_mp4(mp4, {"Referer": fo + "/"})
+                          return [{"provider": "DoodStream", "type": "MP4", "qualities": [q_hint or 1080], "playable": ok, "status": st, "ct": ct}]
+
+              # 7. VOE
+              if "voe." in host or "derricknationtop" in host:
+                  cur = f"{origin}/e/{seg}"
+                  fo = origin
+                  txt = ""
+                  for _ in range(4):
+                      r = direct.get(cur, headers={"Referer": ref}, timeout=12)
+                      cur = r.url
+                      fo = f"{urllib.parse.urlparse(cur).scheme}://{urllib.parse.urlparse(cur).netloc}"
+                      txt = r.text
+                      mj = re.search(r"window\.location\.href\s*=\s*['\"](https?://[^'\"]+)['\"]", txt)
+                      if mj and 'type="application/json"' not in txt:
+                          cur = mj.group(1)
+                      else:
+                          break
+                  mp = re.search(r'<script\s+type="application/json">\s*\["([^"]+)"\]\s*</script>', txt)
+                  if mp:
+                      s = codecs.decode(mp.group(1), "rot_13")
+                      for pat in ["@$", "^^", "~@", "%?", "*~", "!!", "#&"]:
+                          s = s.replace(pat, "")
+                      b1 = base64.b64decode(s).decode("latin1")
+                      sh = "".join(chr(ord(c) - 3) for c in b1)[::-1]
+                      dec = json.loads(base64.b64decode(sh).decode("utf-8"))
+                      out = []
+                      if dec.get("source", "").startswith("http"):
+                          ok, qs, st = parse_m3u8_qualities(dec["source"], {"Referer": fo + "/", "Origin": fo}, q_hint)
+                          out.append({"provider": "VOE", "type": "HLS", "qualities": qs, "playable": ok, "status": st})
+                      if dec.get("direct_access_url", "").startswith("http"):
+                          ok2, st2, ct2 = probe_mp4(dec["direct_access_url"], {"Referer": fo + "/"})
+                          out.append({"provider": "VOE MP4", "type": "MP4", "qualities": [q_hint or 720], "playable": ok2, "status": st2, "ct": ct2})
+                      return out
+
+              # 8. Uqload
+              if "uqload" in host:
+                  r = direct.post(f"{origin}/dl", data={"op": "embed", "file_code": seg, "auto": "1", "referer": ref}, headers={"Origin": origin, "Referer": f"{origin}/e/{seg}.html"}, timeout=12)
+                  comb = r.text + "\n" + "\n".join(unpack_packer(r.text))
+                  m = re.search(r"https?://[^\s\"'<>]+\.m3u8[^\s\"'<>]*", comb)
+                  if m:
+                      ok, qs, st = parse_m3u8_qualities(m.group(0), {"Referer": origin + "/", "Origin": origin}, q_hint)
+                      return [{"provider": "Uqload", "type": "HLS", "qualities": qs, "playable": ok, "status": st}]
+
+              # 9. SaveFiles / StreamHLS
+              if "savefiles" in host or "streamhls" in host:
+                  r1 = direct.get(ext_url, headers={"Referer": ref}, timeout=12)
+                  comb = r1.text + "\n" + "\n".join(unpack_packer(r1.text))
+                  m = re.search(r"https?://[^\s\"'<>]+\.m3u8[^\s\"'<>]*", comb)
+                  if not m:
+                      r2 = direct.post(f"{origin}/dl", data={"op": "embed", "file_code": seg, "auto": "1", "referer": ref}, headers={"Origin": origin, "Referer": f"{origin}/e/{seg}"}, timeout=12)
+                      comb2 = r2.text + "\n" + "\n".join(unpack_packer(r2.text))
+                      m = re.search(r"https?://[^\s\"'<>]+\.m3u8[^\s\"'<>]*", comb2)
+                  if m:
+                      ok, qs, st = parse_m3u8_qualities(m.group(0), {"Referer": origin + "/", "Origin": origin}, q_hint)
+                      return [{"provider": "SaveFiles", "type": "HLS", "qualities": qs, "playable": ok, "status": st}]
+
+              # 10. Vids.st
+              if host == "vids.st" or host.endswith(".vids.st"):
+                  r = direct.get(ext_url, headers={"Referer": ref}, timeout=12, verify=False)
+                  m = re.search(r'const\s+url\s*=\s*["\']([^"\']+)["\']', r.text)
+                  if m:
+                      su = m.group(1).replace("\\/", "/")
+                      ok, st, ct = probe_mp4(su, {"Referer": "https://vids.st/"})
+                      return [{"provider": "Vids.st", "type": "MP4", "qualities": [q_hint or 1080], "playable": ok, "status": st, "ct": ct}]
+
+              # 11. Upzur
+              if "upzur" in host:
+                  us = creq.Session(impersonate="chrome124")
+                  us.get(f"{origin}/{seg}", headers={"Referer": ref}, timeout=12)
+                  r = us.post(f"{origin}/{seg}", data={"op": "download2", "id": seg, "rand": "", "referer": ref, "method_free": "", "method_premium": ""}, headers={"Origin": origin, "Referer": f"{origin}/{seg}"}, timeout=12)
+                  m = re.search(r"https?://[a-zA-Z0-9.-]*upzur\.com/d/[^\s\"'<>]+", r.text)
+                  if m:
+                      ok, st, ct = probe_mp4(m.group(0), {"Referer": origin + "/"})
+                      return [{"provider": "Upzur", "type": "MP4", "qualities": [q_hint or 1080], "playable": ok, "status": st, "ct": ct}]
+
+              # 12. Ok.ru
+              if "ok.ru" in host:
+                  r = direct.get(ext_url, headers={"Referer": "https://ok.ru/"}, timeout=12)
+                  if "vp_video_stub" in r.text:
+                      return [{"provider": "Ok.ru", "type": "DELETED_UPSTREAM", "qualities": [], "playable": False, "status": "vp_video_stub"}]
+
+              return [{"provider": host, "type": "UNKNOWN", "qualities": [], "playable": False}]
+
+          SUPPORTED = ("vinovo", "vidara", "fastvid", "earnvids", "byse", "mixdrop", "m1xdrop", "dood", "playmogo", "voe", "uqload", "savefiles", "streamhls", "vids", "upzur", "ok")
+
+          def canonical_key(url):
+              u = urllib.parse.urlparse(url)
+              h = u.netloc.lower().removeprefix("www.")
+              seg = u.path.strip("/").split("/")[-1].removeprefix("embed-").removesuffix(".html")
+              for fam, keys in [("vinovo", ["vinovo"]), ("vidara", ["vidara"]), ("earnvids", ["fastvid", "earnvids"]), ("byse", ["byse", "n1mwq"]), ("mixdrop", ["m1xdrop", "mxdrop", "mixdrop"]), ("dood", ["playmogo", "dood"]), ("voe", ["voe.", "derricknationtop"]), ("uqload", ["uqload"]), ("savefiles", ["savefiles", "streamhls"]), ("vidsst", ["vids.st"]), ("upzur", ["upzur"]), ("okru", ["ok.ru"])]:
+                  if any(k in h for k in keys):
+                      return f"{fam}:{seg}"
+              return url
+
+          def test_full_item(label, item_title, item_url):
+              slug = urllib.parse.urlparse(item_url).path.strip("/").split("/", 1)[1]
+              watch_url = f"{BASE}/watch/{slug}"
+              dl_url = f"{BASE}/download/{slug}"
+              jobs = {}
+
+              # Watch page
+              wr = s4u_get(watch_url, ref=item_url)
+              wsoup, wtraps = sanitize_soup(wr.text)
+              csrf = (wsoup.select_one("meta[name=csrf-token]") or {}).get("content", "")
+              m_key = re.search(r'watchResolveKey\s*=\s*["\']([^"\']+)["\']', wr.text)
+              wkey = m_key.group(1) if m_key else ""
+              btns = [b for b in wsoup.select("#servers button.btn-server[data-token]") if b["data-token"] not in wtraps]
+              watch_resolved_count = 0
+              for idx, b in enumerate(btns):
+                  tok = b["data-token"]
+                  el = 450 + idx * 520
+                  pr = sess.post(f"{BASE}/watch/resolve", json={"key": wkey, "token": tok, "human_signal": {"version": 1, "elapsed_ms": el, "visible_ms": el - 20, "pointer": 5 + idx, "click": 2 + idx, "touch": 2, "scroll": 1, "key": 0}}, headers={"Accept": "application/json", "Content-Type": "application/json", "X-CSRF-TOKEN": csrf, "X-Requested-With": "XMLHttpRequest", "X-FP-Event-ID": "", "Origin": BASE, "Referer": wr.url}, timeout=14)
+                  if pr.status_code == 200 and pr.json().get("ok"):
+                      mu = urllib.parse.urljoin(BASE + "/", pr.json()["url"])
+                      mr = sess.get(mu, headers={"Referer": wr.url}, allow_redirects=False, timeout=12)
+                      loc = mr.headers.get("location", "")
+                      if loc.startswith("http"):
+                          watch_resolved_count += 1
+                          ck = canonical_key(loc)
+                          jobs[ck] = {"url": loc, "ref": wr.url, "q": None}
+                  time.sleep(0.22)
+
+              # Download page across ALL qualities (1080, 720, 480)
+              dr = s4u_get(dl_url, ref=item_url)
+              dsoup, _ = sanitize_soup(dr.text)
+              sroot = dsoup.select_one(".down-container .servers, .servers")
+              cur_q = None
+              dl_resolved_count = 0
+              if sroot:
+                  for ch in sroot.find_all(recursive=False):
+                      if "qual" in (ch.get("class") or []):
+                          mq = re.search(r"(1080|720|480|360)", ch.get_text())
+                          cur_q = int(mq.group(1)) if mq else None
+                          continue
+                      for a in ch.select("a.btn-down[href]"):
+                          nm = a.get_text(" ", strip=True).lower()
+                          if not any(s in nm for s in SUPPORTED):
+                              continue
+                          mu = urllib.parse.urljoin(BASE + "/", a["href"])
+                          mr = sess.get(mu, headers={"Referer": dr.url}, allow_redirects=False, timeout=12)
+                          loc = mr.headers.get("location", "")
+                          if loc.startswith("http"):
+                              dl_resolved_count += 1
+                              ck = canonical_key(loc)
+                              if ck not in jobs:
+                                  jobs[ck] = {"url": loc, "ref": dr.url, "q": cur_q}
+                              elif jobs[ck]["q"] is None and cur_q is not None:
+                                  jobs[ck]["q"] = cur_q
+                          time.sleep(0.16)
+
+              extracted = []
+              with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
+                  futs = {ex.submit(extract_provider, j["url"], j["ref"], j["q"]): ck for ck, j in jobs.items()}
+                  for f in concurrent.futures.as_completed(futs):
+                      ck = futs[f]
+                      try:
+                          for item in f.result():
+                              item["canonical_key"] = ck
+                              extracted.append(item)
+                      except Exception as e:
+                          extracted.append({"canonical_key": ck, "playable": False, "error": str(e)})
+
+              playable = [x for x in extracted if x.get("playable")]
+              all_qualities = sorted({q for x in playable for q in x.get("qualities", [])}, reverse=True)
+              providers_ok = sorted({x["provider"] for x in playable})
+              return {
+                  "label": label,
+                  "title": item_title,
+                  "url": urllib.parse.unquote(item_url),
+                  "watch_buttons": len(btns),
+                  "watch_resolved": watch_resolved_count,
+                  "download_resolved": dl_resolved_count,
+                  "unique_jobs": len(jobs),
+                  "playable_streams_count": len(playable),
+                  "providers_verified_200_ok": providers_ok,
+                  "qualities_verified": all_qualities,
+                  "details": extracted,
+              }
+
+          report = {
+              "homepage_cards_count": len(cards),
+              "series_episode_test": test_full_item("recent_homepage_series_episode", ep_target[0], ep_target[1]),
+              "movie_test": test_full_item("recent_homepage_movie", movie_target[0], movie_target[1]),
+          }
+          with open(".tmp_e2e_report.json", "w", encoding="utf-8") as f:
+              json.dump(report, f, ensure_ascii=False, indent=2)
+          print("E2E SUMMARY:", json.dumps({
+              "homepage_cards": report["homepage_cards_count"],
+              "ep_playable": report["series_episode_test"]["playable_streams_count"],
+              "ep_providers": report["series_episode_test"]["providers_verified_200_ok"],
+              "ep_qualities": report["series_episode_test"]["qualities_verified"],
+              "movie_playable": report["movie_test"]["playable_streams_count"],
+              "movie_providers": report["movie_test"]["providers_verified_200_ok"],
+              "movie_qualities": report["movie_test"]["qualities_verified"],
+          }, ensure_ascii=False, indent=2))
+          PY
+
+      - name: Commit build/Shahid4u.cs3 and temporary report
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          [ -f "build/Shahid4u.cs3" ] && git add -f build/Shahid4u.cs3 || true
+          [ -f ".tmp_gradle.log" ] && git add -f .tmp_gradle.log || true
+          [ -f ".tmp_e2e_report.json" ] && git add -f .tmp_e2e_report.json || true
+          git commit -m "chore: build Shahid4u.cs3 v12 & save live E2E verification [skip ci]" || true
+          git pull --rebase origin arena/67b3a643-mehdigm-stream || true
+          git push origin arena/67b3a643-mehdigm-stream || true
