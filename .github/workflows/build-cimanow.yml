@@ -1,0 +1,73 @@
+name: Build CimaNow Plugin
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'CimaNow/**'
+      - 'build/CimaNow.png'
+      - '.github/workflows/build-cimanow.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    if: "!contains(github.event.head_commit.message, '[skip ci]') && !contains(github.event.head_commit.message, '🤖')"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Configure Android SDK, test, and build CimaNow plugin
+        run: |
+          chmod +x gradlew
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          ./gradlew :CimaNow:testDebugUnitTest :CimaNow:make --no-daemon
+
+      - name: Upload CimaNow.cs3 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CimaNow
+          path: CimaNow/build/CimaNow.cs3
+
+      - name: Commit and push built cs3 to build/
+        run: |
+          if [ -f "CimaNow/build/CimaNow.cs3" ]; then
+            mkdir -p build
+            cp -f CimaNow/build/CimaNow.cs3 build/CimaNow.cs3
+            python3 - <<'PY'
+          import os, re
+          sz = os.path.getsize("build/CimaNow.cs3")
+          with open("plugins.json", "r", encoding="utf-8") as fh:
+              txt = fh.read()
+          def repl(m):
+              blk = m.group(0)
+              if '"internalName": "CimaNow"' not in blk:
+                  return blk
+              return re.sub(r'("fileSize"\s*:\s*)\d+', rf'\g<1>{sz}', blk, count=1)
+          new_txt = re.sub(r'\{[^{}]*"internalName"\s*:\s*"CimaNow"[^{}]*\}', repl, txt, flags=re.S)
+          if new_txt != txt:
+              with open("plugins.json", "w", encoding="utf-8") as fh:
+                  fh.write(new_txt)
+          PY
+            git config --local user.email "github-actions[bot]@users.noreply.github.com"
+            git config --local user.name "github-actions[bot]"
+            git add -f build/CimaNow.cs3 plugins.json
+            if ! git diff --cached --quiet; then
+              git commit -m "🤖 Build CimaNow.cs3 [skip ci]"
+              git pull --rebase origin "$GITHUB_REF_NAME" || true
+              git push
+            fi
+          else
+            echo "CimaNow.cs3 not found!"
+            exit 1
+          fi
