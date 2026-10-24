@@ -1,0 +1,138 @@
+name: Build EgyDead Plugin
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'EgyDead/**'
+      - 'build/EgyDead.png'
+      - '.github/workflows/build-egydead.yml'
+
+permissions:
+  contents: write
+  checks: write
+
+jobs:
+  build:
+    if: "!contains(github.event.head_commit.message, '[skip ci]') && !contains(github.event.head_commit.message, '🤖')"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Configure Android SDK, test, and build EgyDead plugin
+        id: gradle_build
+        run: |
+          set -o pipefail
+          chmod +x gradlew
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          ./gradlew :EgyDead:testDebugUnitTest :EgyDead:make --info --stacktrace --no-daemon 2>&1 | tee gradle.log
+
+      - name: Publish Detailed Test & Build Report to Check Run API
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OUTCOME: ${{ steps.gradle_build.outcome }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import glob, json, os, subprocess, xml.etree.ElementTree as ET
+
+          xml_report = []
+          for xml_path in sorted(glob.glob("EgyDead/build/test-results/testDebugUnitTest/*.xml")):
+              try:
+                  tree = ET.parse(xml_path)
+                  root = tree.getroot()
+                  xml_report.append(f"## Suite: {root.attrib.get('name')} (tests={root.attrib.get('tests')}, failures={root.attrib.get('failures')}, time={root.attrib.get('time')}s)")
+                  for tc in root.findall("testcase"):
+                      status = "PASS"
+                      fail_txt = ""
+                      for f in list(tc.findall("failure")) + list(tc.findall("error")):
+                          status = "FAIL"
+                          fail_txt = (f.text or f.attrib.get("message", ""))[:3000]
+                      xml_report.append(f"- `{tc.attrib.get('name')}`: **{status}** ({tc.attrib.get('time')}s)")
+                      if fail_txt:
+                          xml_report.append(f"```\n{fail_txt}\n```")
+                  sysout = root.findtext("system-out") or ""
+                  if sysout.strip():
+                      xml_report.append("### Standard Output\n```\n" + sysout[-25000:] + "\n```")
+              except Exception as ex:
+                  xml_report.append(f"XML parse error: {ex}")
+
+          log_text = "\n".join(xml_report)
+          if not log_text.strip() and os.path.exists("gradle.log"):
+              with open("gradle.log", "r", encoding="utf-8", errors="replace") as fh:
+                  lines = fh.readlines()
+              log_text = "### Gradle Tail\n```\n" + "".join(lines[-250:])[-50000:] + "\n```"
+
+          outcome = os.environ.get("OUTCOME", "failure")
+          conclusion = "success" if outcome == "success" else "failure"
+          payload = {
+              "name": "EgyDead Diagnostics",
+              "head_sha": os.environ["SHA"],
+              "status": "completed",
+              "conclusion": conclusion,
+              "output": {
+                  "title": f"EgyDead Build & Live E2E: {conclusion}",
+                  "summary": f"Gradle outcome: `{outcome}`",
+                  "text": log_text[:64000]
+              }
+          }
+          with open("check_payload.json", "w", encoding="utf-8") as fh:
+              json.dump(payload, fh)
+
+          subprocess.run([
+              "gh", "api", "--method", "POST",
+              f"repos/{os.environ['REPO']}/check-runs",
+              "--input", "check_payload.json"
+          ], check=False)
+          PY
+
+      - name: Upload EgyDead.cs3 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: EgyDead
+          path: EgyDead/build/EgyDead.cs3
+
+      - name: Commit and push built EgyDead.cs3 to build/
+        run: |
+          if [ -f "EgyDead/build/EgyDead.cs3" ]; then
+            mkdir -p build
+            cp -f EgyDead/build/EgyDead.cs3 build/EgyDead.cs3
+            python3 - <<'PY'
+          import os, re
+          sz = os.path.getsize("build/EgyDead.cs3")
+          with open("plugins.json", "r", encoding="utf-8") as fh:
+              txt = fh.read()
+          def repl(m):
+              blk = m.group(0)
+              if '"internalName": "EgyDead"' not in blk:
+                  return blk
+              return re.sub(r'("fileSize"\s*:\s*)\d+', rf'\g<1>{sz}', blk, count=1)
+          new_txt = re.sub(r'\{[^{}]*"internalName"\s*:\s*"EgyDead"[^{}]*\}', repl, txt, flags=re.S)
+          if new_txt != txt:
+              with open("plugins.json", "w", encoding="utf-8") as fh:
+                  fh.write(new_txt)
+          PY
+            git config --local user.email "github-actions[bot]@users.noreply.github.com"
+            git config --local user.name "github-actions[bot]"
+            git add -f build/EgyDead.cs3 plugins.json
+            if ! git diff --cached --quiet; then
+              git commit -m "🤖 Build EgyDead.cs3 [skip ci]"
+              git pull --rebase origin "$GITHUB_REF_NAME" || true
+              git push
+            fi
+          else
+            echo "EgyDead.cs3 not found!"
+            exit 1
+          fi
