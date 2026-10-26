@@ -79,7 +79,10 @@ class TukTukHd : MainAPI() {
         return host == SITE_HOST || host.endsWith(".$SITE_HOST")
     }
 
-    private fun collectSearchResults(document: org.jsoup.nodes.Document): List<SearchResponse> {
+    private fun collectSearchResults(
+        document: org.jsoup.nodes.Document,
+        searchQuery: String? = null,
+    ): List<SearchResponse> {
         val selectors = listOf(
             "li.Small--Box, div.Block--Item, li.AsidePost, li.Slides--Item",
             ".MovieItem, .Movie--Item, .MovieList li, .MoviesList li",
@@ -89,15 +92,23 @@ class TukTukHd : MainAPI() {
         for (selector in selectors) {
             for (card in document.select(selector)) {
                 val item = toSearchResult(card) ?: continue
+                if (searchQuery != null && !TukTukSearchUtils.matchesTitle(item.name, searchQuery)) continue
                 results.putIfAbsent(item.url, item)
             }
         }
         if (results.isEmpty()) {
-            val links = document.select(
-                "a[href*='/movie/'], a[href*='/movies/'], a[href*='/series/'], a[href*='/episode/']"
-            )
+            val links = if (searchQuery == null) {
+                document.select(
+                    "a[href*='/movie/'], a[href*='/movies/'], a[href*='/series/'], a[href*='/episode/']"
+                )
+            } else {
+                // Search templates can use different card markup; inspect same-site
+                // anchors but keep only titles matching every query term.
+                document.select("a[href]")
+            }
             for (link in links) {
                 val item = toSearchResult(link) ?: continue
+                if (searchQuery != null && !TukTukSearchUtils.matchesTitle(item.name, searchQuery)) continue
                 results.putIfAbsent(item.url, item)
             }
         }
@@ -115,7 +126,9 @@ class TukTukHd : MainAPI() {
 
         val title = linkTag.attr("title").ifBlank { element.attr("title") }.ifBlank {
             element.selectFirst(".title, .Title, h2, h3, .MovieTitle")?.text().orEmpty()
-        }.ifBlank { linkTag.text() }.trim()
+        }.ifBlank { linkTag.selectFirst("img[alt]")?.attr("alt").orEmpty() }
+            .ifBlank { linkTag.text() }
+            .trim()
         if (title.isBlank()) return null
 
         val image = element.selectFirst(
@@ -162,21 +175,40 @@ class TukTukHd : MainAPI() {
     }
 
     override suspend fun search(query: String, page: Int): SearchResponseList? {
-        val encoded = URLEncoder.encode(query, "UTF-8")
-        val urls = listOf(
-            "$mainUrl/main/?s=$encoded&page=$page",
-            "$mainUrl/?s=$encoded&page=$page",
-        ).distinct()
-        for ((index, url) in urls.withIndex()) {
+        if (TukTukSearchUtils.normalize(query).isBlank()) {
+            return newSearchResponseList(emptyList(), false)
+        }
+
+        val safePage = page.coerceAtLeast(1)
+        val encoded = URLEncoder.encode(query.trim(), "UTF-8")
+        val urls = buildList {
+            // WordPress's native search route is at the domain root, even when the
+            // site's configured front page is /main/. Try it first to avoid scraping
+            // the homepage carousel as if it were a search-results page.
+            add(if (safePage == 1) {
+                "$mainUrl/?s=$encoded"
+            } else {
+                "$mainUrl/page/$safePage/?s=$encoded"
+            })
+            if (safePage > 1) add("$mainUrl/?s=$encoded&paged=$safePage")
+            add(if (safePage == 1) {
+                "$mainUrl/main/?s=$encoded"
+            } else {
+                "$mainUrl/main/page/$safePage/?s=$encoded"
+            })
+        }.distinct()
+
+        for (url in urls) {
             val document = try {
                 app.get(url, headers = siteHeaders(url), referer = "$mainUrl/main/").document
             } catch (e: Exception) {
-                android.util.Log.w("TukTuk", "Search request failed for $url", e)
+                Log.w("TukTuk", "Search request failed for $url", e)
                 continue
             }
-            val results = collectSearchResults(document)
-            if (results.isNotEmpty() || index == urls.lastIndex) {
-                return newSearchResponseList(results, hasNextPage(document, page, results.size))
+            val results = collectSearchResults(document, query)
+                .distinctBy { it.url }
+            if (results.isNotEmpty()) {
+                return newSearchResponseList(results, hasNextPage(document, safePage, results.size))
             }
         }
         return newSearchResponseList(emptyList(), false)
