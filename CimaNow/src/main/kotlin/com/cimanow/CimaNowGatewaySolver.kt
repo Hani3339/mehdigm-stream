@@ -44,28 +44,23 @@ import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 
 /**
- * Stealth Turnstile Gateway Solver & Real-V8 Vault Fallback for CimaNow (v5).
+ * CimaNow's `/loadon/` countdown/Turnstile bridge and `/watching/` extraction fallback.
  *
- * Permanent Android real-device architecture (`WebView 96–160+`, MIUI / HyperOS / MediaTek / PowerVR / Adreno):
- *  1. Genuine Self-Consistent Browser Identity (Attempt #1): keeps `WebSettings.userAgentString` 100%
- *     native untouched on Attempt #1 so HTTP `User-Agent`, `Sec-CH-UA` brand metadata, `navigator`,
- *     `window.chrome`, and WebGL are 100% consistent inside `challenges.cloudflare.com`'s cross-origin
- *     Turnstile widget (`0x4AAAAAAFkYRL2ky4jDsK1G`, preventing Turnstile `error-callback` ->
- *     `"من فضلك استخدم متصفح اخر"`). Attempt #2 purges `HttpOnly` cookies via `removeAllCookies` and
- *     falls back to `cleanWebViewUserAgent`.
- *  2. Multi-Layer `X-Requested-With` Suppression: uses `SupportLibReflectionUtil` boundary reflection
- *     via `WebView.getWebViewClassLoader()` (plus `WebSettingsCompat` & `AwSettings` fallbacks) to
- *     prevent `rm.freex2line.online` WAF 403 on older WebViews even without `androidx.webkit`.
- *  3. Topmost Unoccluded `PassThroughWebViewContainer` (`container.alpha = 0.01f`, `wv.alpha = 1.0f`)
- *     + Single-WebView GPU Discipline (`PowerVR Rogue GE8320` 8-RTS safe): unoccluded 60Hz frame ticks
- *     without intercepting user touches, and at most one unattached `LAYER_TYPE_NONE` popup sink torn
- *     down on the next main-looper tick.
- *  4. Pure Read-Only Gateway Probe + `#xqeqjp`/`#xqeqjp1` Overlay Dismissal + Smooth-Scroll-Safe Tap
- *     Targeting: zero premature DOM mutations during the 10s countdown, fast dismissal of full-screen
- *     `<a id="xqeqjp*">` overlays, and stationary `instant` scroll coordinates.
- *  5. Layer-2 Real-V8 `/watching/` Vault Fallback ([extractWatchingSourcesViaWebView]): if OkHttp+Rhino
- *     ever misses a future `/watching/` JS obfuscation update, loads `mintedUrl` directly in Android
- *     WebView and captures all watch embeds + direct MP4 downloads natively via V8 + `shouldInterceptRequest`.
+ * On Android, gateway minting tries the stock WebView identity first. If that attempt does not mint
+ * a URL, a second attempt uses the installed Chromium version in a desktop Linux UA, applies matching
+ * UA Client Hints metadata where the host exposes AndroidX WebKit and the installed WebView supports
+ * it, and installs a gateway-origin-restricted document-start shim for the WebView-only `window.chrome`
+ * and `Notification` markers. The module bundles AndroidX WebKit into its plugin DEX because the
+ * official `.cs3` packaging task does not bundle external AARs; APIs remain feature-guarded for older
+ * System WebView versions. The desktop-UA retry still works if a compatibility API is unavailable.
+ *
+ * These changes are a compatibility workaround based on the gateway's browser-gate diagnostics,
+ * not a claim of successful validation on a physical CloudStream device. The JVM/desktop CI path is
+ * likewise not an Android WebView or CloudStream runtime test.
+ *
+ * The solver also manages Cloudflare cookies, `X-Requested-With` suppression, popup redirects, the
+ * real 10-second countdown, overlay dismissal, and a V8 `/watching/` fallback when OkHttp+Rhino cannot
+ * decode the page's video iframe/download links.
  */
 object CimaNowGatewaySolver {
 
@@ -136,13 +131,119 @@ object CimaNowGatewaySolver {
         tokenCache.remove(cacheKey(itemUrl))
     }
 
-    internal fun cleanWebViewUserAgent(rawUa: String): String {
-        return rawUa
-            .replace("; wv)", ")")
-            .replace(Regex("""Version/\d+\.\d+\s*"""), "")
-            .replace(Regex("""\s+"""), " ")
-            .trim()
-            .ifBlank { CimaNowNetwork.MOBILE_UA }
+    /**
+     * Prior gateway diagnostics rejected Android/WebView UA + Client Hints variants. Prepare a
+     * desktop identity using this device's installed Chromium version so the UA string and optional
+     * Sec-CH-UA metadata can stay internally consistent. This remains unverified on a real device.
+     */
+    internal fun desktopWebViewUserAgent(rawUa: String): String {
+        val version = Regex("""Chrome/([0-9]+(?:\.[0-9]+){1,3})""", RegexOption.IGNORE_CASE)
+            .find(rawUa)
+            ?.groupValues
+            ?.get(1)
+            ?.takeIf { it.isNotBlank() }
+            ?: "131.0.0.0"
+        return "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$version Safari/537.36"
+    }
+
+    internal fun buildGatewayDocumentStartShim(): String = """
+        (function(){
+            try { delete window.chrome; } catch (e) {}
+            try { delete window.Notification; } catch (e) {}
+        })();
+    """.trimIndent()
+
+    private fun isAndroidxWebKitFeatureSupported(featureName: String): Boolean =
+        runCatching {
+            val featureClass = Class.forName("androidx.webkit.WebViewFeature")
+            featureClass
+                .getMethod("isFeatureSupported", String::class.java)
+                .invoke(null, featureName) as? Boolean == true
+        }.getOrDefault(false)
+
+    private fun setReflectiveBuilderValue(builder: Any, methodName: String, value: Any) {
+        val method = builder.javaClass.methods.firstOrNull {
+            it.name == methodName && it.parameterTypes.size == 1
+        } ?: error("AndroidX WebKit builder method not found: $methodName")
+        method.invoke(builder, value)
+    }
+
+    private fun buildReflectiveBrandVersion(brand: String, major: String, version: String): Any {
+        val builderClass = Class.forName("androidx.webkit.UserAgentMetadata\$BrandVersion\$Builder")
+        val builder = builderClass.getConstructor().newInstance()
+        setReflectiveBuilderValue(builder, "setBrand", brand)
+        setReflectiveBuilderValue(builder, "setMajorVersion", major)
+        setReflectiveBuilderValue(builder, "setFullVersion", version)
+        return builderClass.getMethod("build").invoke(builder)
+            ?: error("AndroidX WebKit BrandVersion.Builder.build() returned null")
+    }
+
+    private fun applyDesktopUserAgentMetadata(settings: WebSettings, userAgent: String): Boolean =
+        runCatching {
+            if (!isAndroidxWebKitFeatureSupported("USER_AGENT_METADATA")) return@runCatching false
+            val version = Regex("""Chrome/([0-9]+(?:\.[0-9]+){1,3})""", RegexOption.IGNORE_CASE)
+                .find(userAgent)
+                ?.groupValues
+                ?.get(1)
+                ?: return@runCatching false
+            val brands = listOf(
+                buildReflectiveBrandVersion("Google Chrome", version.substringBefore('.'), version),
+                buildReflectiveBrandVersion("Chromium", version.substringBefore('.'), version),
+                buildReflectiveBrandVersion("Not(A:Brand", "24", "24.0.0.0"),
+            )
+            val metadataBuilderClass = Class.forName("androidx.webkit.UserAgentMetadata\$Builder")
+            val metadataBuilder = metadataBuilderClass.getConstructor().newInstance()
+            setReflectiveBuilderValue(metadataBuilder, "setBrandVersionList", brands)
+            setReflectiveBuilderValue(metadataBuilder, "setFullVersion", version)
+            setReflectiveBuilderValue(metadataBuilder, "setPlatform", "Linux")
+            setReflectiveBuilderValue(metadataBuilder, "setPlatformVersion", "6.8.0")
+            setReflectiveBuilderValue(metadataBuilder, "setArchitecture", "x86")
+            setReflectiveBuilderValue(metadataBuilder, "setModel", "")
+            setReflectiveBuilderValue(metadataBuilder, "setMobile", false)
+            setReflectiveBuilderValue(metadataBuilder, "setBitness", 64)
+            setReflectiveBuilderValue(metadataBuilder, "setWow64", false)
+            val metadata = metadataBuilderClass.getMethod("build").invoke(metadataBuilder)
+                ?: return@runCatching false
+            val metadataClass = Class.forName("androidx.webkit.UserAgentMetadata")
+            Class.forName("androidx.webkit.WebSettingsCompat")
+                .getMethod("setUserAgentMetadata", WebSettings::class.java, metadataClass)
+                .invoke(null, settings, metadata)
+            true
+        }.getOrDefault(false)
+
+    internal fun gatewayShimAllowedOrigins(gatewayHost: String): Set<String> {
+        val host = gatewayHost.trim().trimEnd('.').lowercase()
+        if (host.isBlank()) return emptySet()
+        val allowedOrigins = linkedSetOf("https://$host")
+        val gatewayDomain = baseDomainOf(host)
+        if (Regex("""^freex2line\.[a-z]+$""", RegexOption.IGNORE_CASE).matches(gatewayDomain)) {
+            allowedOrigins += "https://$gatewayDomain"
+            allowedOrigins += "https://*.$gatewayDomain"
+        }
+        return allowedOrigins
+    }
+
+    private fun isGatewayShimOrigin(url: String?, gatewayHost: String): Boolean {
+        val host = hostOnly(url)
+        if (host.isBlank()) return false
+        val normalizedGatewayHost = gatewayHost.trim().trimEnd('.').lowercase()
+        if (host == normalizedGatewayHost) return true
+        val gatewayDomain = baseDomainOf(normalizedGatewayHost)
+        return Regex("""^freex2line\.[a-z]+$""", RegexOption.IGNORE_CASE).matches(gatewayDomain) &&
+            (host == gatewayDomain || host.endsWith(".$gatewayDomain"))
+    }
+
+    private fun installGatewayDocumentStartShim(webView: WebView, gatewayHost: String): Any? =
+        runCatching {
+            if (!isAndroidxWebKitFeatureSupported("DOCUMENT_START_SCRIPT")) return@runCatching null
+            Class.forName("androidx.webkit.WebViewCompat")
+                .getMethod("addDocumentStartJavaScript", WebView::class.java, String::class.java, Set::class.java)
+                .invoke(null, webView, buildGatewayDocumentStartShim(), gatewayShimAllowedOrigins(gatewayHost))
+        }.getOrNull()
+
+    private fun removeGatewayDocumentStartShim(handler: Any?) {
+        if (handler == null) return
+        runCatching { handler.javaClass.getMethod("remove").invoke(handler) }
     }
 
     internal fun unwrapHrefLi(url: String): String? {
@@ -334,9 +435,10 @@ object CimaNowGatewaySolver {
                 ?: shineUrl.trim().takeIf { it.startsWith("http://") || it.startsWith("https://") }
                 ?: return@withLock null
 
+            val previousPreferredUa = CimaNowNetwork.preferredUserAgent
             val activeActivity = if (Build.VERSION.SDK_INT > 0) CimaNowNetwork.resolveActivity() else null
             val minted = if (Build.VERSION.SDK_INT > 0 && activeActivity != null) {
-                // Attempt #1: 100% native untouched Android WebView identity (exact UA/Sec-CH-UA/CookieManager parity)
+                // Attempt #1 preserves the stock WebView identity and any existing gateway session.
                 mintViaAndroidWebView(
                     shineUrl = cleanShine,
                     itemUrl = itemUrl,
@@ -344,7 +446,9 @@ object CimaNowGatewaySolver {
                     attempt = 1,
                     useNativeDefaultUa = true,
                 ) ?: run {
-                    // Attempt #2: Full HttpOnly cookie purge + cleaned Chrome Mobile UA fallback
+                    // Prior gateway diagnostics rejected Android/WebView identity variants. Retry
+                    // with a desktop UA, matching Sec-CH-UA metadata when available, and a document-
+                    // start shim for WebView-only `window.chrome` / `Notification` markers.
                     purgeAllWebViewCookiesOnMain()
                     mintViaAndroidWebView(
                         shineUrl = cleanShine,
@@ -367,6 +471,8 @@ object CimaNowGatewaySolver {
                 tokenCache[cacheKey(itemUrl)] = CachedToken(normalized, System.currentTimeMillis() + TOKEN_TTL_MS)
                 normalized
             } else {
+                // Failed mint should not leave a desktop fallback UA on the shared OkHttp client.
+                CimaNowNetwork.preferredUserAgent = previousPreferredUa
                 null
             }
         }
@@ -387,6 +493,7 @@ object CimaNowGatewaySolver {
         val deferred = CompletableDeferred<String?>()
         var containerRef: PassThroughWebViewContainer? = null
         var webViewRef: WebView? = null
+        var documentStartShim: Any? = null
         val popupWebViews = ArrayList<WebView>(2)
         val mainHandler = Handler(Looper.getMainLooper())
 
@@ -429,7 +536,7 @@ object CimaNowGatewaySolver {
                     .getOrNull()
                     ?.takeIf { it.isNotBlank() }
                     ?: wv.settings.userAgentString.orEmpty()
-                val cleanedUa = cleanWebViewUserAgent(rawDefaultUa)
+                val desktopUa = desktopWebViewUserAgent(rawDefaultUa)
                 val xrwMode = suppressXRequestedWithHeader(wv.settings)
 
                 wv.settings.apply {
@@ -446,15 +553,26 @@ object CimaNowGatewaySolver {
                     cacheMode = WebSettings.LOAD_DEFAULT
                     setSupportMultipleWindows(true)
                     javaScriptCanOpenWindowsAutomatically = true
-                    if (!useNativeDefaultUa && cleanedUa.isNotBlank()) {
-                        userAgentString = cleanedUa
+                    if (!useNativeDefaultUa) {
+                        // Do not use a cleaned Android UA: prior diagnostics rejected WebView-like
+                        // identities. Keep this device's Chromium version in a desktop-style UA.
+                        userAgentString = desktopUa
                     }
                 }
 
-                // CRITICAL: Always synchronize CimaNowNetwork.preferredUserAgent with the EXACT byte-for-byte
-                // User-Agent used by this WebView (`activeUa`), matching CloudStream's official CloudflareKiller.
-                // Overwriting preferredUserAgent with `cleanedUa` while WebView used `rawDefaultUa` (`; wv`)
-                // breaks `cf_clearance` and token User-Agent validation on `cimanow.cc/.../watching/?token=...`!
+                val uaMetadataMode = if (useNativeDefaultUa) {
+                    "native"
+                } else if (applyDesktopUserAgentMetadata(wv.settings, desktopUa)) {
+                    "desktop-metadata"
+                } else {
+                    "desktop-no-hints-fallback"
+                }
+                if (!useNativeDefaultUa) {
+                    documentStartShim = installGatewayDocumentStartShim(wv, gatewayHost)
+                }
+
+                // Every HTTP request after minting must use the exact identity used to mint the token.
+                // This keeps CF clearance and the IP/UA-bound /watching/?token= session coherent.
                 val activeUa = wv.settings.userAgentString.orEmpty()
                 if (activeUa.isNotBlank()) {
                     if (useNativeDefaultUa) {
@@ -463,7 +581,9 @@ object CimaNowGatewaySolver {
                     CimaNowNetwork.preferredUserAgent = activeUa
                 }
                 logInfo(
-                    "Attempt #$attempt init WebView (nativeUa=$useNativeDefaultUa, xrw=$xrwMode, root=${root.width}x${root.height}, ua=${activeUa.take(82)})",
+                    "Attempt #$attempt init WebView (nativeUa=$useNativeDefaultUa, profile=$uaMetadataMode, " +
+                        "docStart=${documentStartShim != null}, xrw=$xrwMode, root=${root.width}x${root.height}, " +
+                        "ua=${activeUa.take(96)})",
                 )
 
                 fun clearPopupWebViews() {
@@ -589,6 +709,13 @@ object CimaNowGatewaySolver {
                             return
                         }
                         if (target.startsWith("http")) {
+                            if (attempt == 2 && isGatewayShimOrigin(target, gatewayHost)) {
+                                // Best-effort fallback for hosts without AndroidX WebKit's document-start
+                                // API. onPageStarted is not guaranteed to precede all inline page scripts.
+                                runCatching {
+                                    view?.evaluateJavascript(buildGatewayDocumentStartShim(), null)
+                                }
+                            }
                             logInfo("Attempt #$attempt nav -> ${target.substringBefore('?').take(85)}")
                         }
                     }
@@ -744,6 +871,8 @@ object CimaNowGatewaySolver {
                     }
                 }
                 popupWebViews.clear()
+                removeGatewayDocumentStartShim(documentStartShim)
+                documentStartShim = null
                 webViewRef?.let { wv ->
                     runCatching {
                         wv.stopLoading()
@@ -1043,6 +1172,8 @@ object CimaNowGatewaySolver {
                     webViewRef = wv
 
                     suppressXRequestedWithHeader(wv.settings)
+                    val targetUa = CimaNowNetwork.preferredUserAgent
+                    var desktopIdentityInherited = false
                     wv.settings.apply {
                         javaScriptEnabled = true
                         domStorageEnabled = true
@@ -1056,12 +1187,17 @@ object CimaNowGatewaySolver {
                         mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
                         setSupportMultipleWindows(true)
                         javaScriptCanOpenWindowsAutomatically = false
-                        // Preserve exact User-Agent parity with CimaNowNetwork / CookieManager
-                        val targetUa = CimaNowNetwork.preferredUserAgent
+                        // Preserve exact User-Agent parity with CimaNowNetwork / CookieManager,
+                        // including the desktop retry profile minted on the gateway WebView.
                         val defaultUa = userAgentString.orEmpty()
                         if (targetUa.isNotBlank() && targetUa != defaultUa && targetUa != CimaNowNetwork.MOBILE_UA) {
                             userAgentString = targetUa
+                            desktopIdentityInherited = targetUa.contains("(X11; Linux x86_64)")
                         }
+                    }
+                    if (desktopIdentityInherited) {
+                        val hintsSet = applyDesktopUserAgentMetadata(wv.settings, targetUa)
+                        logInfo("Watching WebView inherited desktop UA profile (clientHints=$hintsSet)")
                     }
 
                     runCatching {

@@ -170,13 +170,35 @@ class CimaNowLiveE2ETest {
             handle.decodeCoreIframe("""<iframe src="javascript:void(0);" data-cnb="https://vid.example/e/1"></iframe>"""),
         )
 
-        // 6. Android WebView UA cleaning (`; wv)` and `Version/4.0` stripped cleanly) + gateway URL helpers
+        // 6. Desktop fallback stays version-matched to the installed Chromium engine; this is a
+        // source-level regression test, not a real Android WebView/browser-gate verification.
         val xiaomiWvUa =
             "Mozilla/5.0 (Linux; Android 14; M2006C3MG Build/UP1A.231005.007; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/150.0.7871.63 Mobile Safari/537.36"
-        val cleanedUa = CimaNowGatewaySolver.cleanWebViewUserAgent(xiaomiWvUa)
-        assertFalse(cleanedUa.contains("; wv"))
-        assertFalse(cleanedUa.contains("Version/"))
-        assertTrue(cleanedUa.contains("M2006C3MG") && cleanedUa.contains("Chrome/150.0.7871.63 Mobile"))
+        val desktopUa = CimaNowGatewaySolver.desktopWebViewUserAgent(xiaomiWvUa)
+        assertEquals(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.7871.63 Safari/537.36",
+            desktopUa,
+        )
+        assertFalse(desktopUa.contains("Android"))
+        assertFalse(desktopUa.contains("; wv"))
+        assertFalse(desktopUa.contains("Mobile"))
+        assertEquals(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            CimaNowGatewaySolver.desktopWebViewUserAgent("unknown WebView"),
+        )
+        val shim = CimaNowGatewaySolver.buildGatewayDocumentStartShim()
+        assertTrue(shim.contains("delete window.chrome"))
+        assertTrue(shim.contains("delete window.Notification"))
+        val shimOrigins = CimaNowGatewaySolver.gatewayShimAllowedOrigins("RM.FreeX2Line.online")
+        assertEquals(
+            setOf("https://rm.freex2line.online", "https://freex2line.online", "https://*.freex2line.online"),
+            shimOrigins,
+        )
+        assertEquals(
+            setOf("https://other.example"),
+            CimaNowGatewaySolver.gatewayShimAllowedOrigins("other.example"),
+        )
+        assertTrue(CimaNowGatewaySolver.gatewayShimAllowedOrigins("").isEmpty())
 
         assertEquals(
             "https://cimanow.cc/movie/watching/?token=abc123",
