@@ -5,6 +5,7 @@ on:
   push:
     paths:
       - 'TukTukcima/**'
+      - '.github/workflows/build-tuktukcima.yml'
 
 permissions:
   contents: write
@@ -15,39 +16,82 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: 'temurin'
           java-version: '17'
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Build TukTukcima plugin
-        run: ./gradlew :TukTukcima:make
+      - name: Run TukTukcima unit tests and build plugin
+        shell: bash
+        run: |
+          set +e
+          ./gradlew :TukTukcima:testDebugUnitTest :TukTukcima:make --console=plain 2>&1 | tee "$RUNNER_TEMP/tuktuk-gradle.log"
+          gradle_status=${PIPESTATUS[0]}
+          if [ "$gradle_status" -ne 0 ]; then
+            GRADLE_LOG="$RUNNER_TEMP/tuktuk-gradle.log" python3 - <<'PY'
+          import os, re
+          from pathlib import Path
+          lines = Path(os.environ["GRADLE_LOG"]).read_text(errors="replace").splitlines()
+          pattern = re.compile(r"(^e: |error:|FAILURE:|What went wrong:|Execution failed| FAILED$|AssertionError|Compilation error|Could not resolve)", re.I)
+          details = [line.strip() for line in lines if pattern.search(line)]
+          if not details:
+              details = [line.strip() for line in lines[-40:]]
+          for line in details[-40:]:
+              safe = line.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A").replace("::", "%3A%3A")
+              print(f"::error title=Gradle failure detail::{safe[:1000]}")
+          PY
+          fi
+          exit "$gradle_status"
 
       - name: Upload TukTukcima.cs3 artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: TukTukcima
           path: TukTukcima/build/TukTukcima.cs3
 
-      - name: Commit and push built cs3 to build/
+      - name: Copy artifact and sync TukTukcima manifest size
         run: |
-          if [ -f "TukTukcima/build/TukTukcima.cs3" ]; then
-            cp TukTukcima/build/TukTukcima.cs3 build/TukTukcima.cs3
-            git config --local user.email "github-actions[bot]@users.noreply.github.com"
-            git config --local user.name "github-actions[bot]"
-            git add -f build/TukTukcima.cs3
-            git commit --allow-empty -m "🤖 Build TukTukcima.cs3"
-            git pull --rebase origin "$GITHUB_REF_NAME" || true
-            git push
-          else
-            echo "TukTukcima.cs3 not found!"
+          git checkout -B "$GITHUB_REF_NAME" "$GITHUB_SHA"
+          test -s TukTukcima/build/TukTukcima.cs3
+          mkdir -p build
+          cp -f TukTukcima/build/TukTukcima.cs3 build/TukTukcima.cs3
+          python3 - <<'PY'
+          import os, re
+          path = "plugins.json"
+          with open(path, "r", encoding="utf-8") as fh:
+              text = fh.read()
+          size = os.path.getsize("build/TukTukcima.cs3")
+          found = [False]
+          def update(match):
+              block = match.group(0)
+              if '"internalName": "TukTukcima"' not in block:
+                  return block
+              found[0] = True
+              return re.sub(r'("fileSize"\s*:\s*)\d+', rf'\g<1>{size}', block, count=1)
+          updated = re.sub(r'\{[^{}]*"internalName"\s*:\s*"TukTukcima"[^{}]*\}', update, text, flags=re.S)
+          if not found[0]:
+              raise SystemExit("TukTukcima manifest entry was not found")
+          with open(path, "w", encoding="utf-8") as fh:
+              fh.write(updated)
+          PY
+
+      - name: Commit generated plugin artifact
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add -f build/TukTukcima.cs3 plugins.json
+          if ! git diff --cached --quiet; then
+            git commit -m "🤖 Build TukTukcima.cs3 [skip ci]"
           fi
+
+      - name: Publish artifact to the triggering branch
+        run: git push origin "HEAD:refs/heads/${GITHUB_REF_NAME}"
