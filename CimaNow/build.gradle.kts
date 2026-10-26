@@ -40,16 +40,24 @@ val androidXWebKitAar by configurations.creating {
 }
 
 val androidXWebKitClassesJar = layout.buildDirectory.file("intermediates/cs3-deps/androidx-webkit/classes.jar")
-val extractAndroidXWebKit = tasks.register<Copy>("extractAndroidXWebKitClasses") {
-    from({ zipTree(androidXWebKitAar.singleFile) }) {
+val androidXWebKitClassesDir = layout.buildDirectory.dir("intermediates/cs3-deps/androidx-webkit/classes")
+val extractAndroidXWebKitAar = tasks.register<Copy>("extractAndroidXWebKitAar") {
+    from(provider { zipTree(androidXWebKitAar.singleFile) }) {
         include("classes.jar")
     }
     into(androidXWebKitClassesJar.map { it.asFile.parentFile })
 }
+val unpackAndroidXWebKitClasses = tasks.register<Copy>("unpackAndroidXWebKitClasses") {
+    dependsOn(extractAndroidXWebKitAar)
+    from(provider { zipTree(androidXWebKitClassesJar.get().asFile) })
+    into(androidXWebKitClassesDir)
+}
 
 tasks.named<CompileDexTask>("compileDex") {
-    dependsOn(extractAndroidXWebKit)
-    input.from(androidXWebKitClassesJar)
+    dependsOn(unpackAndroidXWebKitClasses)
+    // CompileDexTask consumes class directories safely; passing the classes.jar directly leaves
+    // lazy JarClassFileEntries pointing at a closed ZIP before D8 consumes them.
+    input.from(androidXWebKitClassesDir)
 }
 
 dependencies {
