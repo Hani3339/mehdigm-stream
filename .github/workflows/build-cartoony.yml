@@ -45,8 +45,11 @@ jobs:
       - name: Capture build failure diagnostics
         if: failure()
         run: |
-          if [ -f /tmp/cartoony-build.log ]; then
-            python3 - <<'PY'
+          if [ ! -s /tmp/cartoony-build.log ]; then
+            echo "::error title=Cartoony build diagnostics::The Gradle log file was not created or is empty."
+            exit 0
+          fi
+          python3 - <<'PY'
           from pathlib import Path
           lines = Path('/tmp/cartoony-build.log').read_text(errors='replace').splitlines()
           selected = []
@@ -65,10 +68,13 @@ jobs:
                   output.append(line)
           Path('/tmp/cartoony-failure-details.txt').write_text('\n'.join(output[-100:]))
           PY
-            cat /tmp/cartoony-failure-details.txt | tee -a "$GITHUB_STEP_SUMMARY"
-            details="$(tr '\n' ' ' < /tmp/cartoony-failure-details.txt | cut -c1-3500)"
-            echo "::error title=Cartoony build diagnostics::$details"
-          fi
+          cat /tmp/cartoony-failure-details.txt | tee -a "$GITHUB_STEP_SUMMARY"
+          details="$(tr '\n' ' ' < /tmp/cartoony-failure-details.txt | cut -c1-3500)"
+          details="${details//'%'/'%25'}"
+          details="${details//$'\r'/'%0D'}"
+          details="${details//$'\n'/'%0A'}"
+          if [ -z "$details" ]; then details="The Gradle build failed without diagnostic output."; fi
+          echo "::error title=Cartoony build diagnostics::$details"
 
       - name: Copy artifact and sync plugins.json fileSize
         if: success()
