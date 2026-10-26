@@ -107,7 +107,7 @@ class TukTukMegaMaxExtractor : ExtractorApi() {
         }
 
         val page = parseInertiaPage(response.text) ?: return null
-        val finalUrl = response.finalUrl.ifBlank { targetUrl }
+        val finalUrl = response.url.ifBlank { targetUrl }
         val origin = TukTukMediaUtils.originOf(finalUrl, TukTukMediaUtils.originOf(targetUrl, mainUrl))
         val cookies = response.cookies.filterValues { it.isNotBlank() }
         val cookieHeader = cookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
@@ -357,7 +357,7 @@ class TukTukMegaMaxExtractor : ExtractorApi() {
                 val attachment = attachments.optJSONObject(i) ?: continue
                 val attachmentId = attachment.optString("hashId")
                     .ifBlank { attachment.optString("id") }
-                    .ifBlank { continue }
+                if (attachmentId.isBlank()) continue
                 val label = attachment.optString("label")
                     .ifBlank { attachment.optString("name") }
                     .ifBlank { attachment.optString("resolution") }
@@ -467,29 +467,8 @@ class TukTukMegaMaxExtractor : ExtractorApi() {
         }
 
         var resolvedAny = false
-        val wrappedCallback: (ExtractorLink) -> Unit = { extracted ->
-            val finalQuality = extracted.quality.takeIf { it != Qualities.Unknown.value }
-                ?: quality.takeIf { it > 0 }
-                ?: Qualities.Unknown.value
-            if (emitted.add(extracted.url)) {
-                resolvedAny = true
-                val driverName = displayDriver(task.driver, link)
-                val qualitySuffix = task.qualityLabel.takeIf { it.isNotBlank() }?.let { " ($it)" }.orEmpty()
-                callback(
-                    newExtractorLink(
-                        source = name,
-                        name = "$name — $driverName$qualitySuffix",
-                        url = extracted.url,
-                        type = extracted.type,
-                    ) {
-                        this.referer = extracted.referer.ifBlank { task.referer }
-                        this.quality = finalQuality
-                        this.headers = extracted.headers
-                        this.extractorData = extracted.extractorData
-                    },
-                )
-            }
-        }
+        val extractedLinks = ArrayList<ExtractorLink>()
+        val wrappedCallback: (ExtractorLink) -> Unit = { extracted -> extractedLinks.add(extracted) }
 
         try {
             when {
@@ -508,6 +487,29 @@ class TukTukMegaMaxExtractor : ExtractorApi() {
             }
         } catch (e: Exception) {
             Log.w(name, "Extractor dispatch failed for ${task.driver}: $link", e)
+        }
+
+        for (extracted in extractedLinks) {
+            if (!emitted.add(extracted.url)) continue
+            resolvedAny = true
+            val finalQuality = extracted.quality.takeIf { it != Qualities.Unknown.value }
+                ?: quality.takeIf { it > 0 }
+                ?: Qualities.Unknown.value
+            val driverName = displayDriver(task.driver, link)
+            val qualitySuffix = task.qualityLabel.takeIf { it.isNotBlank() }?.let { " ($it)" }.orEmpty()
+            callback(
+                newExtractorLink(
+                    source = name,
+                    name = "$name — $driverName$qualitySuffix",
+                    url = extracted.url,
+                    type = extracted.type,
+                ) {
+                    this.referer = extracted.referer.ifBlank { task.referer }
+                    this.quality = finalQuality
+                    this.headers = extracted.headers
+                    this.extractorData = extracted.extractorData
+                },
+            )
         }
 
         // Some MegaMax mirror pages expose sources in packed HTML rather than through
@@ -637,7 +639,7 @@ class TukTukMegaMaxExtractor : ExtractorApi() {
         require(iv.size == 16)
         val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
         cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
-        String(cipher.doFinal(cipherText), Charsets.UTF_8)
+        return String(cipher.doFinal(cipherText), Charsets.UTF_8)
     }
 
     private fun hexToBytes(value: String): ByteArray {
