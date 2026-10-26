@@ -456,8 +456,6 @@ class TukTukMegaMaxExtractor : ExtractorApi() {
     ) {
         val quality = TukTukMediaUtils.qualityHint(task.qualityLabel)
         val link = TukTukMediaUtils.resolveMediaUrl(task.referer, task.url) ?: return
-        if (TukTukMediaUtils.isMegaMaxUrl(link, task.driver)) return
-
         val isHls = TukTukMediaUtils.isHls(link)
         val isDash = link.substringBefore('?').endsWith(".mpd", ignoreCase = true)
         val isDirectVideo = Regex("\\.(?:mp4|m4v|webm)(?:$|[?#])", RegexOption.IGNORE_CASE).containsMatchIn(link)
@@ -465,6 +463,11 @@ class TukTukMegaMaxExtractor : ExtractorApi() {
             emitDirect(link, task, quality, emitted, callback)
             return
         }
+        if (task.driver.equals("MegaMax Direct", ignoreCase = true)) {
+            emitDirect(link, task, quality, emitted, callback)
+            return
+        }
+        if (TukTukMediaUtils.isMegaMaxUrl(link, task.driver)) return
 
         var resolvedAny = false
         val extractedLinks = ArrayList<ExtractorLink>()
