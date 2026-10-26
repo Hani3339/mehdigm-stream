@@ -241,7 +241,7 @@ class Cartoony : MainAPI() {
                 this.posterUrl = episode?.poster ?: showInfo.poster
                 this.plot = showInfo.plot
                 this.tags = showInfo.tags
-                this.rating = showInfo.rating
+                this.score = scoreFromHundred(showInfo.rating)
                 this.year = showInfo.year
                 this.contentRating = ageRating(showInfo.minimumAge)
             }
@@ -262,7 +262,7 @@ class Cartoony : MainAPI() {
                 this.posterUrl = showInfo.poster ?: first.poster
                 this.plot = showInfo.plot
                 this.tags = showInfo.tags
-                this.rating = showInfo.rating
+                this.score = scoreFromHundred(showInfo.rating)
                 this.duration = showInfo.durationMinutes
                 this.year = showInfo.year
                 this.contentRating = ageRating(showInfo.minimumAge)
@@ -286,7 +286,7 @@ class Cartoony : MainAPI() {
             this.posterUrl = showInfo.poster
             this.plot = showInfo.plot
             this.tags = showInfo.tags
-            this.rating = showInfo.rating
+            this.score = scoreFromHundred(showInfo.rating)
             this.duration = showInfo.durationMinutes
             this.year = showInfo.year
             this.contentRating = ageRating(showInfo.minimumAge)
@@ -829,7 +829,7 @@ class Cartoony : MainAPI() {
             height != null && height >= 1440 || normalized.contains("2k") || normalized.contains("qhd") -> Qualities.P1440.value
             height != null && height >= 1080 || normalized.contains("fhd") -> Qualities.P1080.value
             height != null && height >= 720 || Regex("""\bhd\b""").containsMatchIn(normalized) -> Qualities.P720.value
-            height != null && height >= 540 -> Qualities.P540.value
+            height != null && height >= 540 -> 540
             height != null && height >= 480 || Regex("""\bsd\b""").containsMatchIn(normalized) -> Qualities.P480.value
             height != null && height >= 360 -> Qualities.P360.value
             height != null && height >= 240 -> Qualities.P240.value
@@ -845,6 +845,9 @@ class Cartoony : MainAPI() {
             else -> null
         }
     }
+
+    private fun scoreFromHundred(value: Int?): Score? =
+        value?.let { Score.from10(it.coerceIn(0, 100) / 10.0) }
 
     private fun durationMinutes(raw: String?): Int? {
         val value = raw?.let { Regex("\\d+").find(it)?.value?.toIntOrNull() } ?: return null
@@ -901,7 +904,7 @@ class Cartoony : MainAPI() {
     companion object {
         private const val TAG = "Cartoony"
         private const val REQUEST_TIMEOUT_MS = 15_000L
-        private const val REQUEST_TIMEOUT_SECONDS = 15
+        private const val REQUEST_TIMEOUT_SECONDS = 15L
         private const val PAGE_SIZE = 30
         private const val MOBILE_USER_AGENT =
             "Mozilla/5.0 (Linux; Android 12; Mobile) AppleWebKit/537.36 " +
