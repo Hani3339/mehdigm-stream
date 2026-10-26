@@ -74,10 +74,5 @@ jobs:
             git commit -m "🤖 Build TukTukcima.cs3 [skip ci]"
           fi
 
-      - name: Rebase artifact commit onto the latest branch
-        run: |
-          git fetch origin "+refs/heads/${GITHUB_REF_NAME}:refs/remotes/origin/${GITHUB_REF_NAME}"
-          git rebase "refs/remotes/origin/${GITHUB_REF_NAME}"
-
       - name: Publish artifact to the triggering branch
         run: git push origin "HEAD:refs/heads/${GITHUB_REF_NAME}"
