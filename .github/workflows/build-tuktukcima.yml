@@ -41,6 +41,7 @@ jobs:
 
       - name: Copy artifact and sync TukTukcima manifest size
         run: |
+          git checkout -B "$GITHUB_REF_NAME" "$GITHUB_SHA"
           test -s TukTukcima/build/TukTukcima.cs3
           mkdir -p build
           cp -f TukTukcima/build/TukTukcima.cs3 build/TukTukcima.cs3
