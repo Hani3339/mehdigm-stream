@@ -91,11 +91,11 @@
         "description": "شاهد فور يو — مشاهدة وتحميل الأفلام والمسلسلات الأجنبية والعربية والتركية والآسيوية والأنمي."
     },
     {
-        "iconUrl": "https://tuktukhd.com/wp-content/themes/TukTukCinema3/tuk.png?x50750",
+        "iconUrl": "https://tuktukcinemas.com/wp-content/themes/TukTukCinema3/tuk.png?x50750",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
         "fileSize": 45461,
-        "status": 1,
+        "status": 3,
         "language": "ar",
         "authors": [
             "mehdigm4life"
@@ -103,13 +103,15 @@
         "tvTypes": [
             "TvSeries",
             "Movie",
-            "Anime"
+            "Anime",
+            "AnimeMovie",
+            "Cartoon"
         ],
-        "version": 7,
+        "version": 8,
         "internalName": "TukTukcima",
         "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/TukTukcima.cs3",
         "name": "توك توك سينما (TukTuk)",
-        "description": "مشاهدة وتحميل الأفلام والمسلسلات الأجنبية والآسيوية والتركية والأنمي."
+        "description": "تصفح وبحث ومشاهدة الأفلام والمسلسلات والحلقات والأنمي من توك توك سينما."
     },
     {
         "iconUrl": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/cartoonanime.jpeg",
