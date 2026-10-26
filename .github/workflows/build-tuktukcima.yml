@@ -65,14 +65,19 @@ jobs:
               fh.write(updated)
           PY
 
-      - name: Commit and push built cs3 to build/
+      - name: Commit generated plugin artifact
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add -f build/TukTukcima.cs3 plugins.json
           if ! git diff --cached --quiet; then
             git commit -m "🤖 Build TukTukcima.cs3 [skip ci]"
-            git fetch origin "+refs/heads/${GITHUB_REF_NAME}:refs/remotes/origin/${GITHUB_REF_NAME}"
-            git rebase "refs/remotes/origin/${GITHUB_REF_NAME}"
-            git push origin "HEAD:refs/heads/${GITHUB_REF_NAME}"
           fi
+
+      - name: Rebase artifact commit onto the latest branch
+        run: |
+          git fetch origin "+refs/heads/${GITHUB_REF_NAME}:refs/remotes/origin/${GITHUB_REF_NAME}"
+          git rebase "refs/remotes/origin/${GITHUB_REF_NAME}"
+
+      - name: Publish artifact to the triggering branch
+        run: git push origin "HEAD:refs/heads/${GITHUB_REF_NAME}"
