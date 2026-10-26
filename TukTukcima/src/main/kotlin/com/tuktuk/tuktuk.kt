@@ -522,7 +522,7 @@ class TukTukHd : MainAPI() {
         for (element in doc.select("[data-crypt]")) {
             decodePlayerUrl(element.attr("data-crypt"), pageUrl)?.let(urls::add)
         }
-        val frameSelector = "#main-video-frame[src], iframe[data-src], .VideoPlayer iframe[src], .player iframe[src], .play-box iframe[src], iframe[src*='/embed/'], iframe[src*='/player/']"
+        val frameSelector = "#main-video-frame[src], iframe[data-src], .VideoPlayer iframe[src], .player iframe[src], .play-box iframe[src], iframe[src*='/embed/'], iframe[src*='/player/'], iframe[src*='/iframe/'], iframe[src*='megamax'], iframe[src*='share4max'], iframe[src*='megatuktuk']"
         for (frame in doc.select(frameSelector)) {
             val raw = frame.attr("src").ifBlank { frame.attr("data-src") }
             if (raw.isBlank()) continue
