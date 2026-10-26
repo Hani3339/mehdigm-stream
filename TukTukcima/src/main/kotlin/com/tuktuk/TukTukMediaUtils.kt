@@ -16,6 +16,10 @@ internal object TukTukMediaUtils {
     private val masterTextUrl = Regex(
         """(?i)(?:https?:)?//[^\s"'<>\\]+?/master\.txt(?:\?[^\s"'<>\\]*)?"""
     )
+    private val MEGAMAX_PATH_REGEX = Regex(
+        """^/(?:iframe|download|e|d|f|mirror)/([A-Za-z0-9_-]{8,24})/?$""",
+        RegexOption.IGNORE_CASE
+    )
 
     fun originOf(url: String, fallback: String): String {
         val parsed = runCatching { URI(url) }.getOrNull() ?: return fallback.trimEnd('/')
@@ -23,6 +27,24 @@ internal object TukTukMediaUtils {
         val scheme = parsed.scheme?.takeIf { it.equals("http", true) || it.equals("https", true) } ?: "https"
         return "$scheme://$host"
     }
+
+    fun isMegaMaxUrl(url: String, serverHint: String = ""): Boolean {
+        val host = runCatching { URI(url).host?.lowercase().orEmpty() }.getOrDefault("")
+        val path = runCatching { URI(url).path.orEmpty() }.getOrDefault("")
+        if (
+            host.contains("megamax.") || host.contains("share4max.") ||
+            host.contains("q7v3k8m2p1.") || host.contains("megatuktuk.")
+        ) return true
+        if (serverHint.contains("megamax", ignoreCase = true) || serverHint.contains("share4max", ignoreCase = true)) {
+            return true
+        }
+        return MEGAMAX_PATH_REGEX.matches(path) &&
+            (path.startsWith("/iframe/", ignoreCase = true) || path.startsWith("/download/", ignoreCase = true))
+    }
+
+    fun extractMegaMaxId(url: String): String? =
+        MEGAMAX_PATH_REGEX.find(runCatching { URI(url).path.orEmpty() }.getOrDefault(""))
+            ?.groupValues?.getOrNull(1)
 
     fun isHls(url: String): Boolean = Regex(
         """(?i)\.(?:m3u8|m3u)(?:$|[?#])|/master\.txt(?:$|[?#])"""

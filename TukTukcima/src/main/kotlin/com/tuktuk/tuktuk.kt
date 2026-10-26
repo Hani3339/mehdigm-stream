@@ -612,13 +612,16 @@ class TukTukHd : MainAPI() {
                 Regex("\\.(?:m3u8|m3u|mp4|m4v|mpd)(?:$|[?#])", RegexOption.IGNORE_CASE).containsMatchIn(link) ||
                     link.contains("/master.txt", ignoreCase = true) ->
                     emitDirectMedia(link, sourceName, playerUrl, quality, callback)
+                hint.contains("megamax") || hint.contains("share4max") ||
+                    TukTukMediaUtils.isMegaMaxUrl(link, driver.orEmpty()) ->
+                    TukTukMegaMaxExtractor().getUrl(link, playerUrl, subtitleCallback, callback)
                 hint.contains("byse") || hint.contains("byseraguci") ->
                     TukTukByseExtractor().getUrl(link, playerUrl, subtitleCallback, callback)
                 hint.contains("lulustream") || hint.contains("luluvdo") ->
                     TukTukLuluExtractor().getUrl(link, playerUrl, subtitleCallback, callback)
                 hint.contains("upnshare") || hint.contains("upns.one") ->
                     TukTukUpnExtractor().getUrl(link, playerUrl, subtitleCallback, callback)
-                hint.contains("earnvids") || hint.contains("tuktukvip") || hint.contains("lolololu") ->
+                hint.contains("tuktukvip") || hint.contains("lolololu") ->
                     TukTukVipExtractor().getUrl(link, playerUrl, subtitleCallback, callback)
                 hint.contains("videoland") ->
                     VideolandExtractor().getUrl(link, playerUrl, subtitleCallback, callback)

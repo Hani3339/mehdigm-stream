@@ -30,8 +30,8 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Build TukTukcima plugin
-        run: ./gradlew :TukTukcima:make
+      - name: Run TukTukcima unit tests and build plugin
+        run: ./gradlew :TukTukcima:testDebugUnitTest :TukTukcima:make
 
       - name: Upload TukTukcima.cs3 artifact
         uses: actions/upload-artifact@v7
