@@ -37,7 +37,11 @@ async function request(path, options = {}) {
     signal: AbortSignal.timeout(20_000),
   });
   const body = await response.text();
-  if (!response.ok) throw new Error(`${path} returned HTTP ${response.status}`);
+  if (!response.ok) {
+    const preview = body.replace(/\s+/g, ' ').slice(0, 400);
+    const server = response.headers.get('server') ?? 'unknown server';
+    throw new Error(`${path} returned HTTP ${response.status} (${server}): ${preview}`);
+  }
   try {
     return decodePayload(body);
   } catch (error) {
