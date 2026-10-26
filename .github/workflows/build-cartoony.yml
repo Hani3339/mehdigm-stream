@@ -75,6 +75,12 @@ jobs:
           details="${details//$'\n'/'%0A'}"
           if [ -z "$details" ]; then details="The Gradle build failed without diagnostic output."; fi
           echo "::error title=Cartoony build diagnostics::$details"
+          cp /tmp/cartoony-build.log Cartoony/gradle-failure.log
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add -f Cartoony/gradle-failure.log
+          git commit -m "🤖 Temporary Cartoony build log [skip ci]"
+          git push origin "$GITHUB_REF_NAME"
 
       - name: Copy artifact and sync plugins.json fileSize
         if: success()
