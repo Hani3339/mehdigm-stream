@@ -38,52 +38,10 @@ jobs:
       - name: Build Cartoony
         run: |
           chmod +x gradlew
-          set -o pipefail
-          ./gradlew :Cartoony:clean :Cartoony:make --no-daemon --stacktrace 2>&1 | tee /tmp/cartoony-build.log
+          ./gradlew :Cartoony:clean :Cartoony:make --no-daemon --stacktrace
           test -s Cartoony/build/Cartoony.cs3
 
-      - name: Capture build failure diagnostics
-        if: failure()
-        run: |
-          if [ ! -s /tmp/cartoony-build.log ]; then
-            echo "::error title=Cartoony build diagnostics::The Gradle log file was not created or is empty."
-            exit 0
-          fi
-          python3 - <<'PY'
-          from pathlib import Path
-          lines = Path('/tmp/cartoony-build.log').read_text(errors='replace').splitlines()
-          selected = []
-          for i, line in enumerate(lines):
-              if 'What went wrong:' in line or line.startswith('FAILURE:'):
-                  selected.extend(lines[max(0, i - 2):min(len(lines), i + 35)])
-              if line.lstrip().startswith('e: ') or ' error:' in line or 'Unresolved reference' in line:
-                  selected.extend(lines[max(0, i - 1):min(len(lines), i + 4)])
-          if not selected:
-              selected = lines[-80:]
-          seen = set()
-          output = []
-          for line in selected:
-              if line not in seen:
-                  seen.add(line)
-                  output.append(line)
-          Path('/tmp/cartoony-failure-details.txt').write_text('\n'.join(output[-100:]))
-          PY
-          cat /tmp/cartoony-failure-details.txt | tee -a "$GITHUB_STEP_SUMMARY"
-          details="$(tr '\n' ' ' < /tmp/cartoony-failure-details.txt | cut -c1-3500)"
-          details="${details//'%'/'%25'}"
-          details="${details//$'\r'/'%0D'}"
-          details="${details//$'\n'/'%0A'}"
-          if [ -z "$details" ]; then details="The Gradle build failed without diagnostic output."; fi
-          echo "::error title=Cartoony build diagnostics::$details"
-          cp /tmp/cartoony-build.log Cartoony/gradle-failure.log
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          git add -f Cartoony/gradle-failure.log
-          git commit -m "🤖 Temporary Cartoony build log [skip ci]"
-          git push origin "$GITHUB_REF_NAME"
-
       - name: Copy artifact and sync plugins.json fileSize
-        if: success()
         run: |
           mkdir -p build
           cp -f Cartoony/build/Cartoony.cs3 build/Cartoony.cs3
@@ -93,20 +51,22 @@ jobs:
           with open(path, "r", encoding="utf-8") as fh:
               text = fh.read()
           size = os.path.getsize("build/Cartoony.cs3")
+          found = [False]
           def update(match):
               block = match.group(0)
               if '"internalName": "Cartoony"' not in block:
                   return block
+              found[0] = True
               return re.sub(r'("fileSize"\s*:\s*)\d+', rf'\g<1>{size}', block, count=1)
           updated = re.sub(r'\{[^{}]*"internalName"\s*:\s*"Cartoony"[^{}]*\}', update, text, flags=re.S)
-          if updated == text:
+          if not found[0]:
               raise SystemExit("Cartoony manifest entry was not found")
-          with open(path, "w", encoding="utf-8") as fh:
-              fh.write(updated)
+          if updated != text:
+              with open(path, "w", encoding="utf-8") as fh:
+                  fh.write(updated)
           PY
 
       - name: Commit and push built Cartoony artifact
-        if: success()
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"

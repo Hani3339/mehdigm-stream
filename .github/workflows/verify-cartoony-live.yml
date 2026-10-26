@@ -1,11 +1,7 @@
-name: Verify Cartoony Live API and Playback
+name: Manual Cartoony Live API and Playback Smoke Test
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - 'Cartoony/scripts/**'
-      - '.github/workflows/verify-cartoony-live.yml'
 
 permissions:
   contents: read
@@ -23,15 +19,4 @@ jobs:
           node-version: '22'
 
       - name: Test Cartoony API, decryption, HLS playlist, and first segment
-        run: |
-          set -o pipefail
-          node Cartoony/scripts/live-smoke.mjs 2>&1 | tee /tmp/cartoony-live.log
-
-      - name: Capture live-test diagnostics
-        if: failure()
-        run: |
-          if [ -f /tmp/cartoony-live.log ]; then
-            tail -n 80 /tmp/cartoony-live.log | tee -a "$GITHUB_STEP_SUMMARY"
-            details="$(tail -n 20 /tmp/cartoony-live.log | tr '\n' ' ' | cut -c1-3500)"
-            echo "::error title=Cartoony live-test diagnostics::$details"
-          fi
+        run: node Cartoony/scripts/live-smoke.mjs
