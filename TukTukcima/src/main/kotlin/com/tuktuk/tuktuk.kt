@@ -290,7 +290,9 @@ class TukTukHd : MainAPI() {
         ).trim().ifBlank { doc.title().substringBefore("|").trim() }
         val poster = extractPoster(doc)
         val plot = extractPlot(doc)
-        val year = extractYear(rawTitle) ?: extractYear(doc.selectFirst("time, [itemprop=datePublished]")?.attr("datetime").orEmpty())
+        val year = extractYear(rawTitle)
+            ?: extractYear(doc.selectFirst("time, [itemprop=datePublished]")?.attr("datetime").orEmpty())
+            ?: extractYear(canonicalUrl)
         val rating = extractRating(doc)
         val path = extractPath(canonicalUrl)
         val hasEpisodeLabel = Regex("(?:الحلقة|حلقة|episode|ep)\\s*[-:#]*\\s*\\d+", RegexOption.IGNORE_CASE)
