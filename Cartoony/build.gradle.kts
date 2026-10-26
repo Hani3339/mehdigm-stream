@@ -1,12 +1,11 @@
-version = 1
+version = 2
 
 cloudstream {
     description = "مسلسلات وأفلام الكرتون والأنمي من موقع كرتوني"
     authors = listOf("mehdigm4life")
     language = "ar"
 
-    // إصدار تجريبي إلى أن يتم اختبار البحث والمشاهدة والتنزيل من داخل CloudStream.
-    status = 3
+    status = 1
 
     tvTypes = listOf(
         "Anime",

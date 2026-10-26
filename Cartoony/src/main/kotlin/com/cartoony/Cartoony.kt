@@ -54,7 +54,6 @@ class Cartoony : MainAPI() {
         "top" to "الأعلى تقييماً",
         "anime" to "الأنمي",
         "cartoon" to "الكرتون",
-        "classic" to "الكلاسيكيات",
         "all" to "جميع الأعمال",
     )
 
@@ -74,7 +73,6 @@ class Cartoony : MainAPI() {
         val isPopular: Boolean = false,
         val isTop: Boolean = false,
         val isHot: Boolean = false,
-        val isClassic: Boolean = false,
         val tags: List<String> = emptyList(),
         val rating: Int? = null,
         val durationMinutes: Int? = null,
@@ -179,7 +177,6 @@ class Cartoony : MainAPI() {
                 .ifEmpty { visibleCatalogue.sortedByDescending { it.rating ?: 0 } }
             "anime" -> visibleCatalogue.filter { !it.isMovie && it.isAnime }
             "cartoon" -> visibleCatalogue.filter { !it.isMovie && !it.isAnime }
-            "classic" -> visibleCatalogue.filter { it.isClassic }
             else -> visibleCatalogue
         }
 
@@ -460,7 +457,6 @@ class Cartoony : MainAPI() {
             isPopular = jsonFlag(obj, "is_popular"),
             isTop = jsonFlag(obj, "is_top"),
             isHot = jsonFlag(obj, "is_hot"),
-            isClassic = jsonFlag(obj, "is_zaman"),
             tags = parseTags(jsonString(obj, "tags")),
             rating = rating100(jsonNumber(obj, "rating")),
             durationMinutes = durationMinutes(jsonString(obj, "ep_duration", "episodes_length")),
