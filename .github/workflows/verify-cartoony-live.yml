@@ -1,0 +1,22 @@
+name: Manual Cartoony Live API and Playback Smoke Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Test Cartoony API, decryption, HLS playlist, and first segment
+        run: node Cartoony/scripts/live-smoke.mjs

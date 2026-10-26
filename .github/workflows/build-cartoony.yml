@@ -1,0 +1,78 @@
+name: Build Cartoony Plugin
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'Cartoony/**'
+      - 'plugins.json'
+      - 'gradle/**'
+      - 'build.gradle.kts'
+      - 'settings.gradle'
+      - 'settings.gradle.kts'
+      - 'gradlew'
+      - '.github/workflows/build-cartoony.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    if: github.event_name != 'push' || (!contains(github.event.head_commit.message, '[skip ci]') && !contains(github.event.head_commit.message, '🤖'))
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Configure Android SDK
+        run: echo "sdk.dir=$ANDROID_HOME" > local.properties
+
+      - name: Build Cartoony
+        run: |
+          chmod +x gradlew
+          ./gradlew :Cartoony:clean :Cartoony:make --no-daemon --stacktrace
+          test -s Cartoony/build/Cartoony.cs3
+
+      - name: Copy artifact and sync plugins.json fileSize
+        run: |
+          mkdir -p build
+          cp -f Cartoony/build/Cartoony.cs3 build/Cartoony.cs3
+          python3 - <<'PY'
+          import os, re
+          path = "plugins.json"
+          with open(path, "r", encoding="utf-8") as fh:
+              text = fh.read()
+          size = os.path.getsize("build/Cartoony.cs3")
+          found = [False]
+          def update(match):
+              block = match.group(0)
+              if '"internalName": "Cartoony"' not in block:
+                  return block
+              found[0] = True
+              return re.sub(r'("fileSize"\s*:\s*)\d+', rf'\g<1>{size}', block, count=1)
+          updated = re.sub(r'\{[^{}]*"internalName"\s*:\s*"Cartoony"[^{}]*\}', update, text, flags=re.S)
+          if not found[0]:
+              raise SystemExit("Cartoony manifest entry was not found")
+          if updated != text:
+              with open(path, "w", encoding="utf-8") as fh:
+                  fh.write(updated)
+          PY
+
+      - name: Commit and push built Cartoony artifact
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add -f build/Cartoony.cs3 plugins.json
+          if ! git diff --cached --quiet; then
+            git commit -m "🤖 Build Cartoony.cs3 [skip ci]"
+            git pull --rebase origin "$GITHUB_REF_NAME"
+            git push origin "$GITHUB_REF_NAME"
+          fi

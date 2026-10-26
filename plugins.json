@@ -134,6 +134,29 @@
         "description": "مسلسلات كرتون وأنمي — مسلسلات وأفلام الكرتون والأنمي المترجمة والمدبلجة."
     },
     {
+        "iconUrl": "https://cartoony.net/assets/img/logo.webp?brand=main",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
+        "fileSize": 49057,
+        "status": 3,
+        "language": "ar",
+        "authors": [
+            "mehdigm4life"
+        ],
+        "tvTypes": [
+            "Anime",
+            "AnimeMovie",
+            "TvSeries",
+            "Movie",
+            "Cartoon"
+        ],
+        "version": 1,
+        "internalName": "Cartoony",
+        "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/Cartoony.cs3",
+        "name": "كرتوني (Cartoony)",
+        "description": "موقع كرتوني — كرتون وأنمي وأفلام ومسلسلات عربية."
+    },
+    {
         "iconUrl": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/CimaCloud.png",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
