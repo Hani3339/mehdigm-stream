@@ -46,8 +46,27 @@ jobs:
         if: failure()
         run: |
           if [ -f /tmp/cartoony-build.log ]; then
-            tail -n 100 /tmp/cartoony-build.log | tee -a "$GITHUB_STEP_SUMMARY"
-            details="$(tail -n 20 /tmp/cartoony-build.log | tr '\n' ' ' | cut -c1-3500)"
+            python3 - <<'PY'
+          from pathlib import Path
+          lines = Path('/tmp/cartoony-build.log').read_text(errors='replace').splitlines()
+          selected = []
+          for i, line in enumerate(lines):
+              if 'What went wrong:' in line or line.startswith('FAILURE:'):
+                  selected.extend(lines[max(0, i - 2):min(len(lines), i + 35)])
+              if line.lstrip().startswith('e: ') or ' error:' in line or 'Unresolved reference' in line:
+                  selected.extend(lines[max(0, i - 1):min(len(lines), i + 4)])
+          if not selected:
+              selected = lines[-80:]
+          seen = set()
+          output = []
+          for line in selected:
+              if line not in seen:
+                  seen.add(line)
+                  output.append(line)
+          Path('/tmp/cartoony-failure-details.txt').write_text('\n'.join(output[-100:]))
+          PY
+            cat /tmp/cartoony-failure-details.txt | tee -a "$GITHUB_STEP_SUMMARY"
+            details="$(tr '\n' ' ' < /tmp/cartoony-failure-details.txt | cut -c1-3500)"
             echo "::error title=Cartoony build diagnostics::$details"
           fi
 

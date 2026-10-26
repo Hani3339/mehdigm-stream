@@ -6,7 +6,6 @@ on:
     paths:
       - 'CimaCloud/**'
       - 'AnimeDay/**'
-      - '.github/workflows/build-plugins.yml'
 
 permissions:
   contents: write
