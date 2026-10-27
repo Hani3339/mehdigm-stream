@@ -94,7 +94,7 @@
         "iconUrl": "https://tuktukcinemas.com/wp-content/themes/TukTukCinema3/tuk.png?x50750",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-        "fileSize": 111221,
+        "fileSize": 110698,
         "status": 3,
         "language": "ar",
         "authors": [
@@ -107,7 +107,7 @@
             "AnimeMovie",
             "Cartoon"
         ],
-        "version": 11,
+        "version": 12,
         "internalName": "TukTukcima",
         "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/TukTukcima.cs3",
         "name": "توك توك سينما (TukTuk)",
