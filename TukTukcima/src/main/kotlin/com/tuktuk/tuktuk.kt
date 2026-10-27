@@ -1,22 +1,24 @@
 package com.tuktuk
 
 import android.util.Base64
-import com.fasterxml.jackson.annotation.JsonProperty
+import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.loadExtractor
-import com.lagradost.cloudstream3.utils.M3u8Helper
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
-import com.lagradost.cloudstream3.utils.newExtractorLink
+import com.lagradost.cloudstream3.utils.M3u8Helper
 import com.lagradost.cloudstream3.utils.Qualities
-import org.jsoup.nodes.Element
-import kotlinx.coroutines.delay
+import com.lagradost.cloudstream3.utils.loadExtractor
+import com.lagradost.cloudstream3.utils.newExtractorLink
+import org.json.JSONArray
+import org.json.JSONObject
+import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
 import java.net.URI
 import java.net.URLEncoder
-import android.util.Log
+import java.util.Locale
 
 class TukTukHd : MainAPI() {
-    override var mainUrl = "https://tuktukcinemas.com"
+    override var mainUrl = TukTukSiteParser.BASE_URL
     override var name = "توك توك سينما (TukTuk)"
     override val hasMainPage = true
     override val hasQuickSearch = true
@@ -39,25 +41,15 @@ class TukTukHd : MainAPI() {
         "$mainUrl/category/anime-6/page/" to "أنمي",
         "$mainUrl/channel/film-netflix-1/page/" to "افلام نتفليكس",
         "$mainUrl/channel/series-netflix-2/page/" to "مسلسلات نتفليكس",
-        "$mainUrl/channel/full-series-1/page/" to "تحميل مسلسلات برابط واحد"
+        "$mainUrl/channel/full-series-1/page/" to "تحميل مسلسلات برابط واحد",
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val url = pageUrl(request.data, page)
-        val document = app.get(url, headers = siteHeaders(url), referer = "$mainUrl/main/").document
-        val items = collectSearchResults(document)
-        return newHomePageResponse(request.name, items, hasNextPage(document, page, items.size))
-    }
-
-    private fun pageUrl(data: String, page: Int): String {
-        val normalized = normalizeSiteUrl(data)
-        return when {
-            normalized.trimEnd('/').endsWith("/main", ignoreCase = true) -> {
-                if (page <= 1) normalized else "$mainUrl/main/page/$page"
-            }
-            normalized.endsWith("/page/", ignoreCase = true) -> "$normalized$page"
-            else -> "${normalized.trimEnd('/')}/page/$page"
-        }
+        val url = TukTukSiteParser.pageUrl(request.data, page)
+        val document = getSiteDocument(url, "$mainUrl/main/")
+            ?: throw IllegalStateException("تعذر تحميل صفحة توك توك: $url")
+        val items = TukTukSiteParser.parseCards(document, baseUrl = url).mapNotNull(::toSearchResponse)
+        return newHomePageResponse(request.name, items, TukTukSiteParser.hasNextPage(document, url, items.size))
     }
 
     private fun siteHeaders(referer: String = "$mainUrl/"): Map<String, String> = mapOf(
@@ -67,111 +59,44 @@ class TukTukHd : MainAPI() {
         "Referer" to referer,
     )
 
-    private fun normalizeSiteUrl(raw: String): String {
-        val fixed = fixUrl(raw.trim())
-        return fixed
-            .replace(LEGACY_HOST, mainUrl)
-            .replace(WWW_SITE_HOST, mainUrl)
+    private fun playerHeaders(referer: String): Map<String, String> = mapOf(
+        "User-Agent" to TukTukMediaUtils.BROWSER_USER_AGENT,
+        "Accept" to "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+        "Accept-Language" to "ar,en-US;q=0.9,en;q=0.8",
+        "Referer" to referer,
+    )
+
+    private suspend fun getSiteDocument(url: String, referer: String = "$mainUrl/main/"): Document? {
+        val canonical = TukTukSiteParser.normalizeUrl(url) ?: return null
+        return try {
+            app.get(canonical, headers = siteHeaders(referer), referer = referer).document
+        } catch (e: Exception) {
+            Log.w("TukTuk", "Site request failed: $canonical", e)
+            null
+        }
     }
 
-    private fun isSiteUrl(url: String): Boolean {
-        val host = runCatching { URI(url).host?.lowercase() }.getOrNull() ?: return false
-        return host == SITE_HOST || host.endsWith(".$SITE_HOST")
-    }
-
-    private fun collectSearchResults(
-        document: org.jsoup.nodes.Document,
-        searchQuery: String? = null,
-    ): List<SearchResponse> {
-        val selectors = listOf(
-            "li.Small--Box, div.Block--Item, li.AsidePost, li.Slides--Item",
-            ".MovieItem, .Movie--Item, .MovieList li, .MoviesList li",
-            ".SeriesPosterCard, article.post, article[class*=movie], article[class*=series]",
-        )
-        val results = linkedMapOf<String, SearchResponse>()
-        for (selector in selectors) {
-            for (card in document.select(selector)) {
-                val item = toSearchResult(card) ?: continue
-                if (searchQuery != null && !TukTukSearchUtils.matchesTitle(item.name, searchQuery)) continue
-                results.putIfAbsent(item.url, item)
-            }
-        }
-        if (results.isEmpty()) {
-            val links = if (searchQuery == null) {
-                document.select(
-                    "a[href*='/movie/'], a[href*='/movies/'], a[href*='/series/'], a[href*='/episode/']"
-                )
-            } else {
-                // Search templates can use different card markup; inspect same-site
-                // anchors but keep only titles matching every query term.
-                document.select("a[href]")
-            }
-            for (link in links) {
-                val item = toSearchResult(link) ?: continue
-                if (searchQuery != null && !TukTukSearchUtils.matchesTitle(item.name, searchQuery)) continue
-                results.putIfAbsent(item.url, item)
-            }
-        }
-        return results.values.toList()
-    }
-
-    private fun toSearchResult(element: Element): SearchResponse? {
-        val linkTag = if (element.tagName().equals("a", ignoreCase = true)) {
-            element
-        } else {
-            element.selectFirst("a[href]") ?: return null
-        }
-        val href = normalizeSiteUrl(linkTag.attr("href"))
-        if (href.isBlank() || !isSiteUrl(href)) return null
-
-        val title = linkTag.attr("title").ifBlank { element.attr("title") }.ifBlank {
-            element.selectFirst(".title, .Title, h2, h3, .MovieTitle")?.text().orEmpty()
-        }.ifBlank { linkTag.selectFirst("img[alt]")?.attr("alt").orEmpty() }
-            .ifBlank { linkTag.text() }
-            .trim()
-        if (title.isBlank()) return null
-
-        val image = element.selectFirst(
-            ".Poster--Block img, .Poster img, .SeriesEpisodeThumb img, .SeriesPosterCard img, img"
-        )
-        val posterUrl = bestImageUrl(image)?.let(::normalizeSiteUrl)
-        val searchable = "$title ${element.text()} $href".lowercase()
-        val path = runCatching { URI(href).path.orEmpty().lowercase() }.getOrDefault("")
-        val isEpisodeOrSeries = path.contains("/series/") || path.contains("/episode/") ||
-            listOf("مسلسل", "حلقة", "الموسم", "season", "episode").any { searchable.contains(it) }
-        val isAnime = listOf("أنمي", "انمي", "anime").any { searchable.contains(it) }
-        val isCartoon = listOf("كرتون", "cartoon").any { searchable.contains(it) }
-        val isMovie = !isEpisodeOrSeries || path.contains("/movie/") || path.contains("/movies/")
-        val type = when {
-            isAnime && isEpisodeOrSeries -> TvType.Anime
-            isAnime && isMovie -> TvType.AnimeMovie
-            isAnime -> TvType.Anime
-            isCartoon -> TvType.Cartoon
-            isEpisodeOrSeries -> TvType.TvSeries
-            else -> TvType.Movie
-        }
-
+    private fun toSearchResponse(card: TukTukCard): SearchResponse {
+        val type = tvType(card.kind)
         return when (type) {
-            TvType.TvSeries -> newTvSeriesSearchResponse(title, href, type) {
-                this.posterUrl = posterUrl
+            TvType.TvSeries -> newTvSeriesSearchResponse(card.title, card.url, type) {
+                posterUrl = card.poster
             }
-            TvType.Movie, TvType.AnimeMovie -> newMovieSearchResponse(title, href, type) {
-                this.posterUrl = posterUrl
+            TvType.Movie, TvType.AnimeMovie -> newMovieSearchResponse(card.title, card.url, type) {
+                posterUrl = card.poster
             }
-            else -> newAnimeSearchResponse(title, href, type) {
-                this.posterUrl = posterUrl
+            else -> newAnimeSearchResponse(card.title, card.url, type) {
+                posterUrl = card.poster
             }
         }
     }
 
-    private fun hasNextPage(document: org.jsoup.nodes.Document, page: Int, itemCount: Int): Boolean {
-        val hasNextLink = document.select("a[rel=next][href], a.next[href], .pagination a[href]").any { link ->
-            val text = link.text().trim()
-            val href = normalizeSiteUrl(link.attr("href"))
-            text.contains("التالي") || text.equals("next", ignoreCase = true) ||
-                href.contains("/page/${page + 1}") || link.attr("rel").equals("next", ignoreCase = true)
-        }
-        return hasNextLink || itemCount >= PAGE_SIZE
+    private fun tvType(kind: TukTukContentKind): TvType = when (kind) {
+        TukTukContentKind.MOVIE -> TvType.Movie
+        TukTukContentKind.SERIES, TukTukContentKind.SEASON, TukTukContentKind.EPISODE -> TvType.TvSeries
+        TukTukContentKind.ANIME -> TvType.Anime
+        TukTukContentKind.ANIME_MOVIE -> TvType.AnimeMovie
+        TukTukContentKind.CARTOON -> TvType.Cartoon
     }
 
     override suspend fun search(query: String, page: Int): SearchResponseList? {
@@ -179,12 +104,11 @@ class TukTukHd : MainAPI() {
             return newSearchResponseList(emptyList(), false)
         }
 
-        val safePage = page.coerceAtLeast(1)
         val encoded = URLEncoder.encode(query.trim(), "UTF-8")
+        val safePage = page.coerceAtLeast(1)
+        // WordPress search is rooted at / even though the site's front page is /main/.
+        // The final route is retained as a fallback for installations with custom search.
         val urls = buildList {
-            // WordPress's native search route is at the domain root, even when the
-            // site's configured front page is /main/. Try it first to avoid scraping
-            // the homepage carousel as if it were a search-results page.
             add(if (safePage == 1) {
                 "$mainUrl/?s=$encoded"
             } else {
@@ -199,392 +123,587 @@ class TukTukHd : MainAPI() {
         }.distinct()
 
         for (url in urls) {
-            val document = try {
-                app.get(url, headers = siteHeaders(url), referer = "$mainUrl/main/").document
-            } catch (e: Exception) {
-                Log.w("TukTuk", "Search request failed for $url", e)
-                continue
-            }
-            val results = collectSearchResults(document, query)
+            val document = getSiteDocument(url, "$mainUrl/main/") ?: continue
+            val results = TukTukSiteParser.parseCards(document, query, url).mapNotNull(::toSearchResponse)
                 .distinctBy { it.url }
             if (results.isNotEmpty()) {
-                return newSearchResponseList(results, hasNextPage(document, safePage, results.size))
+                return newSearchResponseList(
+                    results,
+                    TukTukSiteParser.hasNextPage(document, url, results.size),
+                )
             }
         }
         return newSearchResponseList(emptyList(), false)
     }
 
-    override suspend fun search(query: String): List<SearchResponse> =
-        search(query, 1)?.items.orEmpty()
+    override suspend fun search(query: String): List<SearchResponse> = search(query, 1)?.items.orEmpty()
 
     override suspend fun quickSearch(query: String): List<SearchResponse> = search(query)
 
-    private fun extractYear(title: String): Int? {
-        val match = Regex("(19|20)\\d{2}").find(title)
-        return match?.value?.toIntOrNull()
+    override suspend fun load(url: String): LoadResponse {
+        val canonicalUrl = TukTukSiteParser.normalizeUrl(url)
+            ?: throw IllegalArgumentException("رابط توك توك غير صالح: $url")
+        val document = getSiteDocument(canonicalUrl, "$mainUrl/main/")
+            ?: throw IllegalStateException("تعذر تحميل صفحة توك توك: $canonicalUrl")
+        val metadata = TukTukSiteParser.parseMetadata(document, canonicalUrl)
+
+        if (TukTukSiteParser.isEpisodeUrl(canonicalUrl, metadata.title) || metadata.kind == TukTukContentKind.EPISODE) {
+            return loadEpisodePage(document, canonicalUrl, metadata)
+        }
+
+        // Season URLs are often separate pages. Prefer the parent series when its
+        // breadcrumb is available so CloudStream receives every season together.
+        if (TukTukSiteParser.isSeasonPage(canonicalUrl, metadata.title)) {
+            val parentUrl = TukTukSiteParser.findParentSeriesUrl(document, canonicalUrl)
+            if (parentUrl != null && parentUrl != canonicalUrl) {
+                val parentDocument = getSiteDocument(parentUrl, canonicalUrl)
+                if (parentDocument != null) {
+                    return loadSeriesPage(
+                        parentDocument,
+                        parentUrl,
+                        TukTukSiteParser.parseMetadata(parentDocument, parentUrl),
+                    )
+                }
+            }
+        }
+
+        if (TukTukSiteParser.isSeriesPage(document, canonicalUrl, metadata)) {
+            return loadSeriesPage(document, canonicalUrl, metadata)
+        }
+        return loadMoviePage(canonicalUrl, metadata)
     }
 
-    private fun extractRating(doc: org.jsoup.nodes.Document): Double? {
-        val raw = doc.selectFirst(
-            ".imdbS strong, .imdb strong, .rating strong, [itemprop=ratingValue]"
-        )?.let { element ->
-            element.attr("content").ifBlank { element.attr("data-rating").ifBlank { element.text() } }
-        } ?: doc.selectFirst("meta[itemprop=ratingValue], meta[property=og:rating]")?.attr("content")
-            .orEmpty()
-        val number = Regex("(?:10(?:[.,]0+)?|[0-9](?:[.,][0-9]+)?)")
-            .find(raw.replace(',', '.'))?.value?.toDoubleOrNull() ?: return null
-        return when {
-            number in 0.0..10.0 -> number
-            number in 10.1..100.0 -> number / 10.0
-            else -> null
+    private fun loadMoviePage(url: String, metadata: TukTukMetadata): LoadResponse {
+        val type = when (metadata.kind) {
+            TukTukContentKind.ANIME -> TvType.AnimeMovie
+            else -> tvType(metadata.kind)
+        }
+        return newMovieLoadResponse(metadata.title, url, type, url) {
+            posterUrl = metadata.poster
+            plot = metadata.plot
+            year = metadata.year
+            score = metadata.rating?.let { Score.from10(it) }
         }
     }
 
-    private fun extractPlot(doc: org.jsoup.nodes.Document): String? = doc.selectFirst(
-        ".story p, .story, .Story, .description, .Description, .single-description, [itemprop=description]"
-    )?.text()?.trim()?.takeIf { it.isNotBlank() }
+    private suspend fun loadEpisodePage(
+        document: Document,
+        episodeUrl: String,
+        metadata: TukTukMetadata,
+    ): LoadResponse {
+        val requestedEpisode = episodeFromPage(document, episodeUrl, metadata)
+        var parentUrl = TukTukSiteParser.findParentSeriesUrl(document, episodeUrl)
+        val visited = linkedSetOf<String>()
 
-    private fun bestSrcsetUrl(srcset: String): String? = srcset.split(',')
-        .mapNotNull { part ->
-            val tokens = part.trim().split(Regex("\\s+"))
-            val url = tokens.firstOrNull()?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-            val size = tokens.getOrNull(1)?.removeSuffix("w")?.toIntOrNull()
-                ?: tokens.getOrNull(1)?.removeSuffix("x")?.toFloatOrNull()?.toInt()
-                ?: 0
-            url to size
+        // Breadcrumbs sometimes link first to a season rather than to the show.
+        // Follow up to three parent levels, but stop safely on cycles or missing pages.
+        for (depth in 0 until MAX_PARENT_LOOKUP_DEPTH) {
+            val candidate = parentUrl ?: break
+            val key = urlKey(candidate)
+            if (!visited.add(key)) break
+            val parentDocument = getSiteDocument(candidate, episodeUrl) ?: break
+            val parentMetadata = TukTukSiteParser.parseMetadata(parentDocument, candidate)
+            if (TukTukSiteParser.isSeasonPage(candidate, parentMetadata.title)) {
+                parentUrl = TukTukSiteParser.findParentSeriesUrl(parentDocument, candidate)
+                continue
+            }
+            return loadSeriesPage(parentDocument, candidate, parentMetadata, requestedEpisode)
         }
-        .maxByOrNull { it.second }
-        ?.first
 
-    private fun bestImageUrl(img: Element?): String? {
-        if (img == null) return null
-        for (attr in listOf("srcset", "data-srcset")) {
-            bestSrcsetUrl(img.attr(attr))?.let { return it }
+        val fallbackTitle = seriesTitleFromEpisode(metadata.title)
+        return newTvSeriesLoadResponse(
+            fallbackTitle,
+            episodeUrl,
+            seriesTvType(metadata.title, episodeUrl, metadata.kind),
+            listOf(toCloudstreamEpisode(requestedEpisode)),
+        ) {
+            posterUrl = metadata.poster
+            plot = metadata.plot
+            year = metadata.year
+            score = metadata.rating?.let { Score.from10(it) }
         }
-        for (attr in listOf("data-src", "data-lazy-src", "data-original", "data-original-src", "src")) {
-            val value = img.attr(attr).trim()
-            if (value.isNotBlank() && !value.startsWith("data:", ignoreCase = true)) return value
-        }
-        return null
     }
 
-    private fun extractPoster(doc: org.jsoup.nodes.Document): String? {
-        val image = doc.selectFirst(
-            ".MainSingle .left .image img, .MainSingle .image img, .movie-poster img, .poster img, img.wp-post-image, .image img"
+    private fun episodeFromPage(document: Document, url: String, metadata: TukTukMetadata): TukTukEpisode {
+        val breadcrumbs = document.select(
+            "#mpbreadcrumbs a[href], .breadcrumb a[href], .breadcrumbs a[href], nav[aria-label*=breadcrumb] a[href]"
+        ).joinToString(" ") { "${it.text()} ${it.attr("href")}" }
+        val parsedSeason = TukTukSiteParser.seasonNumber(metadata.title, url, breadcrumbs)
+        return TukTukEpisode(
+            title = metadata.title.ifBlank { "الحلقة" },
+            url = url,
+            number = TukTukSiteParser.episodeNumber(metadata.title, url),
+            season = parsedSeason ?: 1,
+            poster = metadata.poster,
+            explicitSeason = parsedSeason != null,
         )
-        bestImageUrl(image)?.let { return it }
-        return doc.selectFirst("meta[property=og:image], meta[name=twitter:image]")
-            ?.attr("content")?.takeIf { it.isNotBlank() }
     }
 
-    private fun extractEpisodeNumber(title: String, url: String = ""): Int? {
-        val text = "$title $url"
-        return Regex("(?:الحلقة|حلقة|episode|ep)\\s*[-:#]*\\s*(\\d+)", RegexOption.IGNORE_CASE)
-            .find(text)?.groupValues?.getOrNull(1)?.toIntOrNull()
-            ?: Regex("[sS]\\d{1,2}[eE](\\d+)").find(text)?.groupValues?.getOrNull(1)?.toIntOrNull()
+    private fun seriesTitleFromEpisode(title: String): String {
+        val withoutEpisode = title.replace(
+            Regex(
+                "\\s*(?:[-:|–—]\\s*)?(?:الحلقة|حلقه|حلقة|episode|ep)\\s*[-:#_]*\\s*[0-9٠-٩۰-۹]+.*$|\\s+s[0-9]{1,2}e[0-9]{1,4}.*$",
+                RegexOption.IGNORE_CASE,
+            ),
+            "",
+        ).trim()
+        return withoutEpisode.ifBlank { "مسلسل" }
     }
 
-    private fun extractSeasonNumber(text: String): Int? =
-        Regex("(?:الموسم|season)\\s*[-:#]*\\s*(\\d+)", RegexOption.IGNORE_CASE)
-            .find(text)?.groupValues?.getOrNull(1)?.toIntOrNull()
+    private suspend fun loadSeriesPage(
+        document: Document,
+        url: String,
+        metadata: TukTukMetadata,
+        requestedEpisode: TukTukEpisode? = null,
+    ): LoadResponse {
+        val canonicalUrl = TukTukSiteParser.normalizeUrl(url) ?: url
+        val episodes = linkedMapOf<String, TukTukEpisode>()
+        val visitedPages = linkedSetOf<String>()
+        val pageBudget = EpisodePageBudget(MAX_TOTAL_EPISODE_PAGES)
+        val isSeasonPage = TukTukSiteParser.isSeasonPage(canonicalUrl, metadata.title)
+        val defaultSeason = TukTukSiteParser.seasonNumber(metadata.title, canonicalUrl) ?: 1
 
-    private fun classifyType(title: String, url: String, isMovie: Boolean): TvType {
-        val searchable = "$title $url".lowercase()
-        val anime = listOf("أنمي", "انمي", "anime").any { searchable.contains(it) }
-        val cartoon = listOf("كرتون", "cartoon", "animation").any { searchable.contains(it) }
+        collectEpisodePages(
+            document,
+            canonicalUrl,
+            defaultSeason,
+            isSeasonPage,
+            episodes,
+            visitedPages,
+            pageBudget,
+        )
+
+        val seasons = TukTukSiteParser.parseSeasonRefs(document, canonicalUrl)
+            .distinctBy { urlKey(it.url) }
+            .take(MAX_SEASONS_TO_SCAN)
+        for (season in seasons) {
+            if (pageBudget.remaining <= 0) break
+            if (urlKey(season.url) == urlKey(canonicalUrl)) continue
+            val seasonDocument = getSiteDocument(season.url, canonicalUrl) ?: continue
+            collectEpisodePages(
+                seasonDocument,
+                season.url,
+                season.number,
+                true,
+                episodes,
+                visitedPages,
+                pageBudget,
+            )
+        }
+
+        requestedEpisode?.let { addEpisode(episodes, it) }
+        val sortedEpisodes = episodes.values.sortedWith(
+            compareBy<TukTukEpisode>({ it.season }, { it.number ?: Int.MAX_VALUE }, { it.title.lowercase(Locale.ROOT) }),
+        ).map(::toCloudstreamEpisode)
+
+        val displayTitle = seriesDisplayTitle(metadata.title)
+        return newTvSeriesLoadResponse(
+            displayTitle,
+            canonicalUrl,
+            seriesTvType(displayTitle, canonicalUrl, metadata.kind),
+            sortedEpisodes,
+        ) {
+            posterUrl = metadata.poster
+            plot = metadata.plot
+            year = metadata.year
+            score = metadata.rating?.let { Score.from10(it) }
+        }
+    }
+
+    private suspend fun collectEpisodePages(
+        firstDocument: Document,
+        firstUrl: String,
+        defaultSeason: Int,
+        defaultSeasonIsExplicit: Boolean,
+        episodes: LinkedHashMap<String, TukTukEpisode>,
+        visitedPages: MutableSet<String>,
+        pageBudget: EpisodePageBudget,
+    ) {
+        var document = firstDocument
+        var pageUrl = firstUrl
+        while (pageBudget.remaining > 0) {
+            if (!visitedPages.add(urlKey(pageUrl))) return
+            pageBudget.remaining -= 1
+            TukTukSiteParser.parseEpisodes(document, pageUrl, defaultSeason, defaultSeasonIsExplicit)
+                .forEach { addEpisode(episodes, it) }
+
+            val nextUrl = TukTukSiteParser.nextPageUrl(document, pageUrl) ?: break
+            val nextKey = urlKey(nextUrl)
+            if (nextKey in visitedPages) break
+            val nextDocument = getSiteDocument(nextUrl, firstUrl) ?: break
+            document = nextDocument
+            pageUrl = nextUrl
+        }
+    }
+
+    private data class EpisodePageBudget(var remaining: Int)
+
+    private fun addEpisode(episodes: LinkedHashMap<String, TukTukEpisode>, candidate: TukTukEpisode) {
+        val key = urlKey(candidate.url)
+        val previous = episodes[key]
+        when {
+            previous == null -> episodes[key] = candidate
+            !previous.explicitSeason && candidate.explicitSeason -> episodes[key] = candidate
+            previous.number == null && candidate.number != null -> episodes[key] = previous.copy(number = candidate.number)
+            previous.poster == null && candidate.poster != null -> episodes[key] = previous.copy(poster = candidate.poster)
+        }
+    }
+
+    private fun seriesDisplayTitle(title: String): String {
+        val stripped = title.replace(
+            Regex(
+                "\\s*(?:[-:|–—]\\s*)?(?:الموسم|موسم|season)\\s*(?:[0-9٠-٩۰-۹]+|ال?أ?ول|ال?ثاني|ال?ثالث|ال?رابع|ال?خامس|ال?سادس|ال?سابع|ال?ثامن|ال?تاسع|ال?عاشر).*$",
+                RegexOption.IGNORE_CASE,
+            ),
+            "",
+        ).trim()
+        return stripped.ifBlank { title.ifBlank { "مسلسل" } }
+    }
+
+    private fun seriesTvType(title: String, url: String, kind: TukTukContentKind): TvType {
+        val searchable = "$title $url".lowercase(Locale.ROOT)
         return when {
-            anime && isMovie -> TvType.AnimeMovie
-            anime -> TvType.Anime
-            cartoon -> TvType.Cartoon
-            isMovie -> TvType.Movie
+            kind == TukTukContentKind.ANIME || listOf("أنمي", "انمي", "anime").any { searchable.contains(it) } -> TvType.Anime
+            kind == TukTukContentKind.CARTOON || listOf("كرتون", "cartoon", "animation").any { searchable.contains(it) } -> TvType.Cartoon
             else -> TvType.TvSeries
         }
     }
 
-    private fun extractPath(url: String): String =
-        runCatching { URI(url).path.orEmpty().lowercase() }.getOrDefault("")
-
-    private fun isEpisodeUrl(url: String): Boolean {
-        val path = extractPath(url)
-        return path.contains("/episode/") || path.contains("/episodes/")
+    private fun toCloudstreamEpisode(episode: TukTukEpisode): Episode = newEpisode(episode.url) {
+        name = episode.title
+        this.episode = episode.number
+        season = episode.season
+        posterUrl = episode.poster
     }
 
-    override suspend fun load(url: String): LoadResponse {
-        val canonicalUrl = normalizeSiteUrl(url)
-        val doc = app.get(canonicalUrl, headers = siteHeaders(canonicalUrl), referer = "$mainUrl/main/").document
-        val ogType = doc.selectFirst("meta[property=og:type]")?.attr("content").orEmpty()
-        val rawTitle = doc.selectFirst("h1.post-title, h1.entry-title, .single-title, h1")?.text()
-            .orEmpty()
-            .ifBlank { doc.selectFirst("meta[property=og:title]")?.attr("content").orEmpty() }
-        val title = rawTitle.replace(
-            Regex("""\s*(?:[-|–:]?\s*)?(الحلقة\s*\d+|حلقة\s*\d+|episode\s*\d+|مترجم|مدبلج).*""", RegexOption.IGNORE_CASE),
-            ""
-        ).trim().ifBlank { doc.title().substringBefore("|").trim() }
-        val poster = extractPoster(doc)
-        val plot = extractPlot(doc)
-        val year = extractYear(rawTitle)
-            ?: extractYear(doc.selectFirst("time, [itemprop=datePublished]")?.attr("datetime").orEmpty())
-            ?: extractYear(canonicalUrl)
-        val rating = extractRating(doc)
-        val path = extractPath(canonicalUrl)
-        val hasEpisodeLabel = Regex("(?:الحلقة|حلقة|episode|ep)\\s*[-:#]*\\s*\\d+", RegexOption.IGNORE_CASE)
-            .containsMatchIn(rawTitle)
-        val isEpisode = ogType.contains("episode", ignoreCase = true) || isEpisodeUrl(canonicalUrl) || hasEpisodeLabel
+    private fun urlKey(rawUrl: String): String {
+        val normalized = TukTukSiteParser.normalizeUrl(rawUrl) ?: rawUrl
+        val uri = runCatching { URI(normalized) }.getOrNull() ?: return normalized
+        val path = uri.path.orEmpty().trimEnd('/').ifBlank { "/" }
+        return buildString {
+            append(uri.host?.lowercase(Locale.ROOT).orEmpty())
+            append(path)
+            uri.rawQuery?.let { append('?').append(it) }
+        }
+    }
 
-        if (isEpisode) {
-            val showUrl = findParentSeriesUrl(doc, canonicalUrl)
-            if (showUrl != null) {
-                return loadTvSeries(showUrl, canonicalUrl, title, poster, plot, year, rating)
-            }
-            val episodeNumber = extractEpisodeNumber(rawTitle, canonicalUrl)
-            val episode = newEpisode(canonicalUrl) {
-                this.name = rawTitle.ifBlank { title }
-                this.episode = episodeNumber
-                this.season = extractSeasonNumber(rawTitle) ?: 1
-                this.posterUrl = poster
-            }
-            return newTvSeriesLoadResponse(title.ifBlank { "مسلسل" }, canonicalUrl, classifyType(title, canonicalUrl, false), listOf(episode)) {
-                this.posterUrl = poster
-                this.plot = plot
-                this.year = year
-                this.score = rating?.let { Score.from10(it) }
+    override suspend fun loadLinks(
+        data: String,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit,
+    ): Boolean {
+        val episodeUrl = TukTukSiteParser.normalizeUrl(data) ?: return false
+        val document = getSiteDocument(episodeUrl, "$mainUrl/main/") ?: return false
+        val emittedUrls = linkedSetOf<String>()
+        val visitedPlayers = linkedSetOf<String>()
+        var emittedCount = 0
+
+        fun emitUnique(link: ExtractorLink, qualityHint: Int = Qualities.Unknown.value) {
+            if (link.quality == Qualities.Unknown.value && qualityHint > 0) link.quality = qualityHint
+            if (emittedUrls.add(link.url)) {
+                emittedCount += 1
+                callback(link)
             }
         }
 
-        val hasEpisodeCards = episodeCards(doc).isNotEmpty()
-        val isSeriesPage = doc.select(
-            "section.SeriesEpisodesGrid, section.SeriesSeasons, a.SeriesEpisodeCard, .SeriesEpisodeCard, .EpisodesList, .episodes-list, .allseasonss"
-        ).isNotEmpty() || ogType.contains("series", ignoreCase = true) || path.contains("/series/") || hasEpisodeCards
-        if (isSeriesPage) {
-            return loadTvSeriesFromShow(doc, canonicalUrl, title, poster, plot, year, rating)
-        }
-
-        val movieType = classifyType(title, canonicalUrl, true)
-        return newMovieLoadResponse(title.ifBlank { rawTitle }, canonicalUrl, movieType, canonicalUrl) {
-            this.posterUrl = poster
-            this.plot = plot
-            this.year = year
-            this.score = rating?.let { Score.from10(it) }
-        }
-    }
-
-    private fun findParentSeriesUrl(doc: org.jsoup.nodes.Document, currentUrl: String): String? {
-        val links = doc.select(
-            "#mpbreadcrumbs a[href], .breadcrumbs a[href], nav[aria-label*=breadcrumb] a[href], a[href*='/series/']"
-        )
-        return links.firstNotNullOfOrNull { link ->
-            val href = normalizeSiteUrl(link.attr("href"))
-            val label = link.attr("title").ifBlank { link.text() }
-            href.takeIf {
-                it != currentUrl && isSiteUrl(it) && extractPath(it).contains("/series/") &&
-                    !label.contains("الموسم") && !label.contains("season", ignoreCase = true)
-            }
-        }
-    }
-
-    private fun episodeCards(doc: org.jsoup.nodes.Document): List<Element> {
-        val selected = doc.select(
-            "a.SeriesEpisodeCard[href], .SeriesEpisodesGrid a[href], .EpisodesList a[href], .episodes-list a[href], .episode-card a[href], li.episode a[href]"
-        )
-        if (selected.isNotEmpty()) return selected.distinctBy { normalizeSiteUrl(it.attr("href")) }
-        return doc.select("a[href]").filter { link ->
-            val text = "${link.attr("title")} ${link.text()} ${link.attr("href")}".lowercase()
-            (text.contains("الحلقة") || text.contains("episode")) && isSiteUrl(normalizeSiteUrl(link.attr("href")))
-        }.distinctBy { normalizeSiteUrl(it.attr("href")) }
-    }
-
-    private fun episodeFromLink(link: Element, season: Int): Episode? {
-        val href = normalizeSiteUrl(link.attr("href"))
-        if (href.isBlank() || !isSiteUrl(href)) return null
-        val name = link.attr("title").ifBlank { link.selectFirst(".title, h2, h3")?.text().orEmpty() }
-            .ifBlank { link.text() }.trim().ifBlank { "حلقة" }
-        val number = extractEpisodeNumber(name, href)
-        val poster = bestImageUrl(link.selectFirst("img"))?.let(::normalizeSiteUrl)
-        return newEpisode(href) {
-            this.name = name
-            this.episode = number
-            this.season = season
-            this.posterUrl = poster
-        }
-    }
-
-    private fun tvSeriesType(title: String, url: String): TvType = when (classifyType(title, url, false)) {
-        TvType.Anime -> TvType.Anime
-        TvType.Cartoon -> TvType.Cartoon
-        else -> TvType.TvSeries
-    }
-
-    private suspend fun loadTvSeriesFromShow(
-        doc: org.jsoup.nodes.Document,
-        url: String,
-        title: String,
-        poster: String?,
-        plot: String?,
-        year: Int?,
-        rating: Double?
-    ): LoadResponse {
-        val canonicalUrl = normalizeSiteUrl(url)
-        val episodesMap = linkedMapOf<String, Episode>()
-        val seasonAnchors = doc.select(
-            "section.SeriesSeasons a[href*='/series/'], .SeriesSeasons a[href], .allseasonss a[href], .SeasonList a[href], .seasons a[href]"
-        )
-        val seasonLinks = seasonAnchors.mapNotNull { anchor ->
-            val href = normalizeSiteUrl(anchor.attr("href"))
-            val label = anchor.attr("title").ifBlank { anchor.text() }
-            if (href == canonicalUrl || !isSiteUrl(href) || !extractPath(href).contains("/series/")) null
-            else (extractSeasonNumber(label) ?: extractSeasonNumber(href) ?: 1) to href
-        }.distinctBy { it.second }.sortedBy { it.first }
-
-        for (link in episodeCards(doc)) {
-            val episode = episodeFromLink(link, extractSeasonNumber(link.text()).takeIf { it != null } ?: 1)
-                ?: continue
-            episodesMap.putIfAbsent(episode.data, episode)
-        }
-
-        for ((seasonNumber, seasonUrl) in seasonLinks) {
-            try {
-                val seasonDoc = app.get(seasonUrl, headers = siteHeaders(seasonUrl), referer = canonicalUrl).document
-                for (link in episodeCards(seasonDoc)) {
-                    val episode = episodeFromLink(link, seasonNumber) ?: continue
-                    episodesMap.putIfAbsent(episode.data, episode)
+        val directMedia = linkedSetOf<String>()
+        document.select("video[src], video source[src], source[type*=mpegurl][src], [data-hls], [data-file]")
+            .forEach { element ->
+                listOf("src", "data-hls", "data-file").forEach { attribute ->
+                    element.attr(attribute).takeIf(String::isNotBlank)?.let(directMedia::add)
                 }
-                delay(150)
-            } catch (e: Exception) {
-                Log.w("TukTuk", "Could not load season $seasonNumber from $seasonUrl", e)
             }
+        TukTukMediaUtils.mediaUrls(episodeUrl, document.html()).forEach(directMedia::add)
+        for (rawUrl in directMedia) {
+            runCatching {
+                emitDirectMedia(rawUrl, "TukTuk", episodeUrl, Qualities.Unknown.value) { emitUnique(it) }
+            }.onFailure { Log.w("TukTuk", "Could not emit direct media $rawUrl", it) }
         }
 
-        val sorted = episodesMap.values.sortedWith(
-            compareBy<Episode>({ it.season ?: 1 }, { it.episode ?: Int.MAX_VALUE }, { it.name.orEmpty() })
-        )
-        return newTvSeriesLoadResponse(title, canonicalUrl, tvSeriesType(title, canonicalUrl), sorted) {
-            this.posterUrl = poster
-            this.plot = plot
-            this.year = year
-            this.score = rating?.let { Score.from10(it) }
+        for (playerUrl in getPlayerUrls(document, episodeUrl)) {
+            expandPlayerPage(
+                playerUrl,
+                episodeUrl,
+                0,
+                visitedPlayers,
+                subtitleCallback,
+            ) { link, quality -> emitUnique(link, quality) }
         }
+
+        Log.i("TukTuk", "Resolved $emittedCount playable link(s) from $episodeUrl")
+        return emittedCount > 0
     }
 
-    private suspend fun loadTvSeries(
-        showUrl: String,
-        episodeUrl: String,
-        title: String,
-        poster: String?,
-        plot: String?,
-        year: Int?,
-        rating: Double?
-    ): LoadResponse {
-        return try {
-            val canonicalShowUrl = normalizeSiteUrl(showUrl)
-            val showDoc = app.get(
-                canonicalShowUrl,
-                headers = siteHeaders(canonicalShowUrl),
-                referer = "$mainUrl/main/"
-            ).document
-            val showTitle = showDoc.selectFirst("h1.post-title, h1.entry-title, h1")?.text()
-                ?.trim()?.ifBlank { title } ?: title
-            loadTvSeriesFromShow(
-                showDoc,
-                canonicalShowUrl,
-                showTitle,
-                extractPoster(showDoc) ?: poster,
-                extractPlot(showDoc) ?: plot,
-                extractYear(showTitle) ?: year,
-                extractRating(showDoc) ?: rating,
-            )
-        } catch (e: Exception) {
-            Log.w("TukTuk", "Could not load parent series $showUrl; keeping the requested episode", e)
-            val episode = newEpisode(episodeUrl) {
-                this.name = title.ifBlank { "حلقة" }
-                this.episode = extractEpisodeNumber(title, episodeUrl)
-                this.season = extractSeasonNumber(episodeUrl) ?: 1
-                this.posterUrl = poster
-            }
-            newTvSeriesLoadResponse(title.ifBlank { "مسلسل" }, episodeUrl, tvSeriesType(title, episodeUrl), listOf(episode)) {
-                this.posterUrl = poster
-                this.plot = plot
-                this.year = year
-                this.score = rating?.let { Score.from10(it) }
-            }
+    private fun getPlayerUrls(document: Document, pageUrl: String): List<String> {
+        val result = linkedSetOf<String>()
+        for (element in document.select("[data-crypt]")) {
+            decodePlayerUrl(element.attr("data-crypt"), pageUrl)?.let(result::add)
         }
+
+        val playerElements = (document.select(
+            "iframe[src], iframe[data-src], [data-player], [data-player-url], [data-video-url], [data-url], [data-link], .server a[href], .servers a[href], .server-list a[href], .ServerList a[href], [class*=server] a[href]",
+        ) + document.select("a[href]").filter { anchor ->
+            val href = anchor.attr("href").lowercase(Locale.ROOT)
+            listOf("megamax", "share4max", "megatuktuk", "byse", "lulustream", "luluvdo", "upnshare", "videoland", "tuktukvip")
+                .any { provider -> href.contains(provider) }
+        }).distinct()
+        for (element in playerElements) {
+            val raw = listOf("src", "data-src", "data-player-url", "data-player", "data-video-url", "data-url", "data-link", "href")
+                .firstNotNullOfOrNull { element.attr(it).trim().takeIf(String::isNotBlank) } ?: continue
+            decodePlayerUrl(raw, pageUrl)?.takeIf { urlKey(it) != urlKey(pageUrl) }?.let(result::add)
+        }
+        return result.toList()
     }
 
-    private fun extractQuality(resolution: String?): Int {
-        val value = resolution?.lowercase()?.trim().orEmpty()
-        if (value.isBlank()) return Qualities.Unknown.value
-        when {
-            Regex("\\b4k\\b|2160").containsMatchIn(value) -> return 2160
-            Regex("\\b2k\\b|1440").containsMatchIn(value) -> return 1440
-            Regex("fhd|1080").containsMatchIn(value) -> return 1080
-            Regex("hd|720").containsMatchIn(value) -> return 720
-            Regex("sd|480").containsMatchIn(value) -> return 480
-        }
-        Regex("\\d{3,4}\\s*[x×]\\s*(\\d{3,4})").find(value)
-            ?.groupValues?.getOrNull(1)?.toIntOrNull()?.let { return it }
-        Regex("\\b(2160|1440|1080|720|540|480|360|240)p?\\b").find(value)
-            ?.groupValues?.getOrNull(1)?.toIntOrNull()?.let { return it }
-        return Qualities.Unknown.value
-    }
-
-    private fun resolveUrl(raw: String, baseUrl: String): String {
-        val clean = raw.trim().replace("&amp;", "&").replace("\\/", "/")
-        if (clean.startsWith("//")) return "https:$clean"
-        if (clean.startsWith("http://", true) || clean.startsWith("https://", true)) {
-            return normalizeSiteUrl(clean)
-        }
-        return runCatching { URI(baseUrl).resolve(clean).toString() }
-            .getOrDefault("$mainUrl/${clean.trimStart('/')}")
-    }
-
-    private fun decodePlayerUrl(encoded: String, pageUrl: String): String? {
-        val value = encoded.trim()
+    private fun decodePlayerUrl(rawValue: String, baseUrl: String): String? {
+        val value = rawValue.trim().replace("&amp;", "&").replace("\\/", "/")
         if (value.isBlank()) return null
-        if (value.startsWith("http", true) || value.startsWith("//") || value.startsWith("/")) {
-            return resolveUrl(value, pageUrl)
-        }
+        val isDirectReference = value.startsWith("http://", true) || value.startsWith("https://", true) ||
+            value.startsWith("//") || value.startsWith("/") || value.startsWith("./") || value.startsWith("../")
+        if (isDirectReference) return TukTukMediaUtils.resolveMediaUrl(baseUrl, value)
+
         val decoded = listOf(Base64.DEFAULT, Base64.URL_SAFE or Base64.NO_WRAP).firstNotNullOfOrNull { flags ->
             runCatching { String(Base64.decode(value, flags), Charsets.UTF_8).trim() }.getOrNull()
-                ?.takeIf { it.startsWith("http", true) || it.startsWith("//") || it.startsWith("/") }
+                ?.takeIf { it.startsWith("http://", true) || it.startsWith("https://", true) || it.startsWith("//") || it.startsWith("/") }
         } ?: return null
-        return resolveUrl(decoded, pageUrl)
+        return TukTukMediaUtils.resolveMediaUrl(baseUrl, decoded)
     }
 
-    private fun getPlayerUrls(doc: org.jsoup.nodes.Document, pageUrl: String): List<String> {
-        val urls = linkedSetOf<String>()
-        for (element in doc.select("[data-crypt]")) {
-            decodePlayerUrl(element.attr("data-crypt"), pageUrl)?.let(urls::add)
+    private suspend fun expandPlayerPage(
+        rawPlayerUrl: String,
+        referer: String,
+        depth: Int,
+        visitedPlayers: MutableSet<String>,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        emit: (ExtractorLink, Int) -> Unit,
+    ) {
+        val playerUrl = TukTukMediaUtils.resolveMediaUrl(referer, rawPlayerUrl) ?: return
+        val key = playerUrl.lowercase(Locale.ROOT).trimEnd('/')
+        if (!visitedPlayers.add(key)) return
+
+        if (isDirectMediaUrl(playerUrl)) {
+            resolveMirror(playerUrl, null, null, referer, Qualities.Unknown.value, subtitleCallback) { emit(it, it.quality) }
+            return
         }
-        val frameSelector = "#main-video-frame[src], iframe[data-src], .VideoPlayer iframe[src], .player iframe[src], .play-box iframe[src], iframe[src*='/embed/'], iframe[src*='/player/'], iframe[src*='/iframe/'], iframe[src*='megamax'], iframe[src*='share4max'], iframe[src*='megatuktuk']"
-        for (frame in doc.select(frameSelector)) {
-            val raw = frame.attr("src").ifBlank { frame.attr("data-src") }
-            if (raw.isBlank()) continue
-            val url = resolveUrl(raw, pageUrl)
-            if (url != pageUrl && url != "$mainUrl/main/") urls.add(url)
+
+        // Give CloudStream's registered/custom providers first chance; the HTML walk
+        // below remains as a fallback for server lists and nested player frames.
+        resolveMirror(playerUrl, null, null, referer, Qualities.Unknown.value, subtitleCallback) {
+            emit(it, it.quality)
         }
-        return urls.toList()
+
+        var body = try {
+            app.get(playerUrl, headers = playerHeaders(referer), referer = referer).text
+        } catch (e: Exception) {
+            Log.w("TukTuk", "Could not load player page $playerUrl", e)
+            return
+        }
+
+        val version = inertiaVersion(body)
+        if (!version.isNullOrBlank()) {
+            try {
+                val component = inertiaComponent(body) ?: "files/mirror/video"
+                val headers = playerHeaders(playerUrl) + mapOf(
+                    "X-Inertia" to "true",
+                    "X-Inertia-Version" to version,
+                    "X-Inertia-Partial-Component" to component,
+                    "X-Inertia-Partial-Data" to "streams",
+                    "X-Requested-With" to "XMLHttpRequest",
+                    "Accept" to "application/json, text/javascript, */*;q=0.01",
+                )
+                body = app.get(playerUrl, headers = headers, referer = playerUrl).text
+            } catch (e: Exception) {
+                Log.w("TukTuk", "Inertia stream request failed for $playerUrl", e)
+            }
+        }
+
+        for (stream in parseInertiaStreams(body)) {
+            val quality = TukTukMediaUtils.qualityHint(stream.qualityLabel)
+            for (mirror in stream.mirrors) {
+                resolveMirror(
+                    mirror.url,
+                    mirror.driver,
+                    mirror.symbol ?: mirror.name,
+                    playerUrl,
+                    quality,
+                    subtitleCallback,
+                ) { link -> emit(link, quality) }
+            }
+        }
+
+        for (mediaUrl in TukTukMediaUtils.mediaUrls(playerUrl, body)) {
+            runCatching {
+                emitDirectMedia(mediaUrl, "TukTuk", playerUrl, Qualities.Unknown.value) { emit(it, it.quality) }
+            }.onFailure { Log.w("TukTuk", "Could not emit fallback media URL $mediaUrl", it) }
+        }
+
+        if (depth >= MAX_PLAYER_DEPTH) return
+        val playerDocument = Jsoup.parse(body, playerUrl)
+        for (nestedUrl in getPlayerUrls(playerDocument, playerUrl)) {
+            if (urlKey(nestedUrl) == urlKey(playerUrl)) continue
+            expandPlayerPage(
+                nestedUrl,
+                playerUrl,
+                depth + 1,
+                visitedPlayers,
+                subtitleCallback,
+                emit,
+            )
+        }
     }
 
     private fun inertiaVersion(html: String): String? {
-        val pagePayload = org.jsoup.Jsoup.parse(html).selectFirst("[data-page]")?.attr("data-page").orEmpty()
-        val fromPayload = runCatching { org.json.JSONObject(pagePayload).optString("version") }.getOrNull()
+        val payload = Jsoup.parse(html).selectFirst("[data-page]")?.attr("data-page").orEmpty()
+        val fromPayload = runCatching { JSONObject(payload).optString("version") }.getOrNull()
         if (!fromPayload.isNullOrBlank() && fromPayload != "null") return fromPayload
         return Regex("[\"']version[\"']\\s*:\\s*[\"']([^\"']+)[\"']")
             .find(html)?.groupValues?.getOrNull(1)
     }
 
-    private fun streamHeaders(mediaUrl: String, referer: String): Map<String, String> {
-        val origin = TukTukMediaUtils.originOf(mediaUrl, mainUrl)
-        return mapOf("User-Agent" to USER_AGENT, "Referer" to referer, "Origin" to origin)
+    private fun inertiaComponent(html: String): String? {
+        val payload = Jsoup.parse(html).selectFirst("[data-page]")?.attr("data-page").orEmpty()
+        return runCatching { JSONObject(payload).optString("component") }
+            .getOrNull()?.takeIf { it.isNotBlank() && it != "null" }
     }
+
+    private data class MirrorItem(
+        val url: String,
+        val driver: String? = null,
+        val symbol: String? = null,
+        val name: String? = null,
+    )
+
+    private data class StreamItem(
+        val qualityLabel: String?,
+        val mirrors: List<MirrorItem>,
+    )
+
+    private fun parseInertiaStreams(rawBody: String): List<StreamItem> {
+        val root = parseJsonObject(rawBody) ?: return emptyList()
+        val props = root.optJSONObject("props")
+            ?: root.optJSONObject("page")?.optJSONObject("props")
+            ?: return emptyList()
+        val streams = props.opt("streams") ?: return emptyList()
+        val streamItems = asJsonValues(streams).flatMap(::asJsonValues)
+        return streamItems.mapNotNull { value ->
+            val stream = value as? JSONObject ?: return@mapNotNull null
+            val quality = firstJsonString(stream, "resolution", "label", "quality", "name")
+            val mirrors = mutableListOf<MirrorItem>()
+            for (key in listOf("mirrors", "servers", "sources", "links", "data")) {
+                stream.opt(key)?.let { nested -> mirrors += parseMirrorItems(nested) }
+            }
+            firstJsonString(stream, "url", "link", "href", "source")?.let { url ->
+                mirrors.add(
+                    0,
+                    MirrorItem(
+                        url = url,
+                        driver = firstJsonString(stream, "driver", "provider", "server"),
+                        symbol = firstJsonString(stream, "symbol"),
+                        name = firstJsonString(stream, "name"),
+                    ),
+                )
+            }
+            if (mirrors.isEmpty()) return@mapNotNull null
+            StreamItem(quality, mirrors.distinctBy { it.url })
+        }
+    }
+
+    private fun parseJsonObject(raw: String): JSONObject? = runCatching {
+        val body = raw.trim().removePrefix("for(;;);").trim()
+        JSONObject(body)
+    }.getOrNull()
+
+    private fun asJsonValues(value: Any?): List<Any> = when (value) {
+        null, JSONObject.NULL -> emptyList()
+        is JSONArray -> (0 until value.length()).mapNotNull { index -> value.opt(index)?.takeUnless { it == JSONObject.NULL } }
+        is JSONObject -> {
+            val nested = value.opt("data") ?: value.opt("items") ?: value.opt("streams")
+            if (nested != null && nested !== value) asJsonValues(nested) else listOf(value)
+        }
+        is String -> {
+            val text = value.trim()
+            when {
+                text.startsWith("[") -> runCatching { asJsonValues(JSONArray(text)) }.getOrDefault(emptyList())
+                text.startsWith("{") -> runCatching { asJsonValues(JSONObject(text)) }.getOrDefault(emptyList())
+                else -> emptyList()
+            }
+        }
+        else -> emptyList()
+    }
+
+    private fun parseMirrorItems(value: Any?, inheritedName: String? = null): List<MirrorItem> {
+        return when (value) {
+            null, JSONObject.NULL -> emptyList()
+            is JSONArray -> (0 until value.length()).flatMap { index ->
+                parseMirrorItems(value.opt(index), inheritedName)
+            }
+            is JSONObject -> {
+                val directUrl = firstJsonString(value, "link", "url", "href", "source")
+                val direct = directUrl?.let {
+                    listOf(
+                        MirrorItem(
+                            url = it,
+                            driver = firstJsonString(value, "driver", "provider", "server") ?: inheritedName,
+                            symbol = firstJsonString(value, "symbol"),
+                            name = firstJsonString(value, "name") ?: inheritedName,
+                        ),
+                    )
+                }.orEmpty()
+                val nested = mutableListOf<MirrorItem>()
+                val ignoredKeys = setOf(
+                    "link", "url", "href", "source", "driver", "provider", "server", "symbol", "name",
+                    "resolution", "quality", "label", "id", "created_at", "updated_at",
+                )
+                val keys = value.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    if (key in ignoredKeys) continue
+                    val child = value.opt(key) ?: continue
+                    if (child is JSONObject || child is JSONArray || child is String) {
+                        nested += parseMirrorItems(child, key.takeIf { it !in setOf("data", "items", "mirrors", "servers", "sources", "links") } ?: inheritedName)
+                    }
+                }
+                direct + nested
+            }
+            is String -> {
+                val text = value.trim()
+                if (isLinkCandidate(text)) listOf(MirrorItem(text, driver = inheritedName, name = inheritedName))
+                else if (text.startsWith("[") || text.startsWith("{")) asJsonValues(text).flatMap { parseMirrorItems(it, inheritedName) }
+                else emptyList()
+            }
+            else -> emptyList()
+        }
+    }
+
+    private fun firstJsonString(json: JSONObject, vararg keys: String): String? =
+        keys.firstNotNullOfOrNull { key ->
+            json.opt(key)?.takeUnless { it == JSONObject.NULL }?.toString()
+                ?.trim()?.takeIf { it.isNotBlank() && !it.equals("null", true) }
+        }
+
+    private fun isLinkCandidate(value: String): Boolean =
+        value.startsWith("http://", true) || value.startsWith("https://", true) || value.startsWith("//") ||
+            value.startsWith("/") || Regex("\\.(?:m3u8|m3u|mp4|m4v|mpd)(?:$|[?#])", RegexOption.IGNORE_CASE).containsMatchIn(value)
+
+    private fun isDirectMediaUrl(url: String): Boolean =
+        Regex("\\.(?:m3u8|m3u|mp4|m4v|mpd)(?:$|[?#])", RegexOption.IGNORE_CASE).containsMatchIn(url) ||
+            url.contains("/master.txt", ignoreCase = true)
+
+    private fun streamHeaders(mediaUrl: String, referer: String): Map<String, String> = mapOf(
+        "User-Agent" to TukTukMediaUtils.BROWSER_USER_AGENT,
+        "Referer" to referer,
+        "Origin" to TukTukMediaUtils.originOf(mediaUrl, mainUrl),
+    )
 
     private suspend fun emitDirectMedia(
         rawUrl: String,
         sourceName: String,
         referer: String,
         qualityHint: Int,
-        callback: (ExtractorLink) -> Unit
+        callback: (ExtractorLink) -> Unit,
     ) {
-        val url = resolveUrl(rawUrl, referer)
+        val url = TukTukMediaUtils.resolveMediaUrl(referer, rawUrl) ?: return
         val headers = streamHeaders(url, referer)
         val isHls = TukTukMediaUtils.isHls(url)
         val isDash = url.substringBefore('?').endsWith(".mpd", ignoreCase = true)
@@ -610,11 +729,7 @@ class TukTukHd : MainAPI() {
             }
         }
         callback(
-            newExtractorLink(
-                source = sourceName,
-                name = sourceName,
-                url = url,
-            ) {
+            newExtractorLink(source = sourceName, name = sourceName, url = url) {
                 this.referer = referer
                 this.quality = qualityHint.takeIf { it > 0 } ?: Qualities.Unknown.value
                 this.type = when {
@@ -623,7 +738,7 @@ class TukTukHd : MainAPI() {
                     else -> ExtractorLinkType.VIDEO
                 }
                 this.headers = headers
-            }
+            },
         )
     }
 
@@ -634,26 +749,27 @@ class TukTukHd : MainAPI() {
         playerUrl: String,
         quality: Int,
         subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
+        callback: (ExtractorLink) -> Unit,
     ) {
-        val link = resolveUrl(rawUrl, playerUrl)
-        val hint = "${driver.orEmpty()} ${symbol.orEmpty()} $link".lowercase()
-        val sourceName = driver?.takeIf { it.isNotBlank() } ?: symbol?.takeIf { it.isNotBlank() } ?: "TukTuk"
+        val link = TukTukMediaUtils.resolveMediaUrl(playerUrl, rawUrl) ?: return
+        val hint = "${driver.orEmpty()} ${symbol.orEmpty()} $link".lowercase(Locale.ROOT)
+        val sourceName = driver?.takeIf(String::isNotBlank)
+            ?: symbol?.takeIf(String::isNotBlank)
+            ?: runCatching { URI(link).host?.removePrefix("www.") }.getOrNull()
+            ?: "TukTuk"
         try {
             when {
-                Regex("\\.(?:m3u8|m3u|mp4|m4v|mpd)(?:$|[?#])", RegexOption.IGNORE_CASE).containsMatchIn(link) ||
-                    link.contains("/master.txt", ignoreCase = true) ->
-                    emitDirectMedia(link, sourceName, playerUrl, quality, callback)
+                isDirectMediaUrl(link) -> emitDirectMedia(link, sourceName, playerUrl, quality, callback)
                 hint.contains("megamax") || hint.contains("share4max") ||
                     TukTukMediaUtils.isMegaMaxUrl(link, driver.orEmpty()) ->
                     TukTukMegaMaxExtractor().getUrl(link, playerUrl, subtitleCallback, callback)
                 hint.contains("byse") || hint.contains("byseraguci") ->
                     TukTukByseExtractor().getUrl(link, playerUrl, subtitleCallback, callback)
-                hint.contains("lulustream") || hint.contains("luluvdo") ->
+                hint.contains("lulustream") || hint.contains("luluvdo") || hint.contains("lulu") ->
                     TukTukLuluExtractor().getUrl(link, playerUrl, subtitleCallback, callback)
-                hint.contains("upnshare") || hint.contains("upns.one") ->
+                hint.contains("upnshare") || hint.contains("upns.one") || hint.contains("upn") ->
                     TukTukUpnExtractor().getUrl(link, playerUrl, subtitleCallback, callback)
-                hint.contains("tuktukvip") || hint.contains("lolololu") ->
+                hint.contains("tuktukvip") || hint.contains("lolololu") || hint.contains("vip") ->
                     TukTukVipExtractor().getUrl(link, playerUrl, subtitleCallback, callback)
                 hint.contains("videoland") ->
                     VideolandExtractor().getUrl(link, playerUrl, subtitleCallback, callback)
@@ -664,146 +780,10 @@ class TukTukHd : MainAPI() {
         }
     }
 
-    override suspend fun loadLinks(
-        data: String,
-        isCasting: Boolean,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ): Boolean {
-        val episodeUrl = normalizeSiteUrl(data)
-        val doc = try {
-            app.get(episodeUrl, headers = siteHeaders(episodeUrl), referer = "$mainUrl/main/").document
-        } catch (e: Exception) {
-            Log.e("TukTuk", "Could not load watch page $episodeUrl", e)
-            return false
-        }
-
-        val emittedUrls = linkedSetOf<String>()
-        var emitted = 0
-        fun emitUnique(link: ExtractorLink, qualityHint: Int = Qualities.Unknown.value) {
-            if (link.quality == Qualities.Unknown.value && qualityHint > 0) link.quality = qualityHint
-            if (emittedUrls.add(link.url)) {
-                emitted += 1
-                callback(link)
-            }
-        }
-
-        // Some episode pages expose a direct video source instead of an iframe.
-        val directMedia = doc.select("video[src], video source[src], source[type*=mpegurl][src]")
-            .map { it.attr("src") }.filter { it.isNotBlank() }
-        for (raw in directMedia) {
-            try {
-                emitDirectMedia(raw, "TukTuk", episodeUrl, Qualities.Unknown.value) { emitUnique(it) }
-            } catch (e: Exception) {
-                Log.w("TukTuk", "Direct media extraction failed: $raw", e)
-            }
-        }
-
-        val playerUrls = getPlayerUrls(doc, episodeUrl)
-        for (playerUrl in playerUrls) {
-            var mirrorBody = ""
-            val initial = try {
-                app.get(playerUrl, headers = siteHeaders(episodeUrl), referer = episodeUrl)
-            } catch (e: Exception) {
-                Log.w("TukTuk", "Could not load player page $playerUrl", e)
-                continue
-            }
-            mirrorBody = initial.text
-            val version = inertiaVersion(mirrorBody)
-            if (!version.isNullOrBlank()) {
-                try {
-                    val inertiaHeaders = siteHeaders(playerUrl) + mapOf(
-                        "X-Inertia" to "true",
-                        "X-Inertia-Version" to version,
-                        "X-Inertia-Partial-Component" to "files/mirror/video",
-                        "X-Inertia-Partial-Data" to "streams",
-                        "X-Requested-With" to "XMLHttpRequest",
-                        "Accept" to "application/json, text/javascript, */*;q=0.01",
-                    )
-                    val response = app.get(playerUrl, headers = inertiaHeaders, referer = playerUrl)
-                    mirrorBody = response.text
-                    val inertia = response.parsed<InertiaResponse>()
-                    val streams = inertia.props.streams?.data.orEmpty()
-                    for (stream in streams) {
-                        val quality = extractQuality(stream.resolution ?: stream.label ?: stream.quality)
-                        val mirrors = stream.mirrors.orEmpty() + stream.servers.orEmpty() + stream.sources.orEmpty() +
-                            listOfNotNull((stream.url ?: stream.link)?.let { MirrorItem(link = it) })
-                        for (mirror in mirrors) {
-                            val link = (mirror.link ?: mirror.url ?: mirror.href ?: mirror.source)?.trim().orEmpty()
-                            if (link.isBlank()) continue
-                            resolveMirror(
-                                link,
-                                mirror.driver,
-                                mirror.symbol ?: mirror.name,
-                                playerUrl,
-                                quality,
-                                subtitleCallback,
-                            ) { emitUnique(it, quality) }
-                        }
-                    }
-                } catch (e: Exception) {
-                    Log.w("TukTuk", "Inertia stream request/parse failed for $playerUrl", e)
-                }
-            }
-
-            // If the mirror API changes, still try direct HLS/MP4/DASH links in its HTML or JSON.
-            for (mediaUrl in TukTukMediaUtils.mediaUrls(playerUrl, mirrorBody)) {
-                try {
-                    emitDirectMedia(mediaUrl, "TukTuk", playerUrl, Qualities.Unknown.value) { emitUnique(it) }
-                } catch (e: Exception) {
-                    Log.w("TukTuk", "Could not emit fallback media URL $mediaUrl", e)
-                }
-            }
-
-            val playerDoc = org.jsoup.Jsoup.parse(mirrorBody, playerUrl)
-            for (frame in getPlayerUrls(playerDoc, playerUrl)) {
-                try {
-                    resolveMirror(frame, null, null, playerUrl, Qualities.Unknown.value, subtitleCallback) {
-                        emitUnique(it)
-                    }
-                } catch (e: Exception) {
-                    Log.w("TukTuk", "Nested player extraction failed: $frame", e)
-                }
-            }
-        }
-
-        Log.i("TukTuk", "Resolved $emitted playable link(s) from $episodeUrl")
-        return emitted > 0
-    }
-
-    data class InertiaResponse(
-        @JsonProperty("props") val props: InertiaProps = InertiaProps()
-    )
-    data class InertiaProps(
-        @JsonProperty("streams") val streams: StreamsData? = null
-    )
-    data class StreamsData(
-        @JsonProperty("data") val data: List<StreamItem>? = null
-    )
-    data class StreamItem(
-        @JsonProperty("resolution") val resolution: String? = null,
-        @JsonProperty("label") val label: String? = null,
-        @JsonProperty("quality") val quality: String? = null,
-        @JsonProperty("url") val url: String? = null,
-        @JsonProperty("link") val link: String? = null,
-        @JsonProperty("mirrors") val mirrors: List<MirrorItem>? = null,
-        @JsonProperty("servers") val servers: List<MirrorItem>? = null,
-        @JsonProperty("sources") val sources: List<MirrorItem>? = null
-    )
-    data class MirrorItem(
-        @JsonProperty("link") val link: String? = null,
-        @JsonProperty("url") val url: String? = null,
-        @JsonProperty("href") val href: String? = null,
-        @JsonProperty("source") val source: String? = null,
-        @JsonProperty("symbol") val symbol: String? = null,
-        @JsonProperty("driver") val driver: String? = null,
-        @JsonProperty("name") val name: String? = null
-    )
-
     private companion object {
-        const val SITE_HOST = "tuktukcinemas.com"
-        const val PAGE_SIZE = 20
-        private val LEGACY_HOST = Regex("^https?://(?:www\\.)?tuktukhd\\.com", RegexOption.IGNORE_CASE)
-        private val WWW_SITE_HOST = Regex("^https?://www\\.tuktukcinemas\\.com", RegexOption.IGNORE_CASE)
+        const val MAX_PARENT_LOOKUP_DEPTH = 3
+        const val MAX_SEASONS_TO_SCAN = 40
+        const val MAX_TOTAL_EPISODE_PAGES = 80
+        const val MAX_PLAYER_DEPTH = 3
     }
 }
