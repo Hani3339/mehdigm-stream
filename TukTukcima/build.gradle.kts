@@ -1,7 +1,7 @@
 import org.gradle.api.artifacts.ExternalModuleDependency
 import org.gradle.api.artifacts.FileCollectionDependency
 
-version = 15
+version = 16
 
 cloudstream {
     description = "مشاهدة وتحميل الأفلام والمسلسلات والأنمي من توك توك سينما"
