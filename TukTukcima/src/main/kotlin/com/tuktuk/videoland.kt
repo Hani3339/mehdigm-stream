@@ -16,47 +16,75 @@ class VideolandExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
+        val origin = TukTukMediaUtils.originOf(url, mainUrl)
+        val pageReferer = referer?.takeIf { it.isNotBlank() } ?: "$origin/"
         try {
-            Log.d(name, "Step 1: Fetching page -> $url")
-            val response = app.get(url, referer = referer ?: mainUrl).text
-            val unpackedHtml = JsUnpacker(response).unpack() ?: response
-            val regex = Regex("""https://[^"']+?/hls\d+/[^"']+?/master\.(?:txt|m3u8)(?:\?[^"']*)?""")
-
-            val matches = regex.findAll(unpackedHtml).toList()
-
-            if (matches.isEmpty()) {
-                Log.w(name, "No media links found in unpacked HTML")
+            val response = app.get(
+                url,
+                referer = pageReferer,
+                headers = mapOf(
+                    "User-Agent" to TukTukMediaUtils.BROWSER_USER_AGENT,
+                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+                )
+            ).text
+            val playerHtml = JsUnpacker(response).unpack() ?: response
+            val links = TukTukMediaUtils.mediaUrls(url, playerHtml)
+            if (links.isEmpty()) {
+                Log.w(name, "No media URLs found in unpacked player page: $url")
                 return
             }
-            matches.forEach { match ->
-                val link = match.value
-                Log.d(name, "Found media link: $link")
-                val isM3u8 = link.contains(".m3u8") || link.contains(".txt")
 
-                callback.invoke(
-                    newExtractorLink(
-                        source = this.name,
-                        name = this.name,
-                        url = link,
-                    ){
-                        this.referer = "https://videoland.sbs/"
-                        quality = Qualities.Unknown.value
-                        type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                        headers = mapOf(
-                            "sec-ch-ua-platform" to "\"Android\"",
-                            "sec-ch-ua" to "\"Chromium\";v=\"148\", \"Google Chrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"",
-                            "sec-ch-ua-mobile" to "?1",
-                            "accept" to "*/*",
-                            "origin" to "https://videoland.sbs",
-                            "sec-fetch-site" to "cross-site",
-                            "sec-fetch-mode" to "cors",
-                            "sec-fetch-dest" to "empty"
+            val mediaHeaders = mapOf(
+                "User-Agent" to TukTukMediaUtils.BROWSER_USER_AGENT,
+                "Referer" to pageReferer,
+                "Origin" to origin,
+                "Accept" to "*/*",
+                "Sec-Fetch-Site" to "cross-site",
+                "Sec-Fetch-Mode" to "cors",
+                "Sec-Fetch-Dest" to "empty"
+            )
+            for (link in links) {
+                val isHls = TukTukMediaUtils.isHls(link)
+                val quality = TukTukMediaUtils.qualityHint(link)
+                if (isHls) {
+                    val generated = try {
+                        M3u8Helper.generateM3u8(
+                            name,
+                            link,
+                            pageReferer,
+                            quality = quality.takeIf { it > 0 },
+                            headers = mediaHeaders
                         )
+                    } catch (e: Exception) {
+                        Log.w(name, "Could not expand HLS playlist: $link", e)
+                        emptyList()
+                    }
+                    if (generated.isNotEmpty()) {
+                        generated.forEach(callback)
+                        continue
+                    }
+                }
+
+                val type = when {
+                    isHls -> ExtractorLinkType.M3U8
+                    link.substringBefore('?').endsWith(".mpd", ignoreCase = true) -> ExtractorLinkType.DASH
+                    else -> ExtractorLinkType.VIDEO
+                }
+                callback(
+                    newExtractorLink(
+                        source = name,
+                        name = name,
+                        url = link
+                    ) {
+                        this.referer = pageReferer
+                        this.quality = quality.takeIf { it > 0 } ?: Qualities.Unknown.value
+                        this.type = type
+                        this.headers = mediaHeaders
                     }
                 )
             }
         } catch (e: Exception) {
-            Log.e(name, "Error in Videoland extractor", e)
+            Log.e(name, "Videoland extraction failed for $url", e)
         }
     }
 }

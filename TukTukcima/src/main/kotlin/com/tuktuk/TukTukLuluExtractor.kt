@@ -5,18 +5,7 @@ import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.*
 
-/**
- * lulustream (lulustream.com) extractor for TukTuk.
- *
- * The embed page `https://lulustream.com/e/<code>` ships a p.a.c.k.e.r-obfuscated
- * jwplayer setup:
- *
- *   setup({sources:[{file:"https://…/hls2/…/master.m3u8?…"}],…});
- *
- * The built-in LuluStream extractor looks for the player script but does not unpack
- * it, so it finds nothing here. We unpack with [JsUnpacker] and emit every master
- * playlist (expanded to all its qualities) for both watching and downloading.
- */
+/** Extract media sources from LuluStream's player page, including packed JWPlayer configs. */
 class TukTukLuluExtractor : ExtractorApi() {
     override var name = "lulustream"
     override var mainUrl = "https://lulustream.com"
@@ -28,64 +17,71 @@ class TukTukLuluExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
+        val origin = TukTukMediaUtils.originOf(url, mainUrl)
+        val pageReferer = referer?.takeIf { it.isNotBlank() } ?: "$origin/"
         try {
-            Log.d(name, "Step 1: Fetching page -> $url")
             val response = app.get(
                 url,
-                referer = referer ?: mainUrl,
+                referer = pageReferer,
                 headers = mapOf(
-                    "User-Agent" to BROWSER_UA,
+                    "User-Agent" to TukTukMediaUtils.BROWSER_USER_AGENT,
                     "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
                 )
             ).text
-            val unpackedHtml = JsUnpacker(response).unpack() ?: response
-            val regex = Regex("""https://[^"']+?/hls\d+/[^"']+?/master\.(?:txt|m3u8)(?:\?[^"']*)?""")
-
-            val matches = regex.findAll(unpackedHtml).toList()
-            if (matches.isEmpty()) {
-                Log.w(name, "No media links found in unpacked HTML")
+            val playerHtml = JsUnpacker(response).unpack() ?: response
+            val links = TukTukMediaUtils.mediaUrls(url, playerHtml)
+            if (links.isEmpty()) {
+                Log.w(name, "No media URLs found in unpacked player page: $url")
                 return
             }
-            val reqHeaders = mapOf(
-                "User-Agent" to BROWSER_UA,
-                "Referer" to "$mainUrl/",
-                "Origin" to mainUrl
+
+            val mediaHeaders = mapOf(
+                "User-Agent" to TukTukMediaUtils.BROWSER_USER_AGENT,
+                "Referer" to pageReferer,
+                "Origin" to origin
             )
-            matches.forEach { match ->
-                val link = match.value
-                Log.d(name, "Found media link: $link")
-                val isM3u8 = link.contains(".m3u8") || link.contains(".txt")
-                if (isM3u8) {
+            for (link in links) {
+                val isHls = TukTukMediaUtils.isHls(link)
+                val quality = TukTukMediaUtils.qualityHint(link)
+                if (isHls) {
                     val generated = try {
-                        M3u8Helper.generateM3u8(name, link, "$mainUrl/", headers = reqHeaders)
-                    } catch (_: Throwable) {
+                        M3u8Helper.generateM3u8(
+                            name,
+                            link,
+                            pageReferer,
+                            quality = quality.takeIf { it > 0 },
+                            headers = mediaHeaders
+                        )
+                    } catch (e: Exception) {
+                        Log.w(name, "Could not expand HLS playlist: $link", e)
                         emptyList()
                     }
                     if (generated.isNotEmpty()) {
                         generated.forEach(callback)
-                        return@forEach
+                        continue
                     }
                 }
-                callback.invoke(
+
+                val type = when {
+                    isHls -> ExtractorLinkType.M3U8
+                    link.substringBefore('?').endsWith(".mpd", ignoreCase = true) -> ExtractorLinkType.DASH
+                    else -> ExtractorLinkType.VIDEO
+                }
+                callback(
                     newExtractorLink(
-                        source = this.name,
-                        name = this.name,
-                        url = link,
+                        source = name,
+                        name = name,
+                        url = link
                     ) {
-                        this.referer = "$mainUrl/"
-                        quality = Qualities.Unknown.value
-                        type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                        headers = reqHeaders
+                        this.referer = pageReferer
+                        this.quality = quality.takeIf { it > 0 } ?: Qualities.Unknown.value
+                        this.type = type
+                        this.headers = mediaHeaders
                     }
                 )
             }
         } catch (e: Exception) {
-            Log.e(name, "Error in lulustream extractor", e)
+            Log.e(name, "LuluStream extraction failed for $url", e)
         }
-    }
-
-    private companion object {
-        const val BROWSER_UA =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     }
 }
