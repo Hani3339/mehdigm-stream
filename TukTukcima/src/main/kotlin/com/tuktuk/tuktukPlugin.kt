@@ -8,7 +8,6 @@ import android.content.Context
 class TukTukHdPlugin: Plugin() {
     override fun load(context: Context) {
         registerMainAPI(TukTukHd())
-        registerExtractorAPI(TukTukMegaMaxExtractor())
         registerExtractorAPI(VideolandExtractor())
         registerExtractorAPI(TukTukVipExtractor())
         registerExtractorAPI(TukTukByseExtractor())
