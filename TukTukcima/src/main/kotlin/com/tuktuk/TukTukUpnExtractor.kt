@@ -18,10 +18,11 @@ import javax.crypto.spec.SecretKeySpec
  *   GET https://tuktuk.upns.one/api/v1/video?id=<id>  ->  hex(ciphertext)
  *   plaintext = AES-CBC(key="kiemtienmua911ca", iv="1234567890oiuytr", hexDecoded)
  *
- * The decrypted JSON contains the master playlists:
- *   cfNative (proxied master.m3u8, all qualities), source, cf
+ * The decrypted JSON may include a primary playlist plus several fallback copies:
+ *   cfNative (preferred), source, and cf (last resort).
  *
- * We emit every master playlist expanded to all its qualities for watching/download.
+ * To avoid publishing broken or duplicated fallback links, emit one exact original
+ * URL in that priority order and leave quality selection to the player.
  */
 class TukTukUpnExtractor : ExtractorApi() {
     override var name = "upnshare"
@@ -69,59 +70,41 @@ class TukTukUpnExtractor : ExtractorApi() {
                 "Origin" to origin
             )
 
-            val mediaLinks = linkedSetOf<String>()
-            listOf("cfNative", "source", "cf").forEach { key ->
-                val rawLink = json.optString(key).trim()
-                if (rawLink.isBlank() || rawLink == "null") return@forEach
-                mediaLinks.add(TukTukMediaUtils.resolveMediaUrl(origin, rawLink) ?: rawLink)
-            }
-            for (link in mediaLinks) emitRaw(link, origin, linkHeaders, callback)
+            // The provider exposes fallbacks in its API payload. Return only the preferred
+            // original URL (cfNative, then source, then cf) instead of publishing every
+            // fallback or synthesizing extra playlist copies.
+            val mediaUrl = selectMediaUrl(
+                listOf("cfNative", "source", "cf").map { key -> json.opt(key) as? String },
+                origin
+            ) ?: return
+            emitOriginal(mediaUrl, origin, linkHeaders, callback)
         } catch (e: Exception) {
             Log.e(name, "Error in upnshare extractor", e)
         }
     }
 
-    private suspend fun emitRaw(
+    private suspend fun emitOriginal(
         link: String,
         origin: String,
         headers: Map<String, String>,
         callback: (ExtractorLink) -> Unit
     ) {
-        val quality = TukTukMediaUtils.qualityHint(link)
-        val isHls = TukTukMediaUtils.isHls(link)
-        if (isHls) {
-            val generated = try {
-                M3u8Helper.generateM3u8(
-                    name,
-                    link,
-                    "$origin/",
-                    quality = quality.takeIf { it > 0 },
-                    headers = headers
-                )
-            } catch (e: Exception) {
-                Log.w(name, "Could not expand HLS source $link", e)
-                emptyList()
-            }
-            if (generated.isNotEmpty()) {
-                generated.forEach(callback)
-                return
-            }
-        }
-
         val type = when {
-            isHls -> ExtractorLinkType.M3U8
+            TukTukMediaUtils.isHls(link) -> ExtractorLinkType.M3U8
             link.substringBefore('?').endsWith(".mpd", ignoreCase = true) -> ExtractorLinkType.DASH
             else -> ExtractorLinkType.VIDEO
         }
+        val quality = TukTukMediaUtils.qualityHint(link).takeIf { it > 0 }
+            ?: Qualities.Unknown.value
         callback(
             newExtractorLink(
                 source = this.name,
                 name = this.name,
-                url = link
+                url = link,
+                type = type,
             ) {
                 this.referer = "$origin/"
-                this.quality = quality.takeIf { it > 0 } ?: Qualities.Unknown.value
-                this.type = type
+                this.quality = quality
                 this.headers = headers
             }
         )
@@ -146,7 +129,16 @@ class TukTukUpnExtractor : ExtractorApi() {
         }
     }
 
-    private companion object {
+    internal companion object {
+        fun selectMediaUrl(candidates: List<String?>, origin: String): String? {
+            for (candidate in candidates) {
+                val raw = candidate?.trim().orEmpty()
+                if (raw.isBlank() || raw.equals("null", ignoreCase = true)) continue
+                TukTukMediaUtils.resolveMediaUrl(origin, raw)?.let { return it }
+            }
+            return null
+        }
+
         const val BROWSER_UA =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         val KEY = "kiemtienmua911ca".toByteArray(Charsets.UTF_8)

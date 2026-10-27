@@ -775,11 +775,21 @@ class TukTukHd : MainAPI() {
         val link = resolveUrl(rawUrl, playerUrl)
         val hint = "${driver.orEmpty()} ${symbol.orEmpty()} $link".lowercase()
         val sourceName = driver?.takeIf { it.isNotBlank() } ?: symbol?.takeIf { it.isNotBlank() } ?: "TukTuk"
+        var streamRubyEmitted = false
         try {
             when {
                 Regex("\\.(?:m3u8|m3u|mp4|m4v|mpd)(?:$|[?#])", RegexOption.IGNORE_CASE).containsMatchIn(link) ||
                     link.contains("/master.txt", ignoreCase = true) ->
                     emitDirectMedia(link, sourceName, playerUrl, quality, callback)
+                TukTukMediaUtils.isStreamRubyProvider(link, hint) -> {
+                    TukTukStreamRubyExtractor().getUrl(link, playerUrl, subtitleCallback) {
+                        streamRubyEmitted = true
+                        callback(it)
+                    }
+                    if (!streamRubyEmitted) {
+                        loadExtractor(link, subtitleCallback) { callback(it) }
+                    }
+                }
                 hint.contains("megamax") || hint.contains("share4max") ||
                     TukTukMediaUtils.isMegaMaxUrl(link, driver.orEmpty()) ->
                     TukTukMegaMaxExtractor().getUrl(link, playerUrl, subtitleCallback, callback)
