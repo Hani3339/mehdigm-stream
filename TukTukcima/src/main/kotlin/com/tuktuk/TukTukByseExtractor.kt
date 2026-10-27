@@ -78,8 +78,9 @@ class TukTukByseExtractor : ExtractorApi() {
         )
         for (i in 0 until sources.length()) {
             val src = sources.optJSONObject(i) ?: continue
-            val file = src.optString("url").ifBlank { src.optString("file") }.trim()
-            if (file.isBlank()) continue
+            val rawFile = src.optString("url").ifBlank { src.optString("file") }.trim()
+            if (rawFile.isBlank()) continue
+            val file = TukTukMediaUtils.resolveMediaUrl(origin, rawFile) ?: rawFile
             val height = src.optInt("height", 0).takeIf { it > 0 }
             val label = src.optString("label").ifBlank { src.optString("quality") }.trim()
             emitSource(file, label, height, origin, headers, callback)
@@ -94,40 +95,43 @@ class TukTukByseExtractor : ExtractorApi() {
         headers: Map<String, String>,
         callback: (ExtractorLink) -> Unit
     ) {
-        if (file.contains(".m3u8")) {
+        val quality = height ?: TukTukMediaUtils.qualityHint(label)
+        val isHls = TukTukMediaUtils.isHls(file)
+        if (isHls) {
             val generated = try {
-                M3u8Helper.generateM3u8(name, file, "$origin/", quality = height, headers = headers)
-            } catch (_: Throwable) {
+                M3u8Helper.generateM3u8(
+                    name,
+                    file,
+                    "$origin/",
+                    quality = quality.takeIf { it > 0 },
+                    headers = headers
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not expand HLS source $file", e)
                 emptyList()
             }
             if (generated.isNotEmpty()) {
                 generated.forEach(callback)
                 return
             }
-            callback(
-                ExtractorLink(
-                    source = name,
-                    name = label.ifBlank { name },
-                    url = file,
-                    referer = "$origin/",
-                    quality = height ?: -1,
-                    headers = headers,
-                    type = ExtractorLinkType.M3U8
-                )
-            )
-        } else {
-            callback(
-                ExtractorLink(
-                    source = name,
-                    name = label.ifBlank { name },
-                    url = file,
-                    referer = "$origin/",
-                    quality = height ?: -1,
-                    headers = headers,
-                    type = ExtractorLinkType.VIDEO
-                )
-            )
         }
+
+        val type = when {
+            isHls -> ExtractorLinkType.M3U8
+            file.substringBefore('?').endsWith(".mpd", ignoreCase = true) -> ExtractorLinkType.DASH
+            else -> ExtractorLinkType.VIDEO
+        }
+        callback(
+            ExtractorLink(
+                source = name,
+                name = label.ifBlank { name },
+                url = file,
+                referer = "$origin/",
+                quality = quality.takeIf { it > 0 } ?: -1,
+                headers = headers,
+                type = type
+            )
+        )
     }
 
     // ---------------------------------------------------------------- decryption

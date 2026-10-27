@@ -5,6 +5,9 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
+import com.lagradost.cloudstream3.utils.M3u8Helper
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import org.jsoup.nodes.Element
 import kotlinx.coroutines.delay
@@ -643,22 +646,157 @@ class TukTukHd : MainAPI() {
     }
 
     private fun extractQuality(resolution: String?): Int {
-        val cleanRes = resolution?.lowercase()?.trim() ?: return Qualities.Unknown.value
-        if (cleanRes.contains("x")) {
-            val height = cleanRes.substringAfter("x").filter { it.isDigit() }.toIntOrNull()
-            if (height != null && height > 0) return height
+        val value = resolution?.lowercase()?.trim().orEmpty()
+        if (value.isBlank()) return Qualities.Unknown.value
+        when {
+            Regex("\\b4k\\b|2160").containsMatchIn(value) -> return 2160
+            Regex("\\b2k\\b|1440").containsMatchIn(value) -> return 1440
+            Regex("fhd|1080").containsMatchIn(value) -> return 1080
+            Regex("hd|720").containsMatchIn(value) -> return 720
+            Regex("sd|480").containsMatchIn(value) -> return 480
         }
-        val digits = cleanRes.filter { it.isDigit() }.toIntOrNull()
-        if (digits != null && digits > 0) {
-            return digits
+        Regex("\\d{3,4}\\s*[x×]\\s*(\\d{3,4})").find(value)
+            ?.groupValues?.getOrNull(1)?.toIntOrNull()?.let { return it }
+        Regex("\\b(2160|1440|1080|720|540|480|360|240)p?\\b").find(value)
+            ?.groupValues?.getOrNull(1)?.toIntOrNull()?.let { return it }
+        return Qualities.Unknown.value
+    }
+
+    private fun resolveUrl(raw: String, baseUrl: String): String {
+        val clean = raw.trim().replace("&amp;", "&").replace("\\/", "/")
+        if (clean.startsWith("//")) return "https:$clean"
+        if (clean.startsWith("http://", true) || clean.startsWith("https://", true)) {
+            return normalizeSiteUrl(clean)
         }
-        return when {
-            cleanRes.contains("4k") || cleanRes.contains("2160") -> 2160
-            cleanRes.contains("2k") || cleanRes.contains("1440") -> 1440
-            cleanRes.contains("fhd") || cleanRes.contains("1080") -> 1080
-            cleanRes.contains("hd") || cleanRes.contains("720") -> 720
-            cleanRes.contains("sd") || cleanRes.contains("480") -> 480
-            else -> Qualities.Unknown.value
+        return runCatching { URI(baseUrl).resolve(clean).toString() }
+            .getOrDefault("$mainUrl/${clean.trimStart('/')}")
+    }
+
+    private fun decodePlayerUrl(encoded: String, pageUrl: String): String? {
+        val value = encoded.trim()
+        if (value.isBlank()) return null
+        if (value.startsWith("http", true) || value.startsWith("//") || value.startsWith("/")) {
+            return resolveUrl(value, pageUrl)
+        }
+        val decoded = listOf(Base64.DEFAULT, Base64.URL_SAFE or Base64.NO_WRAP).firstNotNullOfOrNull { flags ->
+            runCatching { String(Base64.decode(value, flags), Charsets.UTF_8).trim() }.getOrNull()
+                ?.takeIf { it.startsWith("http", true) || it.startsWith("//") || it.startsWith("/") }
+        } ?: return null
+        return resolveUrl(decoded, pageUrl)
+    }
+
+    private fun getPlayerUrls(doc: org.jsoup.nodes.Document, pageUrl: String): List<String> {
+        val urls = linkedSetOf<String>()
+        for (element in doc.select("[data-crypt]")) {
+            decodePlayerUrl(element.attr("data-crypt"), pageUrl)?.let(urls::add)
+        }
+        val frameSelector = "#main-video-frame[src], iframe[data-src], .VideoPlayer iframe[src], .player iframe[src], .play-box iframe[src], iframe[src*='/embed/'], iframe[src*='/player/'], iframe[src*='/iframe/'], iframe[src*='megamax'], iframe[src*='share4max'], iframe[src*='megatuktuk']"
+        for (frame in doc.select(frameSelector)) {
+            val raw = frame.attr("src").ifBlank { frame.attr("data-src") }
+            if (raw.isBlank()) continue
+            val url = resolveUrl(raw, pageUrl)
+            if (url != pageUrl && url != "$mainUrl/main/") urls.add(url)
+        }
+        return urls.toList()
+    }
+
+    private fun inertiaVersion(html: String): String? {
+        val pagePayload = org.jsoup.Jsoup.parse(html).selectFirst("[data-page]")?.attr("data-page").orEmpty()
+        val fromPayload = runCatching { org.json.JSONObject(pagePayload).optString("version") }.getOrNull()
+        if (!fromPayload.isNullOrBlank() && fromPayload != "null") return fromPayload
+        return Regex("[\"']version[\"']\\s*:\\s*[\"']([^\"']+)[\"']")
+            .find(html)?.groupValues?.getOrNull(1)
+    }
+
+    private fun streamHeaders(mediaUrl: String, referer: String): Map<String, String> {
+        val origin = TukTukMediaUtils.originOf(mediaUrl, mainUrl)
+        return mapOf("User-Agent" to USER_AGENT, "Referer" to referer, "Origin" to origin)
+    }
+
+    private suspend fun emitDirectMedia(
+        rawUrl: String,
+        sourceName: String,
+        referer: String,
+        qualityHint: Int,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val url = resolveUrl(rawUrl, referer)
+        val headers = streamHeaders(url, referer)
+        val isHls = TukTukMediaUtils.isHls(url)
+        val isDash = url.substringBefore('?').endsWith(".mpd", ignoreCase = true)
+        if (isHls) {
+            val generated = try {
+                M3u8Helper.generateM3u8(
+                    sourceName,
+                    url,
+                    referer,
+                    quality = qualityHint.takeIf { it > 0 },
+                    headers = headers,
+                )
+            } catch (e: Exception) {
+                Log.w("TukTuk", "Could not expand HLS qualities for $url", e)
+                emptyList()
+            }
+            if (generated.isNotEmpty()) {
+                generated.forEach { link ->
+                    if (link.quality == Qualities.Unknown.value && qualityHint > 0) link.quality = qualityHint
+                    callback(link)
+                }
+                return
+            }
+        }
+        callback(
+            newExtractorLink(
+                source = sourceName,
+                name = sourceName,
+                url = url,
+            ) {
+                this.referer = referer
+                this.quality = qualityHint.takeIf { it > 0 } ?: Qualities.Unknown.value
+                this.type = when {
+                    isHls -> ExtractorLinkType.M3U8
+                    isDash -> ExtractorLinkType.DASH
+                    else -> ExtractorLinkType.VIDEO
+                }
+                this.headers = headers
+            }
+        )
+    }
+
+    private suspend fun resolveMirror(
+        rawUrl: String,
+        driver: String?,
+        symbol: String?,
+        playerUrl: String,
+        quality: Int,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val link = resolveUrl(rawUrl, playerUrl)
+        val hint = "${driver.orEmpty()} ${symbol.orEmpty()} $link".lowercase()
+        val sourceName = driver?.takeIf { it.isNotBlank() } ?: symbol?.takeIf { it.isNotBlank() } ?: "TukTuk"
+        try {
+            when {
+                Regex("\\.(?:m3u8|m3u|mp4|m4v|mpd)(?:$|[?#])", RegexOption.IGNORE_CASE).containsMatchIn(link) ||
+                    link.contains("/master.txt", ignoreCase = true) ->
+                    emitDirectMedia(link, sourceName, playerUrl, quality, callback)
+                hint.contains("megamax") || hint.contains("share4max") ||
+                    TukTukMediaUtils.isMegaMaxUrl(link, driver.orEmpty()) ->
+                    TukTukMegaMaxExtractor().getUrl(link, playerUrl, subtitleCallback, callback)
+                hint.contains("byse") || hint.contains("byseraguci") ->
+                    TukTukByseExtractor().getUrl(link, playerUrl, subtitleCallback, callback)
+                hint.contains("lulustream") || hint.contains("luluvdo") ->
+                    TukTukLuluExtractor().getUrl(link, playerUrl, subtitleCallback, callback)
+                hint.contains("upnshare") || hint.contains("upns.one") ->
+                    TukTukUpnExtractor().getUrl(link, playerUrl, subtitleCallback, callback)
+                hint.contains("tuktukvip") || hint.contains("lolololu") ->
+                    TukTukVipExtractor().getUrl(link, playerUrl, subtitleCallback, callback)
+                hint.contains("videoland") ->
+                    VideolandExtractor().getUrl(link, playerUrl, subtitleCallback, callback)
+                else -> loadExtractor(link, subtitleCallback, callback)
+            }
+        } catch (e: Exception) {
+            Log.w("TukTuk", "Mirror extraction failed ($driver / $symbol): $link", e)
         }
     }
 
@@ -668,116 +806,134 @@ class TukTukHd : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val doc = app.get(data, referer = mainUrl).document
-        val iframeCrypt = doc.select("iframe#main-video-frame").attr("data-crypt")
-        if (iframeCrypt.isEmpty()) return false
-        try {
-            val decodedBytes = Base64.decode(iframeCrypt, Base64.DEFAULT)
-            val playerUrl = String(decodedBytes)
-            val initialResponse = app.get(
-                playerUrl,
-                headers = mapOf(
-                    "User-Agent" to USER_AGENT,
-                    "Referer" to mainUrl
-                )
-            )
-            val version = Regex(""""version":"([^"]+)"""").find(initialResponse.text)?.groupValues?.get(1)
-            if (version != null) {
-                val inertiaHeaders = mapOf(
-                    "X-Inertia" to "true",
-                    "X-Inertia-Version" to version,
-                    "X-Inertia-Partial-Component" to "files/mirror/video",
-                    "X-Inertia-Partial-Data" to "streams",
-                    "X-Requested-With" to "XMLHttpRequest",
-                    "Referer" to playerUrl,
-                    "Accept" to "text/html, application/xhtml+xml"
-                )
-                val inertiaResponse = app.get(
-                    playerUrl,
-                    headers = inertiaHeaders
-                ).parsed<InertiaResponse>()
-                val streams = inertiaResponse.props.streams?.data ?: emptyList()
-                val allMirrors = streams.flatMap { streamItem ->
-                    val qualityInt = extractQuality(streamItem.resolution ?: streamItem.label)
-                    streamItem.mirrors?.map { mirror ->
-                        Pair(mirror, qualityInt)
-                    } ?: emptyList()
-                }
-                allMirrors.amap { (mirror, qualityInt) ->
-                    val rawLink = mirror.link ?: return@amap
-                    val link = if (rawLink.startsWith("//")) "https:$rawLink" else rawLink
-                    val displayName = mirror.driver ?: mirror.symbol ?: "Server"
-                    when {
-                        mirror.driver?.contains("streamruby", ignoreCase = true) == true || mirror.symbol?.contains("streamruby", ignoreCase = true) == true -> {
-                            loadExtractor(link, subtitleCallback) { extractorLink ->
-                                if (extractorLink.quality == Qualities.Unknown.value) extractorLink.quality = qualityInt
-                                callback(extractorLink)
-                            }
-                        }
-                        mirror.driver?.contains("rpmshare", ignoreCase = true) == true -> {
-                            // reuse pattern if exists via loadExtractor? or skip
-                            loadExtractor(link, subtitleCallback) { extractorLink ->
-                                if (extractorLink.quality == Qualities.Unknown.value) extractorLink.quality = qualityInt
-                                callback(extractorLink)
-                            }
-                        }
-                        mirror.driver?.contains("earnvids", ignoreCase = true) == true ||
-                            mirror.symbol?.contains("TukTukVIP", ignoreCase = true) == true -> {
-                            TukTukVipExtractor().getUrl(link, playerUrl, subtitleCallback) { extractorLink ->
-                                if (extractorLink.quality == Qualities.Unknown.value) extractorLink.quality = qualityInt
-                                callback(extractorLink)
-                            }
-                        }
-                        mirror.driver?.contains("byse", ignoreCase = true) == true -> {
-                            TukTukByseExtractor().getUrl(link, playerUrl, subtitleCallback) { extractorLink ->
-                                if (extractorLink.quality == Qualities.Unknown.value) extractorLink.quality = qualityInt
-                                callback(extractorLink)
-                            }
-                        }
-                        mirror.driver?.contains("lulustream", ignoreCase = true) == true -> {
-                            TukTukLuluExtractor().getUrl(link, playerUrl, subtitleCallback) { extractorLink ->
-                                if (extractorLink.quality == Qualities.Unknown.value) extractorLink.quality = qualityInt
-                                callback(extractorLink)
-                            }
-                        }
-                        mirror.driver?.contains("upnshare", ignoreCase = true) == true ||
-                            link.contains("upns.one", ignoreCase = true) -> {
-                            TukTukUpnExtractor().getUrl(link, playerUrl, subtitleCallback) { extractorLink ->
-                                if (extractorLink.quality == Qualities.Unknown.value) extractorLink.quality = qualityInt
-                                callback(extractorLink)
-                            }
-                        }
-                        else -> {
-                            loadExtractor(link, subtitleCallback) { extractorLink ->
-                                if (extractorLink.quality == Qualities.Unknown.value) extractorLink.quality = qualityInt
-                                callback(extractorLink)
-                            }
+        val episodeUrl = normalizeSiteUrl(data)
+        val doc = try {
+            app.get(episodeUrl, headers = siteHeaders(episodeUrl), referer = "$mainUrl/main/").document
+        } catch (e: Exception) {
+            Log.e("TukTuk", "Could not load watch page $episodeUrl", e)
+            return false
+        }
+
+        val emittedUrls = linkedSetOf<String>()
+        var emitted = 0
+        fun emitUnique(link: ExtractorLink, qualityHint: Int = Qualities.Unknown.value) {
+            if (link.quality == Qualities.Unknown.value && qualityHint > 0) link.quality = qualityHint
+            if (emittedUrls.add(link.url)) {
+                emitted += 1
+                callback(link)
+            }
+        }
+
+        // Some episode pages expose a direct video source instead of an iframe.
+        val directMedia = doc.select("video[src], video source[src], source[type*=mpegurl][src]")
+            .map { it.attr("src") }.filter { it.isNotBlank() }
+        for (raw in directMedia) {
+            try {
+                emitDirectMedia(raw, "TukTuk", episodeUrl, Qualities.Unknown.value) { emitUnique(it) }
+            } catch (e: Exception) {
+                Log.w("TukTuk", "Direct media extraction failed: $raw", e)
+            }
+        }
+
+        val playerUrls = getPlayerUrls(doc, episodeUrl)
+        for (playerUrl in playerUrls) {
+            var mirrorBody = ""
+            val initial = try {
+                app.get(playerUrl, headers = siteHeaders(episodeUrl), referer = episodeUrl)
+            } catch (e: Exception) {
+                Log.w("TukTuk", "Could not load player page $playerUrl", e)
+                continue
+            }
+            mirrorBody = initial.text
+            val version = inertiaVersion(mirrorBody)
+            if (!version.isNullOrBlank()) {
+                try {
+                    val inertiaHeaders = siteHeaders(playerUrl) + mapOf(
+                        "X-Inertia" to "true",
+                        "X-Inertia-Version" to version,
+                        "X-Inertia-Partial-Component" to "files/mirror/video",
+                        "X-Inertia-Partial-Data" to "streams",
+                        "X-Requested-With" to "XMLHttpRequest",
+                        "Accept" to "application/json, text/javascript, */*;q=0.01",
+                    )
+                    val response = app.get(playerUrl, headers = inertiaHeaders, referer = playerUrl)
+                    mirrorBody = response.text
+                    val inertia = response.parsed<InertiaResponse>()
+                    val streams = inertia.props.streams?.data.orEmpty()
+                    for (stream in streams) {
+                        val quality = extractQuality(stream.resolution ?: stream.label ?: stream.quality)
+                        val mirrors = stream.mirrors.orEmpty() + stream.servers.orEmpty() + stream.sources.orEmpty() +
+                            listOfNotNull((stream.url ?: stream.link)?.let { MirrorItem(link = it) })
+                        for (mirror in mirrors) {
+                            val link = (mirror.link ?: mirror.url ?: mirror.href ?: mirror.source)?.trim().orEmpty()
+                            if (link.isBlank()) continue
+                            resolveMirror(
+                                link,
+                                mirror.driver,
+                                mirror.symbol ?: mirror.name,
+                                playerUrl,
+                                quality,
+                                subtitleCallback,
+                            ) { emitUnique(it, quality) }
                         }
                     }
+                } catch (e: Exception) {
+                    Log.w("TukTuk", "Inertia stream request/parse failed for $playerUrl", e)
                 }
             }
-        } catch (_: Exception) {}
-        return true
+
+            // If the mirror API changes, still try direct HLS/MP4/DASH links in its HTML or JSON.
+            for (mediaUrl in TukTukMediaUtils.mediaUrls(playerUrl, mirrorBody)) {
+                try {
+                    emitDirectMedia(mediaUrl, "TukTuk", playerUrl, Qualities.Unknown.value) { emitUnique(it) }
+                } catch (e: Exception) {
+                    Log.w("TukTuk", "Could not emit fallback media URL $mediaUrl", e)
+                }
+            }
+
+            val playerDoc = org.jsoup.Jsoup.parse(mirrorBody, playerUrl)
+            for (frame in getPlayerUrls(playerDoc, playerUrl)) {
+                try {
+                    resolveMirror(frame, null, null, playerUrl, Qualities.Unknown.value, subtitleCallback) {
+                        emitUnique(it)
+                    }
+                } catch (e: Exception) {
+                    Log.w("TukTuk", "Nested player extraction failed: $frame", e)
+                }
+            }
+        }
+
+        Log.i("TukTuk", "Resolved $emitted playable link(s) from $episodeUrl")
+        return emitted > 0
     }
 
     data class InertiaResponse(
-        @JsonProperty("props") val props: InertiaProps
+        @JsonProperty("props") val props: InertiaProps = InertiaProps()
     )
     data class InertiaProps(
-        @JsonProperty("streams") val streams: StreamsData?
+        @JsonProperty("streams") val streams: StreamsData? = null
     )
     data class StreamsData(
-        @JsonProperty("data") val data: List<StreamItem>?
+        @JsonProperty("data") val data: List<StreamItem>? = null
     )
     data class StreamItem(
-        @JsonProperty("resolution") val resolution: String?,
-        @JsonProperty("label") val label: String?,
-        @JsonProperty("mirrors") val mirrors: List<MirrorItem>?
+        @JsonProperty("resolution") val resolution: String? = null,
+        @JsonProperty("label") val label: String? = null,
+        @JsonProperty("quality") val quality: String? = null,
+        @JsonProperty("url") val url: String? = null,
+        @JsonProperty("link") val link: String? = null,
+        @JsonProperty("mirrors") val mirrors: List<MirrorItem>? = null,
+        @JsonProperty("servers") val servers: List<MirrorItem>? = null,
+        @JsonProperty("sources") val sources: List<MirrorItem>? = null
     )
     data class MirrorItem(
-        @JsonProperty("link") val link: String?,
-        @JsonProperty("symbol") val symbol: String?,
-        @JsonProperty("driver") val driver: String?
+        @JsonProperty("link") val link: String? = null,
+        @JsonProperty("url") val url: String? = null,
+        @JsonProperty("href") val href: String? = null,
+        @JsonProperty("source") val source: String? = null,
+        @JsonProperty("symbol") val symbol: String? = null,
+        @JsonProperty("driver") val driver: String? = null,
+        @JsonProperty("name") val name: String? = null
     )
 
     private companion object {
