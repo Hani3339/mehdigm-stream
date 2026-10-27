@@ -39,7 +39,12 @@ class TukTukUpnExtractor : ExtractorApi() {
                 .substringBefore('?')
                 .trim()
                 .ifBlank { url.substringAfterLast('/').trim() }
-            val origin = TukTukMediaUtils.originOf(url, mainUrl)
+            val host = when {
+                url.contains("://") -> url.substringAfter("://").substringBefore("/")
+                url.startsWith("//") -> url.substring(2).substringBefore("/")
+                else -> mainUrl.substringAfter("://").substringBefore("/")
+            }
+            val origin = "https://$host"
             Log.d(name, "Step 1: id=$id origin=$origin")
 
             val headers = mapOf(
@@ -69,13 +74,24 @@ class TukTukUpnExtractor : ExtractorApi() {
                 "Origin" to origin
             )
 
-            val mediaLinks = linkedSetOf<String>()
-            listOf("cfNative", "source", "cf").forEach { key ->
-                val rawLink = json.optString(key).trim()
-                if (rawLink.isBlank() || rawLink == "null") return@forEach
-                mediaLinks.add(TukTukMediaUtils.resolveMediaUrl(origin, rawLink) ?: rawLink)
+            val cfNative = json.optString("cfNative")
+            if (cfNative.isNotBlank()) {
+                val generated = try {
+                    M3u8Helper.generateM3u8(name, cfNative, "$origin/", headers = linkHeaders)
+                } catch (_: Throwable) {
+                    emptyList()
+                }
+                if (generated.isNotEmpty()) {
+                    generated.forEach(callback)
+                } else {
+                    emitRaw(cfNative, origin, linkHeaders, callback)
+                }
             }
-            for (link in mediaLinks) emitRaw(link, origin, linkHeaders, callback)
+
+            listOf("source", "cf").forEach { key ->
+                val link = json.optString(key)
+                if (link.isNotBlank()) emitRaw(link, origin, linkHeaders, callback)
+            }
         } catch (e: Exception) {
             Log.e(name, "Error in upnshare extractor", e)
         }
@@ -87,41 +103,15 @@ class TukTukUpnExtractor : ExtractorApi() {
         headers: Map<String, String>,
         callback: (ExtractorLink) -> Unit
     ) {
-        val quality = TukTukMediaUtils.qualityHint(link)
-        val isHls = TukTukMediaUtils.isHls(link)
-        if (isHls) {
-            val generated = try {
-                M3u8Helper.generateM3u8(
-                    name,
-                    link,
-                    "$origin/",
-                    quality = quality.takeIf { it > 0 },
-                    headers = headers
-                )
-            } catch (e: Exception) {
-                Log.w(name, "Could not expand HLS source $link", e)
-                emptyList()
-            }
-            if (generated.isNotEmpty()) {
-                generated.forEach(callback)
-                return
-            }
-        }
-
-        val type = when {
-            isHls -> ExtractorLinkType.M3U8
-            link.substringBefore('?').endsWith(".mpd", ignoreCase = true) -> ExtractorLinkType.DASH
-            else -> ExtractorLinkType.VIDEO
-        }
-        callback(
+        callback.invoke(
             newExtractorLink(
                 source = this.name,
                 name = this.name,
-                url = link
+                url = link,
             ) {
                 this.referer = "$origin/"
-                this.quality = quality.takeIf { it > 0 } ?: Qualities.Unknown.value
-                this.type = type
+                quality = Qualities.Unknown.value
+                type = ExtractorLinkType.M3U8
                 this.headers = headers
             }
         )
