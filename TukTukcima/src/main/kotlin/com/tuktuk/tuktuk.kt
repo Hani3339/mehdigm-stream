@@ -173,7 +173,7 @@ class TukTukHd : MainAPI() {
         return loadMoviePage(canonicalUrl, metadata)
     }
 
-    private fun loadMoviePage(url: String, metadata: TukTukMetadata): LoadResponse {
+    private suspend fun loadMoviePage(url: String, metadata: TukTukMetadata): LoadResponse {
         val type = when (metadata.kind) {
             TukTukContentKind.ANIME -> TvType.AnimeMovie
             else -> tvType(metadata.kind)
