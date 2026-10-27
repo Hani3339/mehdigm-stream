@@ -83,7 +83,7 @@ class TukTukUpnExtractor : ExtractorApi() {
         }
     }
 
-    private fun emitOriginal(
+    private suspend fun emitOriginal(
         link: String,
         origin: String,
         headers: Map<String, String>,

@@ -784,10 +784,10 @@ class TukTukHd : MainAPI() {
                 TukTukMediaUtils.isStreamRubyProvider(link, hint) -> {
                     TukTukStreamRubyExtractor().getUrl(link, playerUrl, subtitleCallback) {
                         streamRubyEmitted = true
-                        emitUnique(it, quality)
+                        callback(it)
                     }
                     if (!streamRubyEmitted) {
-                        loadExtractor(link, subtitleCallback) { emitUnique(it, quality) }
+                        loadExtractor(link, subtitleCallback) { callback(it) }
                     }
                 }
                 hint.contains("megamax") || hint.contains("share4max") ||
