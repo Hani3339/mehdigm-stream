@@ -42,6 +42,16 @@ internal object TukTukMediaUtils {
             (path.startsWith("/iframe/", ignoreCase = true) || path.startsWith("/download/", ignoreCase = true))
     }
 
+    fun isStreamRubyHost(url: String): Boolean {
+        val host = runCatching { URI(url).host?.lowercase().orEmpty() }.getOrDefault("")
+        return listOf("streamruby", "stmruby", "rubystm", "rubyvid").any { host.contains(it) }
+    }
+
+    fun isStreamRubyProvider(url: String, serverHint: String = ""): Boolean {
+        val driver = serverHint.lowercase().filter { it.isLetterOrDigit() }
+        return driver.contains("streamruby") || isStreamRubyHost(url)
+    }
+
     fun extractMegaMaxId(url: String): String? =
         MEGAMAX_PATH_REGEX.find(runCatching { URI(url).path.orEmpty() }.getOrDefault(""))
             ?.groupValues?.getOrNull(1)

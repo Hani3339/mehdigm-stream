@@ -467,7 +467,8 @@ class TukTukMegaMaxExtractor : ExtractorApi() {
             emitDirect(link, task, quality, emitted, callback)
             return
         }
-        if (TukTukMediaUtils.isMegaMaxUrl(link, task.driver)) return
+        val isStreamRuby = TukTukMediaUtils.isStreamRubyProvider(link, task.driver)
+        if (TukTukMediaUtils.isMegaMaxUrl(link, task.driver) && !isStreamRuby) return
 
         var resolvedAny = false
         val extractedLinks = ArrayList<ExtractorLink>()
@@ -475,6 +476,12 @@ class TukTukMegaMaxExtractor : ExtractorApi() {
 
         try {
             when {
+                isStreamRuby -> {
+                    TukTukStreamRubyExtractor().getUrl(link, task.referer, subtitleCallback, wrappedCallback)
+                    if (extractedLinks.isEmpty()) {
+                        loadExtractor(link, task.referer, subtitleCallback, wrappedCallback)
+                    }
+                }
                 task.driver.contains("byse", ignoreCase = true) || link.contains("byseraguci", ignoreCase = true) ->
                     TukTukByseExtractor().getUrl(link, task.referer, subtitleCallback, wrappedCallback)
                 task.driver.contains("lulu", ignoreCase = true) || link.contains("luluvdo", ignoreCase = true) ->
