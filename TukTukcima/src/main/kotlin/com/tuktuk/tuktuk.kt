@@ -10,7 +10,8 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import org.jsoup.nodes.Element
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.CancellationException
+import org.jsoup.nodes.Document
 import java.net.URI
 import java.net.URLEncoder
 import android.util.Log
@@ -456,7 +457,19 @@ class TukTukHd : MainAPI() {
     }
 
     private data class ParsedEpisode(val episode: Episode, val explicitSeason: Boolean)
-    private data class EpisodePageBudget(var remaining: Int)
+    private data class EpisodePageTask(
+        val url: String,
+        val document: Document,
+        val referer: String,
+        val defaultSeason: Int,
+        val defaultSeasonIsExplicit: Boolean,
+    )
+    private data class EpisodePageRequest(
+        val url: String,
+        val referer: String,
+        val defaultSeason: Int,
+        val defaultSeasonIsExplicit: Boolean,
+    )
 
     private fun episodeFromLink(link: Element, defaultSeason: Int, defaultSeasonIsExplicit: Boolean): ParsedEpisode? {
         val raw = link.attr("href").ifBlank { link.attr("data-url") }.ifBlank { link.attr("data-href") }
@@ -498,7 +511,7 @@ class TukTukHd : MainAPI() {
     }
 
     private suspend fun loadTvSeriesFromShow(
-        doc: org.jsoup.nodes.Document,
+        doc: Document,
         url: String,
         title: String,
         poster: String?,
@@ -509,46 +522,101 @@ class TukTukHd : MainAPI() {
     ): LoadResponse {
         val canonicalUrl = normalizeSiteUrl(url)
         val episodesMap = linkedMapOf<String, ParsedEpisode>()
-        val visitedPages = linkedSetOf<String>()
-        val budget = EpisodePageBudget(MAX_EPISODE_PAGES)
+        val scheduledPages = linkedSetOf<String>()
+        val processedPages = linkedSetOf<String>()
         val seasonLinks = TukTukSeriesParser.findSeasonPages(doc, canonicalUrl)
             .distinctBy { TukTukSeriesParser.pageKey(it.url) }
+            .filterNot { TukTukSeriesParser.pageKey(it.url) == TukTukSeriesParser.pageKey(canonicalUrl) }
             .take(MAX_SEASONS_TO_SCAN)
-
-        // Visit individual season pages first. Their explicit season number should
-        // win over an unnumbered episode card copied onto the series landing page.
-        for (season in seasonLinks) {
-            if (budget.remaining <= 0) break
-            if (TukTukSeriesParser.pageKey(season.url) == TukTukSeriesParser.pageKey(canonicalUrl)) continue
-            try {
-                val seasonDoc = app.get(season.url, headers = siteHeaders(season.url), referer = canonicalUrl).document
-                collectEpisodePages(
-                    seasonDoc,
-                    season.url,
-                    season.number,
-                    true,
-                    episodesMap,
-                    visitedPages,
-                    budget,
-                )
-                delay(100)
-            } catch (e: Exception) {
-                Log.w("TukTuk", "Could not load season ${season.number} from ${season.url}", e)
-            }
+        val seasonRequests = seasonLinks.map { season ->
+            EpisodePageRequest(
+                url = season.url,
+                referer = canonicalUrl,
+                defaultSeason = season.number,
+                defaultSeasonIsExplicit = true,
+            )
         }
 
-        val currentSeason = extractSeasonNumber(title, canonicalUrl) ?: 1
-        collectEpisodePages(
-            doc,
-            canonicalUrl,
-            currentSeason,
-            TukTukSeriesParser.isSeasonPage(canonicalUrl, title),
-            episodesMap,
-            visitedPages,
-            budget,
-        )
-        requestedEpisode?.let { addEpisode(episodesMap, it) }
+        // Fetch season pages together instead of waiting for each request in turn.
+        // Five concurrent requests keep the page responsive without hammering the site.
+        val loadedSeasons = mapBounded(seasonRequests, MAX_CONCURRENT_EPISODE_REQUESTS) { request ->
+            fetchEpisodePage(request)?.let { document ->
+                EpisodePageTask(
+                    url = request.url,
+                    document = document,
+                    referer = request.url,
+                    defaultSeason = request.defaultSeason,
+                    defaultSeasonIsExplicit = request.defaultSeasonIsExplicit,
+                )
+            }
+        }.filterNotNull()
 
+        val currentSeason = extractSeasonNumber(title, canonicalUrl) ?: 1
+        val frontier = ArrayList<EpisodePageTask>()
+        for (page in loadedSeasons + EpisodePageTask(
+            url = canonicalUrl,
+            document = doc,
+            referer = canonicalUrl,
+            defaultSeason = currentSeason,
+            defaultSeasonIsExplicit = TukTukSeriesParser.isSeasonPage(canonicalUrl, title),
+        )) {
+            val pageKey = TukTukSeriesParser.pageKey(page.url)
+            if (scheduledPages.size >= MAX_EPISODE_PAGES) break
+            if (scheduledPages.add(pageKey)) frontier.add(page)
+        }
+
+        // Crawl pagination in parallel waves too. Season pages and their paginated
+        // episode lists are merged by URL, so duplicate cards are still emitted once.
+        while (frontier.isNotEmpty()) {
+            val nextRequests = linkedMapOf<String, EpisodePageRequest>()
+            for (page in frontier) {
+                val pageKey = TukTukSeriesParser.pageKey(page.url)
+                if (!processedPages.add(pageKey)) continue
+
+                for (link in episodeCards(page.document)) {
+                    val episode = episodeFromLink(link, page.defaultSeason, page.defaultSeasonIsExplicit) ?: continue
+                    addEpisode(episodesMap, episode)
+                }
+
+                val nextUrl = TukTukSeriesParser.nextPageUrl(page.document, page.url) ?: continue
+                val nextKey = TukTukSeriesParser.pageKey(nextUrl)
+                if (nextKey !in scheduledPages) {
+                    nextRequests.putIfAbsent(
+                        nextKey,
+                        EpisodePageRequest(
+                            url = nextUrl,
+                            referer = page.referer,
+                            defaultSeason = page.defaultSeason,
+                            defaultSeasonIsExplicit = page.defaultSeasonIsExplicit,
+                        ),
+                    )
+                }
+            }
+
+            val requestsToFetch = ArrayList<EpisodePageRequest>()
+            for ((pageKey, request) in nextRequests) {
+                if (scheduledPages.size >= MAX_EPISODE_PAGES) break
+                if (scheduledPages.add(pageKey)) requestsToFetch.add(request)
+            }
+            if (requestsToFetch.isEmpty()) break
+
+            frontier.clear()
+            frontier.addAll(
+                mapBounded(requestsToFetch, MAX_CONCURRENT_EPISODE_REQUESTS) { request ->
+                    fetchEpisodePage(request)?.let { document ->
+                        EpisodePageTask(
+                            url = request.url,
+                            document = document,
+                            referer = request.referer,
+                            defaultSeason = request.defaultSeason,
+                            defaultSeasonIsExplicit = request.defaultSeasonIsExplicit,
+                        )
+                    }
+                }.filterNotNull()
+            )
+        }
+
+        requestedEpisode?.let { addEpisode(episodesMap, it) }
         val sorted = episodesMap.values.map { it.episode }.sortedWith(
             compareBy<Episode>({ it.season ?: 1 }, { it.episode ?: Int.MAX_VALUE }, { it.name.orEmpty() })
         )
@@ -560,38 +628,17 @@ class TukTukHd : MainAPI() {
         }
     }
 
-    private suspend fun collectEpisodePages(
-        firstDocument: org.jsoup.nodes.Document,
-        firstUrl: String,
-        defaultSeason: Int,
-        defaultSeasonIsExplicit: Boolean,
-        episodes: LinkedHashMap<String, ParsedEpisode>,
-        visitedPages: MutableSet<String>,
-        budget: EpisodePageBudget,
-    ) {
-        var document = firstDocument
-        var pageUrl = firstUrl
-        while (budget.remaining > 0) {
-            val pageKey = TukTukSeriesParser.pageKey(pageUrl)
-            if (!visitedPages.add(pageKey)) return
-            budget.remaining -= 1
-
-            for (link in episodeCards(document)) {
-                val episode = episodeFromLink(link, defaultSeason, defaultSeasonIsExplicit) ?: continue
-                addEpisode(episodes, episode)
-            }
-
-            val nextUrl = TukTukSeriesParser.nextPageUrl(document, pageUrl) ?: break
-            if (TukTukSeriesParser.pageKey(nextUrl) in visitedPages) break
-            try {
-                document = app.get(nextUrl, headers = siteHeaders(nextUrl), referer = firstUrl).document
-                pageUrl = nextUrl
-                delay(100)
-            } catch (e: Exception) {
-                Log.w("TukTuk", "Could not load episode page $nextUrl", e)
-                break
-            }
-        }
+    private suspend fun fetchEpisodePage(request: EpisodePageRequest): Document? = try {
+        app.get(
+            request.url,
+            headers = siteHeaders(request.url),
+            referer = request.referer,
+        ).document
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        Log.w("TukTuk", "Could not load episode page ${request.url}", e)
+        null
     }
 
     private suspend fun loadTvSeries(
@@ -951,6 +998,7 @@ class TukTukHd : MainAPI() {
         const val PAGE_SIZE = 20
         const val MAX_SEASONS_TO_SCAN = 40
         const val MAX_EPISODE_PAGES = 80
+        const val MAX_CONCURRENT_EPISODE_REQUESTS = 5
         private val LEGACY_HOST = Regex("^https?://(?:www\\.)?tuktukhd\\.com", RegexOption.IGNORE_CASE)
         private val WWW_SITE_HOST = Regex("^https?://www\\.tuktukcinemas\\.com", RegexOption.IGNORE_CASE)
     }
