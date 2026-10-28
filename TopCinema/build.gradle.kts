@@ -13,5 +13,5 @@ cloudstream {
         "Anime"
     )
 
-    iconUrl = "https://web2.topcinema.io/wp-content/uploads/2023/05/cropped-icon-192x192.png"
+    iconUrl = "https://topcinema.ink/wp-content/uploads/2023/05/cropped-icon-192x192.png"
 }
