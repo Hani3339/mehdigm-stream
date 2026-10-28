@@ -27,13 +27,12 @@ jobs:
           java-version: '17'
           cache: gradle
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Configure Android SDK
+        run: echo "sdk.dir=$ANDROID_HOME" > local.properties
 
       - name: Run TopCinema tests and build plugin
         run: |
           chmod +x gradlew
-          echo "sdk.dir=$ANDROID_HOME" > local.properties
           ./gradlew :TopCinema:testDebugUnitTest :TopCinema:make --no-daemon --stacktrace
           test -s TopCinema/build/TopCinema.cs3
 
