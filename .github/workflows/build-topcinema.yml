@@ -1,0 +1,73 @@
+name: Build TopCinema Plugin
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'TopCinema/**'
+      - 'plugins.json'
+      - '.github/workflows/build-topcinema.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    if: "!contains(github.event.head_commit.message, '[skip ci]') && !contains(github.event.head_commit.message, '🤖')"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Configure Android SDK
+        run: echo "sdk.dir=$ANDROID_HOME" > local.properties
+
+      - name: Run TopCinema tests and build plugin
+        run: |
+          chmod +x gradlew
+          ./gradlew :TopCinema:testDebugUnitTest :TopCinema:make --no-daemon --stacktrace
+          test -s TopCinema/build/TopCinema.cs3
+
+      - name: Copy artifact and sync TopCinema manifest size
+        run: |
+          mkdir -p build
+          cp -f TopCinema/build/TopCinema.cs3 build/TopCinema.cs3
+          python3 - <<'PY'
+          import os, re
+          path = "plugins.json"
+          with open(path, "r", encoding="utf-8") as fh:
+              text = fh.read()
+          size = os.path.getsize("build/TopCinema.cs3")
+          found = [False]
+          def update(match):
+              block = match.group(0)
+              if '"internalName": "TopCinema"' not in block:
+                  return block
+              found[0] = True
+              return re.sub(r'("fileSize"\s*:\s*)\d+', rf'\g<1>{size}', block, count=1)
+          updated = re.sub(r'\{[^{}]*"internalName"\s*:\s*"TopCinema"[^{}]*\}', update, text, flags=re.S)
+          if not found[0]:
+              raise SystemExit("TopCinema manifest entry was not found")
+          with open(path, "w", encoding="utf-8") as fh:
+              fh.write(updated)
+          PY
+
+      - name: Commit and publish the built plugin
+        run: |
+          git checkout -B "$GITHUB_REF_NAME" "$GITHUB_SHA"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add -f build/TopCinema.cs3 plugins.json
+          if ! git diff --cached --quiet; then
+            git commit -m "🤖 Build TopCinema.cs3 [skip ci]"
+            git pull --rebase origin "$GITHUB_REF_NAME"
+            git push origin "$GITHUB_REF_NAME"
+          fi

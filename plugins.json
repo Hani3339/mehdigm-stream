@@ -341,7 +341,7 @@
         "iconUrl": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/TopCinema.png",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-        "fileSize": 50524,
+        "fileSize": 50517,
         "status": 1,
         "language": "ar",
         "authors": [
@@ -352,7 +352,7 @@
             "Movie",
             "Anime"
         ],
-        "version": 9,
+        "version": 10,
         "internalName": "TopCinema",
         "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/TopCinema.cs3",
         "name": "توب سينما (TopCinema)",
@@ -478,7 +478,7 @@
         "iconUrl": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/TimeMovies.png",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/mehdigm4life/mehdigm-stream",
-        "fileSize": 332552,
+        "fileSize": 332535,
         "status": 1,
         "language": "ar",
         "authors": [
@@ -492,7 +492,7 @@
             "AsianDrama",
             "Cartoon"
         ],
-        "version": 7,
+        "version": 8,
         "internalName": "TimeMovies",
         "url": "https://github.com/mehdigm4life/mehdigm-stream/raw/refs/heads/main/build/TimeMovies.cs3",
         "name": "تايم موفيز (TimeMovies)",
