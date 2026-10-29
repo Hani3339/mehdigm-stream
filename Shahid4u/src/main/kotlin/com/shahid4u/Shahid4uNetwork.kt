@@ -85,7 +85,7 @@ object Shahid4uNetwork {
     private const val KEY_USER_AGENT = "user_agent"
     private const val KEY_ACTIVE_DOMAIN = "active_domain"
 
-    const val DEFAULT_MAIN_URL = "https://shaahidd4u.net"
+    const val DEFAULT_MAIN_URL = "https://shah4u.name"
 
     private const val DEFAULT_UA =
         "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
@@ -420,9 +420,14 @@ object Shahid4uNetwork {
             runCatching {
                 val sp = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 sp.getString(KEY_USER_AGENT, null)?.takeIf { it.isNotBlank() }?.let { userAgent = it }
-                sp.getString(KEY_ACTIVE_DOMAIN, null)?.takeIf { it.startsWith("http") }?.let { mainUrl = it.trimEnd('/') }
-                sp.getString(KEY_CF_COOKIES, null)?.takeIf { it.isNotBlank() }?.let {
-                    directCookies.importCookieHeader(mainUrl, it)
+                val savedDomain = sp.getString(KEY_ACTIVE_DOMAIN, null)?.takeIf { it.startsWith("http") }
+                val savedHost = savedDomain?.toHttpUrlOrNull()?.host?.removePrefix("www.")
+                val currentHost = DEFAULT_MAIN_URL.toHttpUrlOrNull()?.host?.removePrefix("www.")
+                if (savedDomain != null && savedHost != null && savedHost == currentHost) {
+                    mainUrl = savedDomain.trimEnd('/')
+                    sp.getString(KEY_CF_COOKIES, null)?.takeIf { it.isNotBlank() }?.let {
+                        directCookies.importCookieHeader(mainUrl, it)
+                    }
                 }
             }
         }
@@ -443,7 +448,7 @@ object Shahid4uNetwork {
 
     private fun updateDomainIfRedirected(finalUrl: String) {
         val host = finalUrl.toHttpUrlOrNull()?.host?.lowercase() ?: return
-        if ((host.contains("shahid") || host.contains("shaahid")) && !host.contains("google")) {
+        if ((host.contains("shahid") || host.contains("shaahid") || host.contains("shah4u")) && !host.contains("google")) {
             val scheme = finalUrl.substringBefore("://", "https")
             val newBase = "$scheme://$host"
             if (newBase != mainUrl) {
@@ -542,7 +547,7 @@ object Shahid4uNetwork {
         if (code !in 200..299 || body.length < 1500) return false
         if (isCloudflareOrBlocked(code, body)) return false
         val low = if (body.length > 20000) body.substring(0, 20000).lowercase() else body.lowercase()
-        return low.contains("shahid4u") || low.contains("shaahidd4u") || body.contains("شاهد فور يو")
+        return low.contains("shahid4u") || low.contains("shaahidd4u") || low.contains("shah4u") || body.contains("شاهد فور يو")
     }
 
     fun isCanaryUrl(url: String?): Boolean {
@@ -691,7 +696,7 @@ object Shahid4uNetwork {
     // ── Public High-Level API ────────────────────────────────────────────────
 
     /**
-     * Fetches a `shaahidd4u.net` HTML page, automatically overcoming Cloudflare, DNS blocks,
+     * Fetches a `shah4u.name` HTML page, automatically overcoming Cloudflare, DNS blocks,
      * TLS-bound challenges, and ASN blocks, then returns a sanitized Jsoup [Document] + sticky [TransportHandle].
      */
     suspend fun getPage(

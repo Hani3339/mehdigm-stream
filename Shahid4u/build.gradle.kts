@@ -1,4 +1,4 @@
-version = 12
+version = 13
 
 cloudstream {
     description = "شاهد فور يو — إعادة بناء شاملة من الصفر مع تجاوز Cloudflare ودعم جميع سيرفرات المشاهدة والتحميل وكافة الجودات."
