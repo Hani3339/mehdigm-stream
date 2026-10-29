@@ -22,7 +22,7 @@ import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 /**
- * CloudStream provider for https://carateen.tv/ (with cartoony.net as an API fallback).
+ * CloudStream provider for https://cartoony.net/ (with carateen.tv as an API fallback).
  *
  * Cartoony currently exposes two catalogue generations. The newer `/api/sp/…`
  * API returns AES-CBC wrapped JSON, while `/api/…` still serves older show and
@@ -30,7 +30,7 @@ import javax.crypto.spec.SecretKeySpec
  * use the matching episode and playback endpoints.
  */
 class Cartoony : MainAPI() {
-    override var mainUrl = "https://carateen.tv"
+    override var mainUrl = "https://cartoony.net"
     override var name = "كرتوني (Cartoony)"
     override var lang = "ar"
     override val hasMainPage = true
@@ -144,7 +144,7 @@ class Cartoony : MainAPI() {
         get() = mainUrl.trimEnd('/')
 
     private val apiOrigins: List<String>
-        get() = listOf(baseUrl, LEGACY_MAIN_URL).distinct()
+        get() = listOf(baseUrl, FALLBACK_MAIN_URL).distinct()
 
     private fun requestHeaders(origin: String): Map<String, String> = mapOf(
         "User-Agent" to MOBILE_USER_AGENT,
@@ -955,7 +955,7 @@ class Cartoony : MainAPI() {
         private const val REQUEST_TIMEOUT_MS = 15_000L
         private const val REQUEST_TIMEOUT_SECONDS = 15L
         private const val PAGE_SIZE = 30
-        private const val LEGACY_MAIN_URL = "https://cartoony.net"
+        private const val FALLBACK_MAIN_URL = "https://carateen.tv"
         private const val MOBILE_USER_AGENT =
             "Mozilla/5.0 (Linux; Android 12; Mobile) AppleWebKit/537.36 " +
                 "(KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36"
