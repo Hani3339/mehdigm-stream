@@ -1,7 +1,6 @@
 {
-  "name": "الوجهة العربية (Mehdi GM)",
-  "description": "بوابتك العربية الأولى لمشاهدة الأفلام والمسلسلات والأنمي والكرتون — بجودة عالية، بدون إعلانات، ومن أشهر مواقع البث العربي.",
-  "iconUrl": "https://raw.githubusercontent.com/mehdigm4life/mehdigm-stream/refs/heads/Images/images/mehdigm.jpg",
+  "name": "Mehdi Test",
+  "description": "Test",
   "manifestVersion": 1,
-  "pluginLists": ["https://raw.githubusercontent.com/mehdigm4life/mehdigm-stream/main/plugins.json"]
+  "pluginLists": ["https://raw.githubusercontent.com/hani3339/mehdigm-stream/main/plugins.json"]
 }
