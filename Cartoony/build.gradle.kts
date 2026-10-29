@@ -1,4 +1,4 @@
-version = 3
+version = 4
 
 cloudstream {
     description = "مسلسلات وأفلام الكرتون والأنمي من موقع كرتوني"
@@ -15,7 +15,7 @@ cloudstream {
         "Cartoon"
     )
 
-    iconUrl = "https://carateen.tv/assets/img/logo.webp?brand=main"
+    iconUrl = "https://cartoony.net/assets/img/logo.webp?brand=main"
 }
 
 android {
