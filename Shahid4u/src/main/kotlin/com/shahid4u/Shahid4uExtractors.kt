@@ -50,9 +50,9 @@ import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 /**
- * Comprehensive suite of modern video & download host extractors for Shahid4u (v12).
+ * Comprehensive suite of modern video & download host extractors for Shahid4u (v13).
  *
- * Covers every active watch & multi-quality download provider on `shaahidd4u.net`:
+ * Covers every active watch & multi-quality download provider on `shah4u.name`:
  *  - Vinovo (`vinovo.to`, `vinovo.si`) — `/e/<id>` & `/d/<id>` -> `/api/file/url/<id>` MP4/HLS
  *  - Vidaraa / Vidara (`vidaraa.cc`, `vidara.so`, `vidara.to`) — `/e/<id>` & `/v/<id>` -> `/api/stream` HLS
  *  - EarnVids / FastVid (`fastvid.cam`, `dingtezuni.com`, `earnvids.*`, `vidhide.*`, `dintezuvio.*`, `minochinos.*`)
