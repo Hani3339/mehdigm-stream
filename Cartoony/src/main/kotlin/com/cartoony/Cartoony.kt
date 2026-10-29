@@ -22,7 +22,7 @@ import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 /**
- * CloudStream provider for https://cartoony.net/.
+ * CloudStream provider for https://carateen.tv/ (with cartoony.net as an API fallback).
  *
  * Cartoony currently exposes two catalogue generations. The newer `/api/sp/…`
  * API returns AES-CBC wrapped JSON, while `/api/…` still serves older show and
@@ -30,7 +30,7 @@ import javax.crypto.spec.SecretKeySpec
  * use the matching episode and playback endpoints.
  */
 class Cartoony : MainAPI() {
-    override var mainUrl = "https://cartoony.net"
+    override var mainUrl = "https://carateen.tv"
     override var name = "كرتوني (Cartoony)"
     override var lang = "ar"
     override val hasMainPage = true
@@ -119,6 +119,12 @@ class Cartoony : MainAPI() {
         val url: String,
         val label: String,
         val qualityHint: String? = null,
+        val baseOrigin: String? = null,
+    )
+
+    private data class ApiPayload(
+        val text: String,
+        val origin: String,
     )
 
     private data class PendingJson(
@@ -137,21 +143,22 @@ class Cartoony : MainAPI() {
     private val baseUrl: String
         get() = mainUrl.trimEnd('/')
 
-    private val requestHeaders: Map<String, String>
-        get() = mapOf(
-            "User-Agent" to MOBILE_USER_AGENT,
-            "Accept" to "application/json, text/plain, */*",
-            "Accept-Language" to "ar,en-US;q=0.9,en;q=0.8",
-            "Referer" to "$baseUrl/",
-            "Origin" to baseUrl,
-        )
+    private val apiOrigins: List<String>
+        get() = listOf(baseUrl, LEGACY_MAIN_URL).distinct()
 
-    private val mediaHeaders: Map<String, String>
-        get() = mapOf(
-            "User-Agent" to MOBILE_USER_AGENT,
-            "Referer" to "$baseUrl/",
-            "Origin" to baseUrl,
-        )
+    private fun requestHeaders(origin: String): Map<String, String> = mapOf(
+        "User-Agent" to MOBILE_USER_AGENT,
+        "Accept" to "application/json, text/plain, */*",
+        "Accept-Language" to "ar,en-US;q=0.9,en;q=0.8",
+        "Referer" to "$origin/",
+        "Origin" to origin,
+    )
+
+    private fun mediaHeaders(origin: String): Map<String, String> = mapOf(
+        "User-Agent" to MOBILE_USER_AGENT,
+        "Referer" to "$origin/",
+        "Origin" to origin,
+    )
 
     // The site uses this client-side AES key to unwrap its public API responses;
     // it is not a user credential or an account/session token.
@@ -309,16 +316,19 @@ class Cartoony : MainAPI() {
         }
 
         suspend fun resolve(candidate: StreamCandidate) {
-            val streamUrl = normalizeStreamUrl(candidate.url) ?: return
+            val origin = candidate.baseOrigin?.trimEnd('/') ?: baseUrl
+            val referer = "$origin/"
+            val headers = mediaHeaders(origin)
+            val streamUrl = normalizeStreamUrl(candidate.url, origin) ?: return
             when {
                 isHlsUrl(streamUrl) -> {
                     val expanded = try {
                         M3u8Helper.generateM3u8(
                             source = name,
                             streamUrl = streamUrl,
-                            referer = "$baseUrl/",
+                            referer = referer,
                             quality = qualityFromHint(candidate.qualityHint),
-                            headers = mediaHeaders,
+                            headers = headers,
                         )
                     } catch (cancelled: CancellationException) {
                         throw cancelled
@@ -331,8 +341,8 @@ class Cartoony : MainAPI() {
                     } else {
                         emitOnce(
                             newExtractorLink(name, candidate.label, streamUrl, ExtractorLinkType.M3U8) {
-                                this.referer = "$baseUrl/"
-                                this.headers = mediaHeaders
+                                this.referer = referer
+                                this.headers = headers
                                 this.quality = qualityFromHint(candidate.qualityHint)
                             },
                         )
@@ -342,8 +352,8 @@ class Cartoony : MainAPI() {
                 isDirectVideoUrl(streamUrl) -> {
                     emitOnce(
                         newExtractorLink(name, candidate.label, streamUrl, ExtractorLinkType.VIDEO) {
-                            this.referer = "$baseUrl/"
-                            this.headers = mediaHeaders
+                            this.referer = referer
+                            this.headers = headers
                             this.quality = qualityFromHint(candidate.qualityHint)
                         },
                     )
@@ -351,7 +361,7 @@ class Cartoony : MainAPI() {
 
                 else -> {
                     try {
-                        if (loadExtractor(streamUrl, "$baseUrl/", subtitleCallback, ::emitOnce)) {
+                        if (loadExtractor(streamUrl, referer, subtitleCallback, ::emitOnce)) {
                             found = true
                         }
                     } catch (cancelled: CancellationException) {
@@ -365,10 +375,10 @@ class Cartoony : MainAPI() {
 
         if (ref.source == CatalogSource.SP) {
             val response = requestSpEpisodeLink(ref.episodeId, ref.showId)
-            if (!response.isNullOrBlank()) {
-                val result = runCatching { JSONObject(response) }.getOrNull()
+            if (response != null) {
+                val result = runCatching { JSONObject(response.text) }.getOrNull()
                 if (result != null && result.optBoolean("success", true)) {
-                    collectStreamCandidates(result).forEach { resolve(it) }
+                    collectStreamCandidates(result, response.origin).forEach { resolve(it) }
 
                     // This unsigned CDN path is only a fallback; prefer the fresh,
                     // signed `link` returned by the API whenever one is present.
@@ -383,6 +393,10 @@ class Cartoony : MainAPI() {
                             )
                         }
                     }
+                } else if (result == null) {
+                    normalizeStreamUrl(response.text, response.origin)?.let {
+                        resolve(StreamCandidate(it, "Cartoony SP", baseOrigin = response.origin))
+                    }
                 }
             }
 
@@ -391,13 +405,13 @@ class Cartoony : MainAPI() {
             }
         } else {
             val legacyResponse = requestLegacyEpisode(ref.episodeId, ref.showId)
-            if (!legacyResponse.isNullOrBlank()) {
-                val result = runCatching { JSONObject(legacyResponse) }.getOrNull()
+            if (legacyResponse != null) {
+                val result = runCatching { JSONObject(legacyResponse.text) }.getOrNull()
                 if (result != null) {
-                    collectStreamCandidates(result).forEach { resolve(it) }
+                    collectStreamCandidates(result, legacyResponse.origin).forEach { resolve(it) }
                 } else {
-                    normalizeStreamUrl(legacyResponse)?.let {
-                        resolve(StreamCandidate(it, "Cartoony Legacy"))
+                    normalizeStreamUrl(legacyResponse.text, legacyResponse.origin)?.let {
+                        resolve(StreamCandidate(it, "Cartoony Legacy", baseOrigin = legacyResponse.origin))
                     }
                 }
             }
@@ -432,18 +446,20 @@ class Cartoony : MainAPI() {
 
     private suspend fun fetchShows(source: CatalogSource): List<Show> {
         val path = if (source == CatalogSource.SP) "sp/tvshows" else "tvshows"
-        val text = apiGet(path) ?: return emptyList()
-        val array = parseArray(text, "shows", "tvshows", "results", "data") ?: return emptyList()
+        val payload = apiGet(path) { response ->
+            hasItemsWithId(parseArray(response.text, "shows", "tvshows", "results", "data"), "id")
+        } ?: return emptyList()
+        val array = parseArray(payload.text, "shows", "tvshows", "results", "data") ?: return emptyList()
         return (0 until array.length()).mapNotNull { index ->
             val objectAt = array.optJSONObject(index) ?: return@mapNotNull null
             when (source) {
-                CatalogSource.SP -> mapSpShow(objectAt)
-                CatalogSource.LEGACY -> mapLegacyShow(objectAt)
+                CatalogSource.SP -> mapSpShow(objectAt, payload.origin)
+                CatalogSource.LEGACY -> mapLegacyShow(objectAt, payload.origin)
             }
         }
     }
 
-    private fun mapSpShow(obj: JSONObject): Show? {
+    private fun mapSpShow(obj: JSONObject, origin: String): Show? {
         val id = jsonInt(obj, "id")?.takeIf { it > 0 } ?: return null
         val title = jsonString(obj, "name", "title", "pref") ?: "غير معنون"
         return Show(
@@ -451,7 +467,7 @@ class Cartoony : MainAPI() {
             source = CatalogSource.SP,
             title = title,
             plot = jsonString(obj, "pref", "description"),
-            poster = imageUrl(jsonString(obj, "cover_full_path", "cover", "poster"), "posters"),
+            poster = imageUrl(jsonString(obj, "cover_full_path", "cover", "poster"), "posters", origin),
             isMovie = jsonFlag(obj, "is_movie"),
             isNew = jsonFlag(obj, "is_new"),
             isPopular = jsonFlag(obj, "is_popular"),
@@ -466,7 +482,7 @@ class Cartoony : MainAPI() {
         )
     }
 
-    private fun mapLegacyShow(obj: JSONObject): Show? {
+    private fun mapLegacyShow(obj: JSONObject, origin: String): Show? {
         val id = jsonInt(obj, "id")?.takeIf { it > 0 } ?: return null
         val category = jsonString(obj, "category").orEmpty()
         val normalizedCategory = normalizeTitle(category)
@@ -479,7 +495,7 @@ class Cartoony : MainAPI() {
             source = CatalogSource.LEGACY,
             title = jsonString(obj, "title", "name") ?: "غير معنون",
             plot = jsonString(obj, "description", "plot"),
-            poster = imageUrl(jsonString(obj, "poster_cover", "poster"), "posters"),
+            poster = imageUrl(jsonString(obj, "poster_cover", "poster"), "posters", origin),
             isMovie = isMovie,
             tags = parseTags(category),
             rating = rating100(jsonNumber(obj, "rating")),
@@ -491,8 +507,10 @@ class Cartoony : MainAPI() {
 
     private suspend fun getEpisodes(source: CatalogSource, showId: Int): List<EpisodeItem> {
         val prefix = if (source == CatalogSource.SP) "sp/" else ""
-        val text = apiGet("${prefix}episodes?id=$showId") ?: return emptyList()
-        val array = parseArray(text, "episodes", "results", "data") ?: return emptyList()
+        val payload = apiGet("${prefix}episodes?id=$showId") { response ->
+            hasItemsWithId(parseArray(response.text, "episodes", "results", "data"), "id", "episode_id")
+        } ?: return emptyList()
+        val array = parseArray(payload.text, "episodes", "results", "data") ?: return emptyList()
 
         return (0 until array.length()).mapNotNull { index ->
             val obj = array.optJSONObject(index) ?: return@mapNotNull null
@@ -504,15 +522,17 @@ class Cartoony : MainAPI() {
                 id = id,
                 title = title,
                 number = number,
-                poster = imageUrl(jsonString(obj, "cover_full_path", "cover", "thumbnail"), "thumbnails"),
+                poster = imageUrl(jsonString(obj, "cover_full_path", "cover", "thumbnail"), "thumbnails", payload.origin),
                 videoId = jsonString(obj, "video_id")?.takeIf { isSafeVideoId(it) },
             )
         }.sortedWith(compareBy<EpisodeItem> { it.number ?: Int.MAX_VALUE }.thenBy { it.id })
     }
 
     private suspend fun recentShows(catalogueBySourceId: Map<String, Show>): List<Show> {
-        val text = apiGet("sp/recentEpisodes") ?: return emptyList()
-        val array = parseArray(text, "episodes", "results", "data") ?: return emptyList()
+        val payload = apiGet("sp/recentEpisodes") { response ->
+            hasItemsWithId(parseArray(response.text, "episodes", "results", "data"), "tv_series_id")
+        } ?: return emptyList()
+        val array = parseArray(payload.text, "episodes", "results", "data") ?: return emptyList()
         val result = linkedMapOf<Int, Show>()
 
         for (index in 0 until array.length()) {
@@ -524,23 +544,32 @@ class Cartoony : MainAPI() {
                 id = showId,
                 source = CatalogSource.SP,
                 title = jsonString(obj, "name") ?: "غير معنون",
-                poster = imageUrl(jsonString(obj, "cover_full_path", "cover"), "thumbnails"),
+                poster = imageUrl(jsonString(obj, "cover_full_path", "cover"), "thumbnails", payload.origin),
             )
         }
         return result.values.toList()
     }
 
-    private suspend fun apiGet(path: String): String? =
-        requestText("$baseUrl/api/${path.trimStart('/')}")
+    private suspend fun apiGet(
+        path: String,
+        isUsable: (ApiPayload) -> Boolean = { it.text.isNotBlank() },
+    ): ApiPayload? {
+        for (origin in apiOrigins) {
+            val text = requestText("$origin/api/${path.trimStart('/')}", origin) ?: continue
+            val payload = ApiPayload(text, origin)
+            if (isUsable(payload)) return payload
+        }
+        return null
+    }
 
-    private suspend fun requestText(url: String): String? = withTimeoutOrNull(REQUEST_TIMEOUT_MS) {
+    private suspend fun requestText(url: String, origin: String): String? = withTimeoutOrNull(REQUEST_TIMEOUT_MS) {
         try {
-            val response = app.get(url, headers = requestHeaders, timeout = REQUEST_TIMEOUT_SECONDS)
+            val response = app.get(url, headers = requestHeaders(origin), timeout = REQUEST_TIMEOUT_SECONDS)
             if (response.code !in 200..299) {
                 Log.w(TAG, "Cartoony request failed (HTTP ${response.code})")
                 null
             } else {
-                decryptEnvelope(response.text)
+                decryptEnvelope(response.text)?.takeIf { it.isNotBlank() }
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -550,54 +579,69 @@ class Cartoony : MainAPI() {
         }
     }
 
-    private suspend fun requestSpEpisodeLink(episodeId: Int, showId: Int): String? =
-        withTimeoutOrNull(REQUEST_TIMEOUT_MS) {
-            try {
-                val response = app.post(
-                    "$baseUrl/api/sp/episode/link",
-                    headers = requestHeaders,
-                    data = mapOf(
-                        "episodeId" to episodeId.toString(),
-                        "showId" to showId.toString(),
-                    ),
-                    timeout = REQUEST_TIMEOUT_SECONDS,
-                )
-                if (response.code !in 200..299) {
-                    Log.w(TAG, "Cartoony playback request failed (HTTP ${response.code})")
+    private suspend fun requestSpEpisodeLink(episodeId: Int, showId: Int): ApiPayload? {
+        for (origin in apiOrigins) {
+            val text = withTimeoutOrNull(REQUEST_TIMEOUT_MS) {
+                try {
+                    val response = app.post(
+                        "$origin/api/sp/episode/link",
+                        headers = requestHeaders(origin),
+                        data = mapOf(
+                            "episodeId" to episodeId.toString(),
+                            "showId" to showId.toString(),
+                        ),
+                        timeout = REQUEST_TIMEOUT_SECONDS,
+                    )
+                    if (response.code !in 200..299) {
+                        Log.w(TAG, "Cartoony playback request failed (HTTP ${response.code})")
+                        null
+                    } else {
+                        decryptEnvelope(response.text)?.takeIf { it.isNotBlank() }
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    Log.w(TAG, "Cartoony playback request failed: ${error.message}")
                     null
-                } else {
-                    decryptEnvelope(response.text)
                 }
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (error: Exception) {
-                Log.w(TAG, "Cartoony playback request failed: ${error.message}")
-                null
-            }
-        }
+            } ?: continue
 
-    private suspend fun requestLegacyEpisode(episodeId: Int, showId: Int): String? {
+            val payload = ApiPayload(text, origin)
+            val result = runCatching { JSONObject(text) }.getOrNull()
+            if (result == null) {
+                if (normalizeStreamUrl(text, origin) != null) return payload
+                continue
+            }
+            val hasPlayback = collectStreamCandidates(result, origin).isNotEmpty() ||
+                jsonString(result, "cdn_stream_private_id")?.let { SAFE_PATH_ID.matches(it) } == true
+            if (result.optBoolean("success", true) && hasPlayback) return payload
+        }
+        return null
+    }
+
+    private suspend fun requestLegacyEpisode(episodeId: Int, showId: Int): ApiPayload? {
         val paths = listOf(
             "episode?episodeId=$episodeId&showId=$showId",
             "episode?episodeId=$episodeId",
         )
         for (path in paths) {
-            val response = apiGet(path) ?: continue
-            val objectResponse = runCatching { JSONObject(response) }.getOrNull()
-            if (objectResponse == null || collectStreamCandidates(objectResponse).isNotEmpty()) {
-                return response
-            }
+            val response = apiGet(path) { payload ->
+                val objectResponse = runCatching { JSONObject(payload.text) }.getOrNull()
+                objectResponse?.let { collectStreamCandidates(it, payload.origin).isNotEmpty() }
+                    ?: (normalizeStreamUrl(payload.text, payload.origin) != null)
+            } ?: continue
+            return response
         }
         return null
     }
 
-    private fun collectStreamCandidates(root: JSONObject): List<StreamCandidate> {
+    private fun collectStreamCandidates(root: JSONObject, origin: String): List<StreamCandidate> {
         val candidates = linkedMapOf<String, StreamCandidate>()
         val pending = ArrayDeque<PendingJson>()
         pending.add(PendingJson(root, "Cartoony", 0))
 
         fun addCandidate(raw: String?, owner: JSONObject, fallbackLabel: String, sourceKey: String) {
-            val url = normalizeStreamUrl(raw) ?: return
+            val url = normalizeStreamUrl(raw, origin) ?: return
             val serverLabel = jsonString(owner, "server", "server_name", "source_name", "label")
                 ?.takeUnless { it.startsWith("http", ignoreCase = true) }
             val downloadLabel = if (
@@ -605,7 +649,7 @@ class Cartoony : MainAPI() {
             ) " — تنزيل" else ""
             val label = (serverLabel ?: fallbackLabel) + downloadLabel
             val quality = jsonString(owner, "quality", "resolution")
-            if (!candidates.containsKey(url)) candidates[url] = StreamCandidate(url, label, quality)
+            if (!candidates.containsKey(url)) candidates[url] = StreamCandidate(url, label, quality, origin)
         }
 
         val urlKeys = listOf(
@@ -748,6 +792,13 @@ class Cartoony : MainAPI() {
         return null
     }
 
+    private fun hasItemsWithId(array: JSONArray?, vararg idKeys: String): Boolean {
+        if (array == null) return false
+        return (0 until array.length()).any { index ->
+            array.optJSONObject(index)?.let { jsonInt(it, *idKeys)?.let { id -> id > 0 } } == true
+        }
+    }
+
     private fun decryptEnvelope(raw: String): String? {
         val trimmed = raw.trim()
         if (trimmed.isEmpty()) return null
@@ -783,24 +834,26 @@ class Cartoony : MainAPI() {
         return output
     }
 
-    private fun imageUrl(raw: String?, folder: String): String? {
+    private fun imageUrl(raw: String?, folder: String, origin: String = baseUrl): String? {
         val value = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val normalizedOrigin = origin.trimEnd('/')
         return when {
             value.startsWith("https://", ignoreCase = true) || value.startsWith("http://", ignoreCase = true) -> value
             value.startsWith("//") -> "https:$value"
-            value.startsWith("/assets/", ignoreCase = true) -> "$baseUrl$value"
-            value.startsWith("assets/", ignoreCase = true) -> "$baseUrl/$value"
-            value.startsWith("/") -> "$baseUrl$value"
-            else -> "$baseUrl/assets/img/$folder/$value"
+            value.startsWith("/assets/", ignoreCase = true) -> "$normalizedOrigin$value"
+            value.startsWith("assets/", ignoreCase = true) -> "$normalizedOrigin/$value"
+            value.startsWith("/") -> "$normalizedOrigin$value"
+            else -> "$normalizedOrigin/assets/img/$folder/$value"
         }
     }
 
-    private fun normalizeStreamUrl(raw: String?): String? {
+    private fun normalizeStreamUrl(raw: String?, origin: String = baseUrl): String? {
         val value = raw?.trim()?.replace("&amp;", "&")?.takeIf { it.isNotEmpty() } ?: return null
+        val normalizedOrigin = origin.trimEnd('/')
         return when {
             value.startsWith("https://", ignoreCase = true) || value.startsWith("http://", ignoreCase = true) -> value
             value.startsWith("//") -> "https:$value"
-            value.startsWith("/") -> "$baseUrl$value"
+            value.startsWith("/") -> "$normalizedOrigin$value"
             else -> null
         }
     }
@@ -902,6 +955,7 @@ class Cartoony : MainAPI() {
         private const val REQUEST_TIMEOUT_MS = 15_000L
         private const val REQUEST_TIMEOUT_SECONDS = 15L
         private const val PAGE_SIZE = 30
+        private const val LEGACY_MAIN_URL = "https://cartoony.net"
         private const val MOBILE_USER_AGENT =
             "Mozilla/5.0 (Linux; Android 12; Mobile) AppleWebKit/537.36 " +
                 "(KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36"
