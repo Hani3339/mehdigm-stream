@@ -2,5 +2,5 @@
   "name": "Mehdi Test",
   "description": "Test",
   "manifestVersion": 1,
-  "pluginLists": ["https://raw.githubusercontent.com/hani3339/mehdigm-stream/main/plugins.json"]
+  "pluginLists": ["https://raw.githubusercontent.com/hani3339/mehdigm-stream/main/plugins.json?v=2"]
 }
