@@ -1,0 +1,6 @@
+{
+  "name": "AllForU Test",
+  "description": "Test",
+  "manifestVersion": 1,
+  "pluginLists": ["https://raw.githubusercontent.com/hani3339/mehdigm-stream/main/allforu-plugins.json"]
+}
