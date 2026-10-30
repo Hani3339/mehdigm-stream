@@ -1,0 +1,30 @@
+[
+  {
+    "apiVersion": 1,
+    "repositoryUrl": "https://github.com/RVRBEAST76/allforu-repo",
+    "fileSize": 54016,
+    "status": 1,
+    "language": "en",
+    "authors": ["AllForU"],
+    "tvTypes": ["Movie", "TvSeries"],
+    "version": 79,
+    "internalName": "MovieBox",
+    "url": "https://raw.githubusercontent.com/RVRBEAST76/allforu-repo/builds/MovieBox-v79.cs3",
+    "name": "MovieBox",
+    "description": "MovieBox"
+  },
+  {
+    "apiVersion": 1,
+    "repositoryUrl": "https://github.com/RVRBEAST76/allforu-repo",
+    "fileSize": 49555,
+    "status": 1,
+    "language": "en",
+    "authors": ["AllForU"],
+    "tvTypes": ["AnimeMovie", "Anime", "OVA"],
+    "version": 29,
+    "internalName": "Reanime",
+    "url": "https://raw.githubusercontent.com/RVRBEAST76/allforu-repo/builds/Reanime-v29.cs3",
+    "name": "Re:ANIME",
+    "description": "Re:ANIME"
+  }
+]
